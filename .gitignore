@@ -1,0 +1,42 @@
+# CRITICAL: Never commit secrets
+.env
+*.env.local
+*.env.production
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+.coverage
+htmlcov/
+
+# Docker
+docker/data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs (never commit logs)
+logs/
+*.log
+
+# Data
+data/
+*.parquet
+*.csv
+*.db
+
+.venv/
+__pycache__/
+.env
