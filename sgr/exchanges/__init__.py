@@ -27,11 +27,15 @@ from sgr.exchanges.base import (
 from sgr.exchanges.binance import BinanceAdapter
 from sgr.exchanges.factory import ExchangeFactory, ExchangePool, get_exchange_pool
 from sgr.exchanges.pionex import PionexAdapter
+from sgr.exchanges.pionex_client import PionexAPIError, PionexClient, PionexHTTPError
 
 __all__ = [
     "ExchangeAdapter",
     "BinanceAdapter",
     "PionexAdapter",
+    "PionexClient",
+    "PionexAPIError",
+    "PionexHTTPError",
     "ExchangeFactory",
     "ExchangePool",
     "get_exchange_pool",
