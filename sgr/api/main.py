@@ -62,6 +62,8 @@ class AppState:
     strategy_engine: Any = None
     risk_engine: Any = None
     portfolio_engine: Any = None
+    execution_engine: Any = None
+    orchestrator: Any = None
     feature_store: Any = None
 
 
@@ -151,6 +153,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await strategy_engine.start()
     app.state.strategy_engine = strategy_engine
 
+    # 8b. Execution Engine + Trading Orchestrator
+    # Verdrahtet den zuvor nicht verbundenen Pfad Signal -> Risk -> Order ->
+    # Portfolio. Siehe sgr/orchestrator/engine.py für die Architekturbegründung.
+    from sgr.execution.engine import ExecutionEngine
+    from sgr.orchestrator.engine import TradingOrchestrator
+
+    execution_engine = ExecutionEngine(pool, config.trading_mode)
+    app.state.execution_engine = execution_engine
+
+    orchestrator = TradingOrchestrator(
+        strategy_engine=strategy_engine,
+        risk_engine=risk_engine,
+        execution_engine=execution_engine,
+        portfolio_engine=portfolio_engine,
+        feature_store=feature_store,
+        trading_mode=config.trading_mode,
+    )
+    app.state.orchestrator = orchestrator
+
     # 9. Market Data Engine
     from sgr.market_data.engine import MarketDataEngine
 
@@ -160,6 +181,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         md_engine.subscribe("BTC/USDT", ExchangeID.PIONEX, ["1h", "4h"])
         md_engine.subscribe("ETH/USDT", ExchangeID.PIONEX, ["1h"])
         await md_engine.start()
+
+        # Orchestrator automatisch bei jedem neuen Candle auslösen
+        # (additiver Event-Trigger; run_cycle() bleibt auch direkt aufrufbar,
+        # z.B. für manuelle Trigger oder Tests, ohne Redis-Abhängigkeit)
+        from sgr.core.types import CandleEvent
+
+        bus.subscribe(
+            CandleEvent,
+            orchestrator.on_candle_event,
+            consumer_group="orchestrator",
+            consumer_name="orchestrator-1",
+        )
     app.state.market_data_engine = md_engine
 
     log.info("sgr.api.ready", host=config.api.host, port=config.api.port)
@@ -246,7 +279,17 @@ def create_app() -> FastAPI:
         )
 
     # Mount Routers
-    from sgr.api.routers import health, market, orders, portfolio, risk, strategy, system, websocket
+    from sgr.api.routers import (
+        health,
+        market,
+        orders,
+        portfolio,
+        risk,
+        strategy,
+        system,
+        trading,
+        websocket,
+    )
     from sgr.saas.routers import apikey_router, auth_router, billing_router
 
     app.include_router(health.router, tags=["health"])
@@ -256,6 +299,7 @@ def create_app() -> FastAPI:
     app.include_router(strategy.router, prefix="/api/v1/strategy", tags=["strategy"])
     app.include_router(orders.router, prefix="/api/v1/orders", tags=["orders"])
     app.include_router(system.router, prefix="/api/v1/system", tags=["system"])
+    app.include_router(trading.router, prefix="/api/v1/trading", tags=["trading"])
     app.include_router(websocket.router, prefix="/ws", tags=["websocket"])
 
     # SaaS Layer

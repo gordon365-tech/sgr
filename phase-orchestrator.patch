@@ -1,0 +1,1165 @@
+diff --git a/sgr/api/dependencies.py b/sgr/api/dependencies.py
+index 5ab2895..097e6c3 100644
+--- a/sgr/api/dependencies.py
++++ b/sgr/api/dependencies.py
+@@ -26,6 +26,7 @@ from sgr.core.config import get_config
+ from sgr.core.logging import get_logger
+ from sgr.core.types import TradingMode
+ from sgr.market_data.feature_store import FeatureStore
++from sgr.orchestrator.engine import TradingOrchestrator
+ from sgr.portfolio.engine import PortfolioEngine
+ from sgr.risk.engine import RiskEngine
+ from sgr.strategy.engine import StrategyEngine
+@@ -168,3 +169,10 @@ def get_exchange_pool(request: Request):  # type: ignore[return]
+     if pool is None:
+         raise HTTPException(status_code=503, detail="Exchange pool not initialized")
+     return pool
++
++
++def get_orchestrator(request: Request) -> TradingOrchestrator:
++    orchestrator: TradingOrchestrator | None = getattr(request.app.state, "orchestrator", None)
++    if orchestrator is None:
++        raise HTTPException(status_code=503, detail="Trading orchestrator not initialized")
++    return orchestrator
+diff --git a/sgr/api/main.py b/sgr/api/main.py
+index 2a43f7f..9e79354 100644
+--- a/sgr/api/main.py
++++ b/sgr/api/main.py
+@@ -62,6 +62,8 @@ class AppState:
+     strategy_engine: Any = None
+     risk_engine: Any = None
+     portfolio_engine: Any = None
++    execution_engine: Any = None
++    orchestrator: Any = None
+     feature_store: Any = None
+ 
+ 
+@@ -151,6 +153,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+     await strategy_engine.start()
+     app.state.strategy_engine = strategy_engine
+ 
++    # 8b. Execution Engine + Trading Orchestrator
++    # Verdrahtet den zuvor nicht verbundenen Pfad Signal -> Risk -> Order ->
++    # Portfolio. Siehe sgr/orchestrator/engine.py für die Architekturbegründung.
++    from sgr.execution.engine import ExecutionEngine
++    from sgr.orchestrator.engine import TradingOrchestrator
++
++    execution_engine = ExecutionEngine(pool, config.trading_mode)
++    app.state.execution_engine = execution_engine
++
++    orchestrator = TradingOrchestrator(
++        strategy_engine=strategy_engine,
++        risk_engine=risk_engine,
++        execution_engine=execution_engine,
++        portfolio_engine=portfolio_engine,
++        feature_store=feature_store,
++        trading_mode=config.trading_mode,
++    )
++    app.state.orchestrator = orchestrator
++
+     # 9. Market Data Engine
+     from sgr.market_data.engine import MarketDataEngine
+ 
+@@ -160,6 +181,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+         md_engine.subscribe("BTC/USDT", ExchangeID.PIONEX, ["1h", "4h"])
+         md_engine.subscribe("ETH/USDT", ExchangeID.PIONEX, ["1h"])
+         await md_engine.start()
++
++        # Orchestrator automatisch bei jedem neuen Candle auslösen
++        # (additiver Event-Trigger; run_cycle() bleibt auch direkt aufrufbar,
++        # z.B. für manuelle Trigger oder Tests, ohne Redis-Abhängigkeit)
++        from sgr.core.types import CandleEvent
++
++        bus.subscribe(
++            CandleEvent,
++            orchestrator.on_candle_event,
++            consumer_group="orchestrator",
++            consumer_name="orchestrator-1",
++        )
+     app.state.market_data_engine = md_engine
+ 
+     log.info("sgr.api.ready", host=config.api.host, port=config.api.port)
+@@ -246,7 +279,17 @@ def create_app() -> FastAPI:
+         )
+ 
+     # Mount Routers
+-    from sgr.api.routers import health, market, orders, portfolio, risk, strategy, system, websocket
++    from sgr.api.routers import (
++        health,
++        market,
++        orders,
++        portfolio,
++        risk,
++        strategy,
++        system,
++        trading,
++        websocket,
++    )
+     from sgr.saas.routers import apikey_router, auth_router, billing_router
+ 
+     app.include_router(health.router, tags=["health"])
+@@ -256,6 +299,7 @@ def create_app() -> FastAPI:
+     app.include_router(strategy.router, prefix="/api/v1/strategy", tags=["strategy"])
+     app.include_router(orders.router, prefix="/api/v1/orders", tags=["orders"])
+     app.include_router(system.router, prefix="/api/v1/system", tags=["system"])
++    app.include_router(trading.router, prefix="/api/v1/trading", tags=["trading"])
+     app.include_router(websocket.router, prefix="/ws", tags=["websocket"])
+ 
+     # SaaS Layer
+diff --git a/sgr/api/routers/trading.py b/sgr/api/routers/trading.py
+new file mode 100644
+index 0000000..9022269
+--- /dev/null
++++ b/sgr/api/routers/trading.py
+@@ -0,0 +1,67 @@
++"""
++SGR Trading Router
++===================
++Manuelles Auslösen eines Trading-Zyklus über den Orchestrator.
++
++Sicherheitsmechanismus für Live Trading:
++    Ein Aufruf mit trading_mode == LIVE wird abgelehnt, sofern nicht
++    explizit confirm_live=true im Request-Body gesetzt ist. Das verhindert,
++    dass ein versehentlicher/automatisierter Client-Call in Live einen
++    echten Trade auslöst. Dry Run und Paper Trading benötigen dieses
++    Flag nicht - sie haben laut Projektgrundsatz ohnehin Vorrang und
++    sind risikofrei.
++"""
++
++from __future__ import annotations
++
++from typing import Annotated
++
++from fastapi import APIRouter, Depends, HTTPException
++from pydantic import BaseModel
++
++from sgr.api.dependencies import TokenData, get_orchestrator, require_admin
++from sgr.core.config import get_config
++from sgr.core.logging import get_logger
++from sgr.core.types import MarketRegime, TradingCycleResult, TradingMode
++from sgr.orchestrator.engine import TradingOrchestrator
++
++log = get_logger(__name__)
++
++router = APIRouter()
++
++
++class TriggerCycleRequest(BaseModel):
++    symbol_key: str
++    timeframe: str
++    regime: MarketRegime = MarketRegime.UNKNOWN
++    confirm_live: bool = False
++
++
++@router.post("/cycle", response_model=TradingCycleResult)
++async def trigger_cycle(
++    body: TriggerCycleRequest,
++    user: Annotated[TokenData, Depends(require_admin)],
++    orchestrator: Annotated[TradingOrchestrator, Depends(get_orchestrator)],
++) -> TradingCycleResult:
++    """
++    Löst manuell einen einzelnen Trading-Zyklus aus.
++    Nur für Admins. In LIVE-Mode ist confirm_live=true zwingend erforderlich.
++    """
++    config = get_config()
++
++    if config.trading_mode == TradingMode.LIVE and not body.confirm_live:
++        log.warning(
++            "trading_router.live_trigger_blocked",
++            symbol_key=body.symbol_key,
++            reason="confirm_live not set",
++        )
++        raise HTTPException(
++            status_code=400,
++            detail=(
++                "Live trading cycle requires explicit confirm_live=true. "
++                "This is a deliberate safety gate, not an error."
++            ),
++        )
++
++    result = await orchestrator.run_cycle(body.symbol_key, body.timeframe, body.regime)
++    return result
+diff --git a/sgr/core/types.py b/sgr/core/types.py
+index ab4f65c..68955c9 100644
+--- a/sgr/core/types.py
++++ b/sgr/core/types.py
+@@ -399,3 +399,51 @@ class AlertEvent(BaseEvent):
+     title: str
+     message: str
+     metadata: dict[str, Any] = Field(default_factory=dict)
++
++
++# ---------------------------------------------------------------------------
++# Trading Orchestrator: Cycle Result & Events
++# ---------------------------------------------------------------------------
++
++
++class TradingCycleStatus(StrEnum):
++    """Terminal-Status eines Trading-Zyklus (Orchestrator-Ebene)."""
++
++    NO_SIGNAL = "no_signal"
++    SIGNAL_REJECTED = "signal_rejected"
++    RISK_REJECTED = "risk_rejected"
++    ORDER_FILLED = "order_filled"
++    ORDER_NOT_FILLED = "order_not_filled"  # submitted, aber (noch) nicht FILLED
++    FAILED = "failed"
++
++
++class TradingCycleResult(BaseModel):
++    """
++    Ergebnis eines vollständigen Orchestrator-Zyklus.
++    Auditierbarer Endpunkt: enthält Referenzen auf jeden Zwischenschritt,
++    damit ein Zyklus im Nachhinein vollständig nachvollzogen werden kann.
++    """
++
++    id: UUID = Field(default_factory=uuid4)
++    started_at: datetime
++    completed_at: datetime
++    status: TradingCycleStatus
++    symbol_key: str
++    timeframe: str
++    signal: Signal | None = None
++    assessment: RiskAssessment | None = None
++    order_request: OrderRequest | None = None
++    order_result: OrderResult | None = None
++    error: str | None = None
++
++
++class TradingCycleCompletedEvent(BaseEvent):
++    source: str = "orchestrator"
++    result: TradingCycleResult
++
++
++class TradingCycleFailedEvent(BaseEvent):
++    source: str = "orchestrator"
++    symbol_key: str
++    timeframe: str
++    error: str
+diff --git a/sgr/orchestrator/__init__.py b/sgr/orchestrator/__init__.py
+new file mode 100644
+index 0000000..4812e6c
+--- /dev/null
++++ b/sgr/orchestrator/__init__.py
+@@ -0,0 +1,5 @@
++"""SGR Trading Orchestrator Package."""
++
++from sgr.orchestrator.engine import TradingOrchestrator
++
++__all__ = ["TradingOrchestrator"]
+diff --git a/sgr/orchestrator/engine.py b/sgr/orchestrator/engine.py
+new file mode 100644
+index 0000000..adc9e13
+--- /dev/null
++++ b/sgr/orchestrator/engine.py
+@@ -0,0 +1,323 @@
++"""
++SGR Trading Orchestrator
++=========================
++Koordiniert den vollständigen Trading-Zyklus von Signal bis Portfolio-Update.
++
++Warum dieses Modul nötig war:
++    Vor Einführung dieses Orchestrators publizierten StrategyEngine
++    (SignalEvent) und ExecutionEngine (OrderFilledEvent) Events auf den
++    Event Bus, auf die jedoch nirgends im System subscribed wurde.
++    RiskEngine.evaluate() und RiskEngine.build_order_request() existierten
++    vollständig implementiert, wurden aber nie aufgerufen.
++    ExecutionEngine wurde nirgends instanziiert. PortfolioEngine.on_order_filled()
++    wurde nie erreicht. Es gab keinen Pfad, auf dem ein Signal jemals zu
++    einer Order werden konnte.
++
++Architekturentscheidung: Hybrid statt rein event-driven
++    Der Zyklus läuft über direkte, awaited Methodenaufrufe
++    (Strategy → Risk → Execution → Portfolio). Das macht den Ablauf
++    deterministisch, synchron nachvollziehbar und ohne Redis testbar.
++    Der Event Bus wird zusätzlich (additiv) für Audit/Monitoring bedient:
++    RiskApprovedEvent, RiskRejectedEvent, TradingCycleCompletedEvent,
++    TradingCycleFailedEvent. Bus-Fehler dürfen laut Projektgrundsatz
++    ("Fail-safe: DB/Bus-Fehler dürfen Trading-Ergebnisse nie beeinflussen")
++    niemals den eigentlichen Trading-Ausgang verändern – jede Publish-Stelle
++    ist deshalb einzeln try/except-isoliert.
++
++    Damit bleibt exakt eine Quelle der Wahrheit für den Kontrollfluss
++    (keine parallele State Machine über Events), während das bereits
++    vorhandene Event-Bus-Setup weiterhin für Beobachtbarkeit genutzt wird.
++
++Zyklus:
++    StrategyEngine.process()        → Signal | None
++    RiskEngine.evaluate()           → RiskAssessment
++    RiskEngine.build_order_request()→ OrderRequest (nur bei APPROVED/REDUCED)
++    ExecutionEngine.execute()       → OrderResult
++    PortfolioEngine.on_order_filled()  (nur bei OrderStatus.FILLED)
++
++Kein Schritt überspringt Risk Management. Kein Signal erreicht Execution
++ohne RiskEngine.evaluate(). Die Reihenfolge ist fix und kann nicht durch
++Konfiguration umgangen werden.
++"""
++
++from __future__ import annotations
++
++from datetime import UTC, datetime
++from typing import Any
++
++from sgr.core.event_bus import get_event_bus
++from sgr.core.logging import get_logger
++from sgr.core.types import (
++    MarketRegime,
++    OrderStatus,
++    RiskApprovedEvent,
++    RiskAssessment,
++    RiskDecision,
++    RiskRejectedEvent,
++    Signal,
++    TradingCycleCompletedEvent,
++    TradingCycleFailedEvent,
++    TradingCycleResult,
++    TradingCycleStatus,
++    TradingMode,
++)
++
++log = get_logger(__name__)
++
++
++class TradingOrchestrator:
++    """
++    Koordiniert einen vollständigen Trading-Zyklus für ein Symbol/Timeframe.
++
++    Usage:
++        orchestrator = TradingOrchestrator(
++            strategy_engine=strategy_engine,
++            risk_engine=risk_engine,
++            execution_engine=execution_engine,
++            portfolio_engine=portfolio_engine,
++            feature_store=feature_store,
++            trading_mode=TradingMode.PAPER,
++        )
++        result = await orchestrator.run_cycle("pionex:BTC/USDT", "1h")
++    """
++
++    def __init__(
++        self,
++        strategy_engine: Any,
++        risk_engine: Any,
++        execution_engine: Any,
++        portfolio_engine: Any,
++        feature_store: Any,
++        trading_mode: TradingMode,
++    ) -> None:
++        self._strategy_engine = strategy_engine
++        self._risk_engine = risk_engine
++        self._execution_engine = execution_engine
++        self._portfolio_engine = portfolio_engine
++        self._feature_store = feature_store
++        self._trading_mode = trading_mode
++
++    # ------------------------------------------------------------------
++    # Main Entry Point
++    # ------------------------------------------------------------------
++
++    async def run_cycle(
++        self,
++        symbol_key: str,
++        timeframe: str,
++        regime: MarketRegime = MarketRegime.UNKNOWN,
++    ) -> TradingCycleResult:
++        """
++        Führt einen vollständigen Trading-Zyklus aus.
++        Fail-Safe: jede unerwartete Exception → TradingCycleStatus.FAILED,
++        niemals eine unbehandelte Exception nach außen.
++        """
++        started_at = datetime.now(tz=UTC)
++        try:
++            result = await self._run_cycle_internal(symbol_key, timeframe, regime, started_at)
++        except Exception as e:
++            log.error(
++                "orchestrator.cycle.unexpected_error",
++                symbol_key=symbol_key,
++                timeframe=timeframe,
++                error=str(e),
++                exc_info=True,
++            )
++            result = TradingCycleResult(
++                started_at=started_at,
++                completed_at=datetime.now(tz=UTC),
++                status=TradingCycleStatus.FAILED,
++                symbol_key=symbol_key,
++                timeframe=timeframe,
++                error=f"Orchestrator error: {e}",
++            )
++            await self._publish_cycle_failed(symbol_key, timeframe, str(e))
++            return result
++
++        await self._publish_cycle_completed(result)
++        return result
++
++    async def _run_cycle_internal(
++        self,
++        symbol_key: str,
++        timeframe: str,
++        regime: MarketRegime,
++        started_at: datetime,
++    ) -> TradingCycleResult:
++        # 1. Signal generation (StrategyEngine publiziert SignalEvent bereits
++        #    selbst additiv - siehe strategy/engine.py _publish())
++        signal = await self._strategy_engine.process(symbol_key, timeframe, regime)
++        if signal is None:
++            return self._result(
++                TradingCycleStatus.NO_SIGNAL, started_at, symbol_key, timeframe
++            )
++
++        # 2. Aktuelle Marktdaten für Risk Engine (Preis + ATR)
++        features = await self._feature_store.get_latest(symbol_key, timeframe)
++        if features is None:
++            # Race Condition: Signal wurde aus Features gebaut, die zwischen
++            # StrategyEngine.process() und hier invalidiert wurden.
++            # Fail-safe: kein Trade ohne verifizierten aktuellen Preis.
++            log.warning(
++                "orchestrator.cycle.features_unavailable",
++                symbol_key=symbol_key,
++                timeframe=timeframe,
++                signal_id=str(signal.id),
++            )
++            return self._result(
++                TradingCycleStatus.FAILED,
++                started_at,
++                symbol_key,
++                timeframe,
++                signal=signal,
++                error="Market features unavailable after signal generation",
++            )
++
++        current_price = features.close
++        atr = features.indicators.atr_14
++
++        # 3. Portfolio State laden (Single Source of Truth: PortfolioEngine)
++        open_positions = self._portfolio_engine.positions
++        portfolio_value = self._portfolio_engine.portfolio_value
++        available_capital = self._portfolio_engine.cash
++
++        # 4. Risk Engine (fail-safe intern: Fehler → REJECTED)
++        assessment = await self._risk_engine.evaluate(
++            signal=signal,
++            open_positions=open_positions,
++            portfolio_value=portfolio_value,
++            available_capital=available_capital,
++            current_price=current_price,
++            atr=atr,
++        )
++
++        if assessment.decision == RiskDecision.REJECTED:
++            await self._publish_risk_rejected(assessment)
++            return self._result(
++                TradingCycleStatus.RISK_REJECTED,
++                started_at,
++                symbol_key,
++                timeframe,
++                signal=signal,
++                assessment=assessment,
++            )
++
++        # 5. Order Request bauen (nur erreichbar bei APPROVED/REDUCED)
++        order_request = self._risk_engine.build_order_request(
++            signal, assessment, current_price=current_price
++        )
++
++        await self._publish_risk_approved(assessment, order_request)
++
++        # 6. Execution (fail-safe intern: Fehler → REJECTED OrderResult)
++        order_result = await self._execution_engine.execute(order_request)
++
++        # 7. Portfolio State aktualisieren (deterministisch, direkter Aufruf -
++        #    NICHT über Event Bus, um Doppelverarbeitung/Race auszuschließen)
++        if order_result.status == OrderStatus.FILLED:
++            await self._portfolio_engine.on_order_filled(order_result)
++            status = TradingCycleStatus.ORDER_FILLED
++        else:
++            status = TradingCycleStatus.ORDER_NOT_FILLED
++
++        return self._result(
++            status,
++            started_at,
++            symbol_key,
++            timeframe,
++            signal=signal,
++            assessment=assessment,
++            order_request=order_request,
++            order_result=order_result,
++        )
++
++    # ------------------------------------------------------------------
++    # Event-Driven Trigger (additiv, optional)
++    # ------------------------------------------------------------------
++
++    async def on_candle_event(self, event: Any) -> None:
++        """
++        Handler für CandleEvent-Subscription auf dem Event Bus.
++        Ermöglicht automatisches Auslösen eines Zyklus bei neuen Candles,
++        ohne dass run_cycle() direkt vom Aufrufer für jeden Candle
++        aufgerufen werden muss. Fail-safe: Fehler hier dürfen die
++        Candle-Verarbeitung im Market Data Engine nicht stören.
++        """
++        try:
++            candle = event.candle
++            symbol_key = f"{candle.symbol.exchange.value}:{candle.symbol.ccxt_symbol}"
++            await self.run_cycle(symbol_key, candle.timeframe)
++        except Exception as e:
++            log.error("orchestrator.on_candle_event.error", error=str(e), exc_info=True)
++
++    # ------------------------------------------------------------------
++    # Helpers
++    # ------------------------------------------------------------------
++
++    def _result(
++        self,
++        status: TradingCycleStatus,
++        started_at: datetime,
++        symbol_key: str,
++        timeframe: str,
++        signal: Signal | None = None,
++        assessment: RiskAssessment | None = None,
++        order_request: Any = None,
++        order_result: Any = None,
++        error: str | None = None,
++    ) -> TradingCycleResult:
++        return TradingCycleResult(
++            started_at=started_at,
++            completed_at=datetime.now(tz=UTC),
++            status=status,
++            symbol_key=symbol_key,
++            timeframe=timeframe,
++            signal=signal,
++            assessment=assessment,
++            order_request=order_request,
++            order_result=order_result,
++            error=error,
++        )
++
++    async def _publish_risk_approved(self, assessment: RiskAssessment, order_request: Any) -> None:
++        try:
++            event = RiskApprovedEvent(
++                timestamp=datetime.now(tz=UTC),
++                assessment=assessment,
++                order_request=order_request,
++            )
++            await get_event_bus().publish(event)
++        except Exception as e:
++            log.error("orchestrator.publish_risk_approved_failed", error=str(e))
++
++    async def _publish_risk_rejected(self, assessment: RiskAssessment) -> None:
++        try:
++            event = RiskRejectedEvent(
++                timestamp=datetime.now(tz=UTC),
++                assessment=assessment,
++            )
++            await get_event_bus().publish(event)
++        except Exception as e:
++            log.error("orchestrator.publish_risk_rejected_failed", error=str(e))
++
++    async def _publish_cycle_completed(self, result: TradingCycleResult) -> None:
++        try:
++            event = TradingCycleCompletedEvent(
++                timestamp=datetime.now(tz=UTC),
++                result=result,
++            )
++            await get_event_bus().publish(event)
++        except Exception as e:
++            log.error("orchestrator.publish_cycle_completed_failed", error=str(e))
++
++    async def _publish_cycle_failed(self, symbol_key: str, timeframe: str, error: str) -> None:
++        try:
++            event = TradingCycleFailedEvent(
++                timestamp=datetime.now(tz=UTC),
++                symbol_key=symbol_key,
++                timeframe=timeframe,
++                error=error,
++            )
++            await get_event_bus().publish(event)
++        except Exception as e:
++            log.error("orchestrator.publish_cycle_failed_failed", error=str(e))
+diff --git a/sgr/risk/engine.py b/sgr/risk/engine.py
+index 7739baa..87305cf 100644
+--- a/sgr/risk/engine.py
++++ b/sgr/risk/engine.py
+@@ -510,10 +510,17 @@ class RiskEngine:
+         self,
+         signal: Signal,
+         assessment: RiskAssessment,
++        current_price: Decimal | None = None,
+     ) -> OrderRequest:
+         """
+         Erstellt OrderRequest aus genehmigtem Assessment.
+         Nur aufrufen wenn assessment.decision != REJECTED.
++
++        current_price wird als limit_price verwendet, wenn wegen hoher
++        Slippage ein LIMIT statt MARKET Order erzwungen wird. Ohne
++        current_price würde eine LIMIT-Order ohne Preis erzeugt, was
++        Exchange-Adapter (Paper wie Live) mit Fill-Preis 0 interpretieren
++        können – daher ist current_price für den LIMIT-Fall verpflichtend.
+         """
+         from sgr.core.types import Side
+ 
+@@ -525,11 +532,25 @@ class RiskEngine:
+         if var > self._limits.var_95_limit * 0.8:
+             order_type = OrderType.LIMIT
+ 
++        limit_price: Decimal | None = None
++        if order_type == OrderType.LIMIT:
++            if current_price is None:
++                # Fail-safe: kein Preis bekannt → nicht auf MARKET zurückfallen
++                # (das würde die Slippage-Kontrolle unterlaufen), stattdessen
++                # explizit signalisieren, dass der Aufrufer ohne current_price
++                # keine sichere LIMIT-Order bauen kann.
++                raise ValueError(
++                    "build_order_request: current_price required to build a "
++                    "LIMIT order (high slippage risk detected)"
++                )
++            limit_price = current_price
++
+         return OrderRequest(
+             signal_id=signal.id,
+             symbol=signal.symbol,
+             side=side,
+             order_type=order_type,
+             quantity=assessment.approved_quantity,
++            limit_price=limit_price,
+             trading_mode=self._trading_mode,
+         )
+diff --git a/tests/unit/test_orchestrator.py b/tests/unit/test_orchestrator.py
+new file mode 100644
+index 0000000..480c77d
+--- /dev/null
++++ b/tests/unit/test_orchestrator.py
+@@ -0,0 +1,456 @@
++"""
++Tests für den TradingOrchestrator.
++
++Dieser Orchestrator schließt die zentrale Integrationslücke des Systems:
++vor seiner Einführung gab es keinen Codepfad, auf dem ein generiertes
++Signal jemals RiskEngine.evaluate(), ExecutionEngine.execute() oder
++PortfolioEngine.on_order_filled() erreichte.
++
++Teststrategie:
++    1. Kein Signal → Zyklus endet NO_SIGNAL, Risk/Execution werden nie
++       aufgerufen (Beweis, dass nichts übersprungen aber auch nichts
++       unnötig ausgeführt wird)
++    2. Risk lehnt ab → Execution wird nie aufgerufen (kein Signal darf
++       Risk Management umgehen)
++    3. Happy Path → Signal -> Risk APPROVED -> Order FILLED -> Portfolio
++       wird aktualisiert, in exakt dieser Reihenfolge
++    4. Order wird submitted aber nicht gefüllt → Portfolio wird NICHT
++       aktualisiert (kein Fill = keine Positionsänderung)
++    5. Fail-Safe: Exception an beliebiger Stelle → FAILED, niemals eine
++       unbehandelte Exception
++    6. Event Bus nicht verbunden → Zyklus schlägt trotzdem nicht fehl
++       (Bus-Fehler dürfen Trading-Ergebnisse nie beeinflussen)
++    7. Event Bus verbunden → RiskApprovedEvent/RiskRejectedEvent/
++       TradingCycleCompletedEvent werden mit korrekten Daten publiziert
++"""
++
++from __future__ import annotations
++
++from datetime import UTC, datetime
++from decimal import Decimal
++from unittest.mock import AsyncMock, MagicMock
++
++import pytest
++
++from sgr.core.types import (
++    ExchangeID,
++    MarketRegime,
++    OrderRequest,
++    OrderResult,
++    OrderStatus,
++    OrderType,
++    RiskAssessment,
++    RiskDecision,
++    RiskMetrics,
++    Side,
++    Signal,
++    SignalDirection,
++    Symbol,
++    TradingCycleStatus,
++    TradingMode,
++)
++from sgr.market_data.types import FeatureSet, IndicatorValues
++from sgr.orchestrator.engine import TradingOrchestrator
++
++pytestmark = pytest.mark.asyncio
++
++
++# ---------------------------------------------------------------------------
++# Fixtures
++# ---------------------------------------------------------------------------
++
++
++@pytest.fixture
++def btc_symbol() -> Symbol:
++    return Symbol(base="BTC", quote="USDT", exchange=ExchangeID.PIONEX)
++
++
++@pytest.fixture
++def sample_signal(btc_symbol: Symbol) -> Signal:
++    return Signal(
++        timestamp=datetime.now(tz=UTC),
++        strategy_name="trend_v1",
++        symbol=btc_symbol,
++        direction=SignalDirection.LONG,
++        confidence=0.80,
++        regime=MarketRegime.TRENDING_UP,
++    )
++
++
++@pytest.fixture
++def sample_features(btc_symbol: Symbol) -> FeatureSet:
++    return FeatureSet(
++        symbol=btc_symbol,
++        timestamp=datetime.now(tz=UTC),
++        timeframe="1h",
++        close=Decimal("50000"),
++        volume=Decimal("100"),
++        indicators=IndicatorValues(atr_14=Decimal("500")),
++    )
++
++
++def _risk_metrics() -> RiskMetrics:
++    return RiskMetrics(
++        timestamp=datetime.now(tz=UTC),
++        portfolio_value=Decimal("10000"),
++        daily_pnl=Decimal("0"),
++        daily_pnl_pct=0.0,
++        drawdown_from_peak=0.0,
++        var_95=0.01,
++        expected_shortfall=0.0,
++        portfolio_heat=0.1,
++        active_positions=0,
++        correlation_exposure=0.0,
++    )
++
++
++def _approved_assessment(signal: Signal, qty: Decimal = Decimal("0.1")) -> RiskAssessment:
++    return RiskAssessment(
++        signal_id=signal.id,
++        decision=RiskDecision.APPROVED,
++        approved_quantity=qty,
++        risk_metrics_snapshot=_risk_metrics(),
++    )
++
++
++def _rejected_assessment(signal: Signal) -> RiskAssessment:
++    return RiskAssessment(
++        signal_id=signal.id,
++        decision=RiskDecision.REJECTED,
++        approved_quantity=Decimal("0"),
++        rejection_reason="Kill switch active",
++        risk_metrics_snapshot=_risk_metrics(),
++    )
++
++
++def _order_request(signal: Signal, symbol: Symbol) -> OrderRequest:
++    return OrderRequest(
++        signal_id=signal.id,
++        symbol=symbol,
++        side=Side.BUY,
++        order_type=OrderType.MARKET,
++        quantity=Decimal("0.1"),
++        trading_mode=TradingMode.PAPER,
++    )
++
++
++def _filled_result(signal: Signal, symbol: Symbol) -> OrderResult:
++    return OrderResult(
++        request_id=signal.id,
++        exchange_order_id="EX-1",
++        symbol=symbol,
++        status=OrderStatus.FILLED,
++        filled_quantity=Decimal("0.1"),
++        average_fill_price=Decimal("50000"),
++        submitted_at=datetime.now(tz=UTC),
++        trading_mode=TradingMode.PAPER,
++    )
++
++
++class _Engines:
++    """Bündelt Mock-Engines für den Orchestrator, mit sinnvollen Defaults."""
++
++    def __init__(self) -> None:
++        self.strategy_engine = AsyncMock()
++        self.risk_engine = AsyncMock()
++        # build_order_request ist synchron im echten RiskEngine (kein I/O) -
++        # AsyncMock würde hier einen ungeawaiteten Coroutine-Wert liefern.
++        self.risk_engine.build_order_request = MagicMock()
++        self.execution_engine = AsyncMock()
++        self.portfolio_engine = AsyncMock()
++        self.portfolio_engine.positions = []
++        self.portfolio_engine.portfolio_value = Decimal("10000")
++        self.portfolio_engine.cash = Decimal("10000")
++        self.feature_store = AsyncMock()
++
++    def orchestrator(self) -> TradingOrchestrator:
++        return TradingOrchestrator(
++            strategy_engine=self.strategy_engine,
++            risk_engine=self.risk_engine,
++            execution_engine=self.execution_engine,
++            portfolio_engine=self.portfolio_engine,
++            feature_store=self.feature_store,
++            trading_mode=TradingMode.PAPER,
++        )
++
++
++# ---------------------------------------------------------------------------
++# 1. Kein Signal
++# ---------------------------------------------------------------------------
++
++
++async def test_no_signal_short_circuits_before_risk() -> None:
++    e = _Engines()
++    e.strategy_engine.process.return_value = None
++    orchestrator = e.orchestrator()
++
++    result = await orchestrator.run_cycle("pionex:BTC/USDT", "1h")
++
++    assert result.status == TradingCycleStatus.NO_SIGNAL
++    e.risk_engine.evaluate.assert_not_called()
++    e.execution_engine.execute.assert_not_called()
++    e.portfolio_engine.on_order_filled.assert_not_called()
++
++
++# ---------------------------------------------------------------------------
++# 2. Risk lehnt ab
++# ---------------------------------------------------------------------------
++
++
++async def test_risk_rejection_never_reaches_execution(
++    sample_signal: Signal, sample_features: FeatureSet
++) -> None:
++    e = _Engines()
++    e.strategy_engine.process.return_value = sample_signal
++    e.feature_store.get_latest.return_value = sample_features
++    e.risk_engine.evaluate.return_value = _rejected_assessment(sample_signal)
++    orchestrator = e.orchestrator()
++
++    result = await orchestrator.run_cycle("pionex:BTC/USDT", "1h")
++
++    assert result.status == TradingCycleStatus.RISK_REJECTED
++    assert result.assessment is not None
++    assert result.assessment.decision == RiskDecision.REJECTED
++    e.execution_engine.execute.assert_not_called()
++    e.portfolio_engine.on_order_filled.assert_not_called()
++    # build_order_request darf bei Ablehnung nie aufgerufen werden
++    e.risk_engine.build_order_request.assert_not_called()
++
++
++# ---------------------------------------------------------------------------
++# 3. Happy Path: Signal -> Risk -> Order -> Portfolio
++# ---------------------------------------------------------------------------
++
++
++async def test_happy_path_updates_portfolio_on_fill(
++    sample_signal: Signal, sample_features: FeatureSet, btc_symbol: Symbol
++) -> None:
++    e = _Engines()
++    e.strategy_engine.process.return_value = sample_signal
++    e.feature_store.get_latest.return_value = sample_features
++    assessment = _approved_assessment(sample_signal)
++    e.risk_engine.evaluate.return_value = assessment
++    order_request = _order_request(sample_signal, btc_symbol)
++    e.risk_engine.build_order_request.return_value = order_request
++    order_result = _filled_result(sample_signal, btc_symbol)
++    e.execution_engine.execute.return_value = order_result
++    orchestrator = e.orchestrator()
++
++    result = await orchestrator.run_cycle("pionex:BTC/USDT", "1h")
++
++    assert result.status == TradingCycleStatus.ORDER_FILLED
++    assert result.order_result is not None
++    assert result.order_result.status == OrderStatus.FILLED
++
++    # Reihenfolge: current_price wird an build_order_request weitergereicht
++    e.risk_engine.build_order_request.assert_called_once_with(
++        sample_signal, assessment, current_price=sample_features.close
++    )
++    e.execution_engine.execute.assert_called_once_with(order_request)
++    e.portfolio_engine.on_order_filled.assert_called_once_with(order_result)
++
++
++# ---------------------------------------------------------------------------
++# 4. Submitted, aber nicht gefüllt -> kein Portfolio-Update
++# ---------------------------------------------------------------------------
++
++
++async def test_unfilled_order_does_not_update_portfolio(
++    sample_signal: Signal, sample_features: FeatureSet, btc_symbol: Symbol
++) -> None:
++    e = _Engines()
++    e.strategy_engine.process.return_value = sample_signal
++    e.feature_store.get_latest.return_value = sample_features
++    e.risk_engine.evaluate.return_value = _approved_assessment(sample_signal)
++    e.risk_engine.build_order_request.return_value = _order_request(sample_signal, btc_symbol)
++
++    pending_result = OrderResult(
++        request_id=sample_signal.id,
++        exchange_order_id="EX-2",
++        symbol=btc_symbol,
++        status=OrderStatus.CANCELLED,
++        filled_quantity=Decimal("0"),
++        submitted_at=datetime.now(tz=UTC),
++        trading_mode=TradingMode.PAPER,
++    )
++    e.execution_engine.execute.return_value = pending_result
++    orchestrator = e.orchestrator()
++
++    result = await orchestrator.run_cycle("pionex:BTC/USDT", "1h")
++
++    assert result.status == TradingCycleStatus.ORDER_NOT_FILLED
++    e.portfolio_engine.on_order_filled.assert_not_called()
++
++
++# ---------------------------------------------------------------------------
++# 5. Fail-Safe bei unerwarteten Exceptions
++# ---------------------------------------------------------------------------
++
++
++async def test_unexpected_exception_yields_failed_status_not_raised(
++    sample_signal: Signal,
++) -> None:
++    e = _Engines()
++    e.strategy_engine.process.side_effect = RuntimeError("boom")
++    orchestrator = e.orchestrator()
++
++    result = await orchestrator.run_cycle("pionex:BTC/USDT", "1h")
++
++    assert result.status == TradingCycleStatus.FAILED
++    assert result.error is not None
++    assert "boom" in result.error
++
++
++async def test_missing_features_after_signal_is_failed_not_market_order(
++    sample_signal: Signal,
++) -> None:
++    """
++    Race Condition: Signal wurde generiert, aber Features sind beim
++    Preis-Lookup schon weg. Darf NIE einen Fallback-Preis annehmen -
++    lieber der Zyklus scheitert, als mit falschem Preis zu handeln.
++    """
++    e = _Engines()
++    e.strategy_engine.process.return_value = sample_signal
++    e.feature_store.get_latest.return_value = None
++    orchestrator = e.orchestrator()
++
++    result = await orchestrator.run_cycle("pionex:BTC/USDT", "1h")
++
++    assert result.status == TradingCycleStatus.FAILED
++    e.risk_engine.evaluate.assert_not_called()
++
++
++# ---------------------------------------------------------------------------
++# 6. Event Bus nicht verbunden -> darf Trading-Ergebnis nicht beeinflussen
++# ---------------------------------------------------------------------------
++
++
++async def test_cycle_succeeds_even_when_event_bus_unconnected(
++    sample_signal: Signal, sample_features: FeatureSet, btc_symbol: Symbol
++) -> None:
++    """
++    Verwendet den echten (nicht gemockten) get_event_bus() Singleton ohne
++    .connect() - publish() wirft RuntimeError. Der Zyklus muss trotzdem
++    sein reguläres Ergebnis liefern (Fail-Safe-Grundsatz).
++    """
++    e = _Engines()
++    e.strategy_engine.process.return_value = sample_signal
++    e.feature_store.get_latest.return_value = sample_features
++    assessment = _approved_assessment(sample_signal)
++    e.risk_engine.evaluate.return_value = assessment
++    e.risk_engine.build_order_request.return_value = _order_request(sample_signal, btc_symbol)
++    e.execution_engine.execute.return_value = _filled_result(sample_signal, btc_symbol)
++    orchestrator = e.orchestrator()
++
++    result = await orchestrator.run_cycle("pionex:BTC/USDT", "1h")
++
++    assert result.status == TradingCycleStatus.ORDER_FILLED
++    e.portfolio_engine.on_order_filled.assert_called_once()
++
++
++# ---------------------------------------------------------------------------
++# 7. Events werden korrekt publiziert, wenn Bus verfügbar ist
++# ---------------------------------------------------------------------------
++
++
++async def test_risk_approved_event_published_with_correct_payload(
++    sample_signal: Signal, sample_features: FeatureSet, btc_symbol: Symbol, mocker
++) -> None:
++    e = _Engines()
++    e.strategy_engine.process.return_value = sample_signal
++    e.feature_store.get_latest.return_value = sample_features
++    assessment = _approved_assessment(sample_signal)
++    e.risk_engine.evaluate.return_value = assessment
++    order_request = _order_request(sample_signal, btc_symbol)
++    e.risk_engine.build_order_request.return_value = order_request
++    e.execution_engine.execute.return_value = _filled_result(sample_signal, btc_symbol)
++
++    mock_bus = AsyncMock()
++    mocker.patch("sgr.orchestrator.engine.get_event_bus", return_value=mock_bus)
++    orchestrator = e.orchestrator()
++
++    await orchestrator.run_cycle("pionex:BTC/USDT", "1h")
++
++    published_types = [type(call.args[0]).__name__ for call in mock_bus.publish.call_args_list]
++    assert "RiskApprovedEvent" in published_types
++    assert "TradingCycleCompletedEvent" in published_types
++
++    risk_event = next(
++        call.args[0]
++        for call in mock_bus.publish.call_args_list
++        if type(call.args[0]).__name__ == "RiskApprovedEvent"
++    )
++    assert risk_event.assessment.signal_id == sample_signal.id
++    assert risk_event.order_request == order_request
++
++
++async def test_risk_rejected_event_published(
++    sample_signal: Signal, sample_features: FeatureSet, mocker
++) -> None:
++    e = _Engines()
++    e.strategy_engine.process.return_value = sample_signal
++    e.feature_store.get_latest.return_value = sample_features
++    e.risk_engine.evaluate.return_value = _rejected_assessment(sample_signal)
++
++    mock_bus = AsyncMock()
++    mocker.patch("sgr.orchestrator.engine.get_event_bus", return_value=mock_bus)
++    orchestrator = e.orchestrator()
++
++    await orchestrator.run_cycle("pionex:BTC/USDT", "1h")
++
++    published_types = [type(call.args[0]).__name__ for call in mock_bus.publish.call_args_list]
++    assert "RiskRejectedEvent" in published_types
++    assert "TradingCycleCompletedEvent" in published_types
++
++
++# ---------------------------------------------------------------------------
++# on_candle_event: additiver Event-Trigger
++# ---------------------------------------------------------------------------
++
++
++async def test_on_candle_event_triggers_cycle_for_matching_symbol(
++    btc_symbol: Symbol, sample_candle_event_factory
++) -> None:
++    e = _Engines()
++    e.strategy_engine.process.return_value = None  # NO_SIGNAL reicht als Beweis
++    orchestrator = e.orchestrator()
++
++    event = sample_candle_event_factory(btc_symbol, "1h")
++    await orchestrator.on_candle_event(event)
++
++    e.strategy_engine.process.assert_called_once_with(
++        "pionex:BTC/USDT", "1h", MarketRegime.UNKNOWN
++    )
++
++
++async def test_on_candle_event_never_raises_on_malformed_event() -> None:
++    e = _Engines()
++    orchestrator = e.orchestrator()
++
++    class _Broken:
++        pass
++
++    # Darf keine Exception nach außen werfen - würde sonst den
++    # Market-Data-Loop im Aufrufer zum Absturz bringen.
++    await orchestrator.on_candle_event(_Broken())
++    e.strategy_engine.process.assert_not_called()
++
++
++@pytest.fixture
++def sample_candle_event_factory():
++    from sgr.core.types import Candle, CandleEvent
++
++    def _make(symbol: Symbol, timeframe: str):
++        candle = Candle(
++            symbol=symbol,
++            timestamp=datetime.now(tz=UTC),
++            timeframe=timeframe,
++            open=Decimal("50000"),
++            high=Decimal("50100"),
++            low=Decimal("49900"),
++            close=Decimal("50050"),
++            volume=Decimal("10"),
++        )
++        return CandleEvent(timestamp=datetime.now(tz=UTC), candle=candle)
++
++    return _make
+diff --git a/tests/unit/test_risk_engine.py b/tests/unit/test_risk_engine.py
+index 4ada619..ea4241e 100644
+--- a/tests/unit/test_risk_engine.py
++++ b/tests/unit/test_risk_engine.py
+@@ -510,3 +510,73 @@ class TestOrderConstruction:
+         assert order.quantity == Decimal("0.1")
+         assert order.signal_id == sample_signal.id
+         assert order.trading_mode == TradingMode.PAPER
++
++    async def test_high_var_forces_limit_order_with_price(
++        self,
++        risk_engine: RiskEngine,
++        sample_signal: Signal,
++    ) -> None:
++        """Hohe Slippage (VaR > 80% des Limits) -> LIMIT statt MARKET,
++        mit current_price als limit_price (kein Fill zu Preis 0)."""
++        await risk_engine.initialize()
++
++        from sgr.core.types import OrderType, RiskAssessment, RiskDecision, RiskMetrics
++
++        metrics = RiskMetrics(
++            timestamp=datetime.now(tz=UTC),
++            portfolio_value=Decimal("100000"),
++            daily_pnl=Decimal("0"),
++            daily_pnl_pct=0.0,
++            drawdown_from_peak=0.0,
++            var_95=risk_engine._limits.var_95_limit * 0.9,
++            expected_shortfall=0.02,
++            portfolio_heat=0.1,
++            active_positions=0,
++            correlation_exposure=0.0,
++        )
++        assessment = RiskAssessment(
++            signal_id=sample_signal.id,
++            decision=RiskDecision.APPROVED,
++            approved_quantity=Decimal("0.1"),
++            risk_metrics_snapshot=metrics,
++        )
++
++        order = risk_engine.build_order_request(
++            sample_signal, assessment, current_price=Decimal("50000")
++        )
++        assert order.order_type == OrderType.LIMIT
++        assert order.limit_price == Decimal("50000")
++
++    async def test_high_var_without_current_price_raises_instead_of_zero_price_order(
++        self,
++        risk_engine: RiskEngine,
++        sample_signal: Signal,
++    ) -> None:
++        """Bug-Fix-Regressionstest: früher entstand hier eine LIMIT-Order
++        ohne Preis, die der Paper-Adapter mit Fill-Preis 0 interpretiert
++        hätte. Jetzt: explizite Exception statt stiller Fehlbepreisung."""
++        await risk_engine.initialize()
++
++        from sgr.core.types import RiskAssessment, RiskDecision, RiskMetrics
++
++        metrics = RiskMetrics(
++            timestamp=datetime.now(tz=UTC),
++            portfolio_value=Decimal("100000"),
++            daily_pnl=Decimal("0"),
++            daily_pnl_pct=0.0,
++            drawdown_from_peak=0.0,
++            var_95=risk_engine._limits.var_95_limit * 0.9,
++            expected_shortfall=0.02,
++            portfolio_heat=0.1,
++            active_positions=0,
++            correlation_exposure=0.0,
++        )
++        assessment = RiskAssessment(
++            signal_id=sample_signal.id,
++            decision=RiskDecision.APPROVED,
++            approved_quantity=Decimal("0.1"),
++            risk_metrics_snapshot=metrics,
++        )
++
++        with pytest.raises(ValueError, match="current_price required"):
++            risk_engine.build_order_request(sample_signal, assessment)

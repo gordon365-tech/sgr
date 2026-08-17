@@ -510,10 +510,17 @@ class RiskEngine:
         self,
         signal: Signal,
         assessment: RiskAssessment,
+        current_price: Decimal | None = None,
     ) -> OrderRequest:
         """
         Erstellt OrderRequest aus genehmigtem Assessment.
         Nur aufrufen wenn assessment.decision != REJECTED.
+
+        current_price wird als limit_price verwendet, wenn wegen hoher
+        Slippage ein LIMIT statt MARKET Order erzwungen wird. Ohne
+        current_price würde eine LIMIT-Order ohne Preis erzeugt, was
+        Exchange-Adapter (Paper wie Live) mit Fill-Preis 0 interpretieren
+        können – daher ist current_price für den LIMIT-Fall verpflichtend.
         """
         from sgr.core.types import Side
 
@@ -525,11 +532,25 @@ class RiskEngine:
         if var > self._limits.var_95_limit * 0.8:
             order_type = OrderType.LIMIT
 
+        limit_price: Decimal | None = None
+        if order_type == OrderType.LIMIT:
+            if current_price is None:
+                # Fail-safe: kein Preis bekannt → nicht auf MARKET zurückfallen
+                # (das würde die Slippage-Kontrolle unterlaufen), stattdessen
+                # explizit signalisieren, dass der Aufrufer ohne current_price
+                # keine sichere LIMIT-Order bauen kann.
+                raise ValueError(
+                    "build_order_request: current_price required to build a "
+                    "LIMIT order (high slippage risk detected)"
+                )
+            limit_price = current_price
+
         return OrderRequest(
             signal_id=signal.id,
             symbol=signal.symbol,
             side=side,
             order_type=order_type,
             quantity=assessment.approved_quantity,
+            limit_price=limit_price,
             trading_mode=self._trading_mode,
         )

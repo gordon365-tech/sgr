@@ -510,3 +510,73 @@ class TestOrderConstruction:
         assert order.quantity == Decimal("0.1")
         assert order.signal_id == sample_signal.id
         assert order.trading_mode == TradingMode.PAPER
+
+    async def test_high_var_forces_limit_order_with_price(
+        self,
+        risk_engine: RiskEngine,
+        sample_signal: Signal,
+    ) -> None:
+        """Hohe Slippage (VaR > 80% des Limits) -> LIMIT statt MARKET,
+        mit current_price als limit_price (kein Fill zu Preis 0)."""
+        await risk_engine.initialize()
+
+        from sgr.core.types import OrderType, RiskAssessment, RiskDecision, RiskMetrics
+
+        metrics = RiskMetrics(
+            timestamp=datetime.now(tz=UTC),
+            portfolio_value=Decimal("100000"),
+            daily_pnl=Decimal("0"),
+            daily_pnl_pct=0.0,
+            drawdown_from_peak=0.0,
+            var_95=risk_engine._limits.var_95_limit * 0.9,
+            expected_shortfall=0.02,
+            portfolio_heat=0.1,
+            active_positions=0,
+            correlation_exposure=0.0,
+        )
+        assessment = RiskAssessment(
+            signal_id=sample_signal.id,
+            decision=RiskDecision.APPROVED,
+            approved_quantity=Decimal("0.1"),
+            risk_metrics_snapshot=metrics,
+        )
+
+        order = risk_engine.build_order_request(
+            sample_signal, assessment, current_price=Decimal("50000")
+        )
+        assert order.order_type == OrderType.LIMIT
+        assert order.limit_price == Decimal("50000")
+
+    async def test_high_var_without_current_price_raises_instead_of_zero_price_order(
+        self,
+        risk_engine: RiskEngine,
+        sample_signal: Signal,
+    ) -> None:
+        """Bug-Fix-Regressionstest: früher entstand hier eine LIMIT-Order
+        ohne Preis, die der Paper-Adapter mit Fill-Preis 0 interpretiert
+        hätte. Jetzt: explizite Exception statt stiller Fehlbepreisung."""
+        await risk_engine.initialize()
+
+        from sgr.core.types import RiskAssessment, RiskDecision, RiskMetrics
+
+        metrics = RiskMetrics(
+            timestamp=datetime.now(tz=UTC),
+            portfolio_value=Decimal("100000"),
+            daily_pnl=Decimal("0"),
+            daily_pnl_pct=0.0,
+            drawdown_from_peak=0.0,
+            var_95=risk_engine._limits.var_95_limit * 0.9,
+            expected_shortfall=0.02,
+            portfolio_heat=0.1,
+            active_positions=0,
+            correlation_exposure=0.0,
+        )
+        assessment = RiskAssessment(
+            signal_id=sample_signal.id,
+            decision=RiskDecision.APPROVED,
+            approved_quantity=Decimal("0.1"),
+            risk_metrics_snapshot=metrics,
+        )
+
+        with pytest.raises(ValueError, match="current_price required"):
+            risk_engine.build_order_request(sample_signal, assessment)

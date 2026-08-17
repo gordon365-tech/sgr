@@ -26,6 +26,7 @@ from sgr.core.config import get_config
 from sgr.core.logging import get_logger
 from sgr.core.types import TradingMode
 from sgr.market_data.feature_store import FeatureStore
+from sgr.orchestrator.engine import TradingOrchestrator
 from sgr.portfolio.engine import PortfolioEngine
 from sgr.risk.engine import RiskEngine
 from sgr.strategy.engine import StrategyEngine
@@ -168,3 +169,10 @@ def get_exchange_pool(request: Request):  # type: ignore[return]
     if pool is None:
         raise HTTPException(status_code=503, detail="Exchange pool not initialized")
     return pool
+
+
+def get_orchestrator(request: Request) -> TradingOrchestrator:
+    orchestrator: TradingOrchestrator | None = getattr(request.app.state, "orchestrator", None)
+    if orchestrator is None:
+        raise HTTPException(status_code=503, detail="Trading orchestrator not initialized")
+    return orchestrator

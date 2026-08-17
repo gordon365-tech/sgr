@@ -399,3 +399,51 @@ class AlertEvent(BaseEvent):
     title: str
     message: str
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Trading Orchestrator: Cycle Result & Events
+# ---------------------------------------------------------------------------
+
+
+class TradingCycleStatus(StrEnum):
+    """Terminal-Status eines Trading-Zyklus (Orchestrator-Ebene)."""
+
+    NO_SIGNAL = "no_signal"
+    SIGNAL_REJECTED = "signal_rejected"
+    RISK_REJECTED = "risk_rejected"
+    ORDER_FILLED = "order_filled"
+    ORDER_NOT_FILLED = "order_not_filled"  # submitted, aber (noch) nicht FILLED
+    FAILED = "failed"
+
+
+class TradingCycleResult(BaseModel):
+    """
+    Ergebnis eines vollständigen Orchestrator-Zyklus.
+    Auditierbarer Endpunkt: enthält Referenzen auf jeden Zwischenschritt,
+    damit ein Zyklus im Nachhinein vollständig nachvollzogen werden kann.
+    """
+
+    id: UUID = Field(default_factory=uuid4)
+    started_at: datetime
+    completed_at: datetime
+    status: TradingCycleStatus
+    symbol_key: str
+    timeframe: str
+    signal: Signal | None = None
+    assessment: RiskAssessment | None = None
+    order_request: OrderRequest | None = None
+    order_result: OrderResult | None = None
+    error: str | None = None
+
+
+class TradingCycleCompletedEvent(BaseEvent):
+    source: str = "orchestrator"
+    result: TradingCycleResult
+
+
+class TradingCycleFailedEvent(BaseEvent):
+    source: str = "orchestrator"
+    symbol_key: str
+    timeframe: str
+    error: str
