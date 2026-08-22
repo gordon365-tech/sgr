@@ -122,7 +122,7 @@ class FeatureExtractor:
         # Z-Score Normalisierung
         self._means = np.mean(X_raw, axis=0)
         self._stds = np.std(X_raw, axis=0)
-        self._stds[self._stds == 0] = 1.0  # Division by zero vermeiden
+        self._stds[self._stds < 1e-8] = 1.0  # Division by zero vermeiden (float tolerance)
 
         X_norm = (X_raw - self._means) / self._stds
         self._fitted = True

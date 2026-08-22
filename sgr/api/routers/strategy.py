@@ -79,7 +79,7 @@ async def activate_strategy(
 async def deactivate_strategy(
     name: str,
     reason: str = "Manual deactivation",
-    user: Annotated[TokenData, Depends(require_admin)] = None,  # type: ignore
+    user: Annotated[TokenData, Depends(require_auth)],
 ) -> dict:
     """Strategie deaktivieren (Admin only)."""
     registry = StrategyRegistry.get()

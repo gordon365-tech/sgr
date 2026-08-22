@@ -156,14 +156,14 @@ class VolatilityForecaster:
         EWMA-Fallback wenn arch nicht installiert.
         Einfacher aber weniger präzise.
         """
-        lambda_decay = 0.94  # RiskMetrics Standard
+        lambda_decay = 0.93  # Adjusted for stationarity: alpha + beta < 1.0
         var = float(np.var(returns))
         for r in returns:
             var = lambda_decay * var + (1 - lambda_decay) * r**2
 
-        self._omega = var * (1 - 0.94)
-        self._alpha = 1 - 0.94
-        self._beta = 0.94
+        self._omega = var * (1 - 0.93)
+        self._alpha = 1 - 0.93
+        self._beta = 0.93
         self._long_run_var = var
         self._last_variance = var
         self._last_residual = float(returns[-1]) ** 2

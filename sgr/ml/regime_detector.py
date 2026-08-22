@@ -57,7 +57,7 @@ _REGIME_TO_LABEL: dict[MarketRegime, int] = {
     MarketRegime.RANGING: 2,
     MarketRegime.HIGH_VOLATILITY: 3,
     MarketRegime.CRISIS: 4,
-    MarketRegime.UNKNOWN: 2,  # Default: RANGING
+    MarketRegime.UNKNOWN: 5,  # Unique label for unknown regime
 }
 _LABEL_TO_REGIME: dict[int, MarketRegime] = {v: k for k, v in _REGIME_TO_LABEL.items()}
 

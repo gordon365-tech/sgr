@@ -139,6 +139,10 @@ class TrendFollowingStrategy(BaseStrategy):
 
         confidence = score / max_score if max_score > 0 else 0.0
 
+        # Penalize weak trend (ADX < adx_min)
+        if ind.adx_14 is not None and ind.adx_14 < self._params.adx_min:
+            confidence *= 0.5
+
         if confidence < self._params.min_confidence:
             return None
 
@@ -209,6 +213,10 @@ class TrendFollowingStrategy(BaseStrategy):
                 score += 1.0
 
         confidence = score / max_score if max_score > 0 else 0.0
+
+        # Penalize weak trend (ADX < adx_min)
+        if ind.adx_14 is not None and ind.adx_14 < self._params.adx_min:
+            confidence *= 0.5
 
         if confidence < self._params.min_confidence:
             return None
