@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sgr-config
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "sgr.labels" . | nindent 4 }}
+data:
+  ENVIRONMENT: {{ .Values.global.environment | quote }}
+  TRADING_MODE: {{ .Values.global.tradingMode | quote }}
+  MONITORING_LOG_LEVEL: "INFO"
+  MONITORING_ENABLE_TRACING: "true"
+  API_CORS_ORIGINS: '[{{ .Values.api.ingress.hosts | map "host" | join "," }}]'

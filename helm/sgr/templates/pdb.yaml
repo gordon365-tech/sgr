@@ -1,0 +1,15 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "sgr.fullname" . }}-api
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "sgr.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "sgr.selectorLabels" . | nindent 6 }}
+      component: api
+{{- end }}

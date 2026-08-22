@@ -1,0 +1,218 @@
+# Default values for SGR Helm Chart
+# This is a YAML-formatted file.
+
+global:
+  environment: production
+  tradingMode: paper
+  imagePullPolicy: IfNotPresent
+
+# Namespace
+namespace:
+  create: true
+  name: sgr-prod
+
+# API Configuration
+api:
+  replicaCount: 2
+  
+  image:
+    repository: ghcr.io/gordongraff81-tech/sgr-api
+    tag: latest
+    pullPolicy: IfNotPresent
+  
+  service:
+    type: ClusterIP
+    port: 8000
+  
+  ingress:
+    enabled: true
+    className: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: "letsencrypt-prod"
+      nginx.ingress.kubernetes.io/rate-limit: "100"
+    hosts:
+      - host: api.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls:
+      - secretName: sgr-api-tls
+        hosts:
+          - api.example.com
+  
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "500m"
+    limits:
+      memory: "1Gi"
+      cpu: "1000m"
+  
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+  
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: 8000
+    initialDelaySeconds: 30
+    periodSeconds: 10
+  
+  readinessProbe:
+    httpGet:
+      path: /health
+      port: 8000
+    initialDelaySeconds: 10
+    periodSeconds: 5
+
+# Frontend Configuration
+frontend:
+  replicaCount: 2
+  
+  image:
+    repository: ghcr.io/gordongraff81-tech/sgr-frontend
+    tag: latest
+    pullPolicy: IfNotPresent
+  
+  service:
+    type: ClusterIP
+    port: 3000
+  
+  ingress:
+    enabled: true
+    className: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    hosts:
+      - host: dashboard.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls:
+      - secretName: sgr-frontend-tls
+        hosts:
+          - dashboard.example.com
+  
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "200m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+  
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 70
+
+# PostgreSQL Configuration
+postgresql:
+  enabled: true
+  
+  auth:
+    username: sgr
+    password: "changeme-prod-strong-password"
+    database: sgr
+  
+  primary:
+    persistence:
+      enabled: true
+      size: 20Gi
+      storageClassName: standard
+  
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "500m"
+
+# Redis Configuration
+redis:
+  enabled: true
+  
+  auth:
+    enabled: false
+  
+  master:
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClassName: standard
+  
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "250m"
+
+# Prometheus Configuration
+prometheus:
+  enabled: true
+  
+  image:
+    repository: prom/prometheus
+    tag: v2.52.0
+  
+  retention: 30d
+  
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "500m"
+
+# Grafana Configuration
+grafana:
+  enabled: true
+  
+  image:
+    repository: grafana/grafana
+    tag: "10.4.0"
+  
+  adminPassword: "changeme-grafana-password"
+  
+  datasources:
+    - name: Prometheus
+      type: prometheus
+      url: http://prometheus:9090
+      isDefault: true
+  
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "250m"
+
+# Network Policy
+networkPolicy:
+  enabled: true
+  denyAll: true
+
+# Pod Disruption Budget
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Secrets (for storing sensitive data)
+secrets:
+  # These should be set via --set-string or values file in production
+  dbPassword: "changeme"
+  apiSecretKey: "changeme-min-32-chars"
+  encryptionKey: "changeme-32-byte-key"
+  sentryDsn: ""
+  telegramToken: ""
+  telegramChatId: ""

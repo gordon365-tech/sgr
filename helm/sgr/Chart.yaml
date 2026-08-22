@@ -1,0 +1,21 @@
+apiVersion: v2
+name: sgr
+description: Project SGR - Institutional AI-powered Trading System
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+
+keywords:
+  - trading
+  - ai
+  - kubernetes
+
+maintainers:
+  - name: SGR Team
+    email: team@sgr.example.com
+
+home: https://github.com/gordongraff81-tech/sgr
+sources:
+  - https://github.com/gordongraff81-tech/sgr
+
+dependencies: []
