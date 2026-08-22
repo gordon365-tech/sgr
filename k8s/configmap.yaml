@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sgr-config
+  namespace: sgr-prod
+data:
+  ENVIRONMENT: "production"
+  TRADING_MODE: "paper"
+  MONITORING_LOG_LEVEL: "INFO"
+  MONITORING_ENABLE_TRACING: "true"
+  API_CORS_ORIGINS: '["https://dashboard.example.com"]'
