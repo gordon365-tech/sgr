@@ -154,7 +154,9 @@ class RegimeDetector:
             from sklearn.ensemble import RandomForestClassifier
             from sklearn.metrics import accuracy_score, classification_report
         except ImportError:
-            raise RuntimeError("scikit-learn not installed. Run: pip install scikit-learn")
+            raise RuntimeError(
+                "scikit-learn not installed. Run: pip install scikit-learn"
+            ) from None
 
         if len(feature_sets) < 100:
             raise ValueError(f"Need at least 100 samples, got {len(feature_sets)}")
@@ -189,11 +191,18 @@ class RegimeDetector:
         y_pred = self._rf_model.predict(test_matrix.X)
         accuracy = float(accuracy_score(y_test, y_pred))
 
-        # Per-Class Metriken
-        class_names = [r.value for r in _LABEL_TO_REGIME.values()]
+        # Per-Class Metriken. _generate_labels() erzeugt nur die tatsaechlich
+        # heuristisch erreichbaren Regimes; nicht jedes Label aus
+        # _LABEL_TO_REGIME muss im Test-Split vorkommen (z.B. UNKNOWN nie).
+        # labels=... explizit setzen, damit target_names und die tatsaechlich
+        # ausgewerteten Klassen immer uebereinstimmen (sonst ValueError bei
+        # Groessen-Mismatch).
+        present_labels = sorted(set(int(v) for v in y_train) | set(int(v) for v in y_test))
+        class_names = [_LABEL_TO_REGIME[label].value for label in present_labels]
         report = classification_report(
             y_test,
             y_pred,
+            labels=present_labels,
             target_names=class_names,
             output_dict=True,
             zero_division=0,
