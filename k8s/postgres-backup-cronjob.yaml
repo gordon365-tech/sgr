@@ -1,0 +1,110 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgres-backup
+  namespace: sgr-prod
+spec:
+  # Run daily at 02:00 UTC
+  schedule: "0 2 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: backup-sa
+          containers:
+          - name: backup
+            image: postgres:16-alpine
+            env:
+            - name: DB_HOST
+              value: "postgres.sgr-prod.svc.cluster.local"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: sgr-secrets
+                  key: DB_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: sgr-secrets
+                  key: DB_PASSWORD
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: sgr-secrets
+                  key: DB_NAME
+            - name: BACKUP_DIR
+              value: "/backups"
+            - name: RETENTION_DAYS
+              value: "30"
+            - name: S3_BUCKET
+              value: "sgr-backups"
+            
+            command:
+            - /bin/sh
+            - -c
+            - |
+              apk add --no-cache awscli
+              
+              BACKUP_DATE=$(date +%Y%m%d_%H%M%S)
+              BACKUP_FILE="/tmp/sgr_backup_${BACKUP_DATE}.sql"
+              
+              echo "Starting PostgreSQL backup..."
+              pg_dump -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME > "$BACKUP_FILE"
+              
+              if [ $? -ne 0 ]; then
+                echo "ERROR: Backup failed!"
+                exit 1
+              fi
+              
+              gzip "$BACKUP_FILE"
+              BACKUP_COMPRESSED="${BACKUP_FILE}.gz"
+              
+              echo "Uploading to S3..."
+              aws s3 cp "$BACKUP_COMPRESSED" "s3://${S3_BUCKET}/$(basename $BACKUP_COMPRESSED)"
+              
+              rm -f "$BACKUP_COMPRESSED"
+              echo "Backup completed successfully"
+            
+            volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          
+          volumes:
+          - name: tmp
+            emptyDir: {}
+          
+          restartPolicy: OnFailure
+          backoffLimit: 3
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backup-sa
+  namespace: sgr-prod
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: backup-sa-role
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: backup-sa-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: backup-sa-role
+subjects:
+- kind: ServiceAccount
+  name: backup-sa
+  namespace: sgr-prod
