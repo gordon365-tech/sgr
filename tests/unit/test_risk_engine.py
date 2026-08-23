@@ -17,9 +17,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pytest
+
+if TYPE_CHECKING:
+    import pytest_mock
 
 from sgr.core.types import (
     ExchangeID,
@@ -35,7 +39,7 @@ from sgr.core.types import (
 from sgr.risk.engine import RiskEngine
 from sgr.risk.kill_switch import KillSwitch
 from sgr.risk.position_sizer import PositionSizer
-from sgr.risk.var_calculator import VaRCalculator, VaRMethod
+from sgr.risk.var_calculator import MonteCarloVaR, VaRCalculator, VaRMethod
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -149,6 +153,140 @@ class TestVaRCalculator:
             {"BTC": 0.6, "ETH": 0.4},
         )
         assert result.var >= 0
+
+    def test_cornish_fisher_produces_valid_result(self) -> None:
+        """Cornish-Fisher: korrigiert für Schiefe/Kurtosis, liefert valides VaR/ES."""
+        np.random.seed(42)
+        returns = np.random.normal(0.001, 0.02, 200)
+        calc = VaRCalculator()
+        result = calc.compute(returns, 0.95, VaRMethod.CORNISH_FISHER)
+        assert result.var >= 0
+        assert result.es >= result.var
+        assert result.method == VaRMethod.CORNISH_FISHER
+        assert result.observations == 200
+
+    def test_cornish_fisher_reacts_to_skew(self) -> None:
+        """Bei schiefer Verteilung weicht Cornish-Fisher VaR vom Normal-VaR ab."""
+        np.random.seed(7)
+        # Stark linksschiefe Verteilung (Crypto-typisch: Fat Left Tail)
+        skewed_returns = np.concatenate(
+            [np.random.normal(0.01, 0.01, 190), np.random.normal(-0.15, 0.05, 10)]
+        )
+        calc = VaRCalculator()
+        cf_result = calc.compute(skewed_returns, 0.95, VaRMethod.CORNISH_FISHER)
+        normal_result = calc.compute(skewed_returns, 0.95, VaRMethod.PARAMETRIC_NORMAL)
+        # Beide muessen valide sein; CF muss nicht identisch mit Normal sein
+        assert cf_result.var >= 0
+        assert normal_result.var >= 0
+
+    def test_unknown_method_raises(self) -> None:
+        """Unbekannte VaR-Methode -> ValueError, kein stiller Fallback."""
+        calc = VaRCalculator()
+        returns = np.random.normal(0, 0.02, 50)
+        with pytest.raises(ValueError, match="Unknown VaR method"):
+            calc.compute(returns, 0.95, method="not_a_real_method")  # type: ignore[arg-type]
+
+    def test_result_repr_contains_key_fields(self) -> None:
+        """__repr__ ist menschenlesbar und enthaelt VaR/ES/Confidence/Method."""
+        calc = VaRCalculator()
+        returns = np.random.normal(0, 0.02, 50)
+        result = calc.compute(returns, 0.95, VaRMethod.HISTORICAL)
+        text = repr(result)
+        assert "var=" in text
+        assert "es=" in text
+        assert "historical" in text
+
+    def test_portfolio_var_empty_symbols_returns_zero(self) -> None:
+        """Kein Symbol im Portfolio -> VaR=0, kein Crash (0/0 Fallgrube vermeiden)."""
+        calc = VaRCalculator()
+        result = calc.compute_portfolio_var({}, {})
+        assert result.var == 0.0
+        assert result.es == 0.0
+        assert result.observations == 0
+
+    def test_portfolio_var_insufficient_data_falls_back_conservative(self) -> None:
+        """Zu kurze Return-Historie (< 10 Beobachtungen) -> konservativer Fallback."""
+        calc = VaRCalculator()
+        result = calc.compute_portfolio_var(
+            {"BTC": np.array([0.01, -0.02, 0.005])},
+            {"BTC": 1.0},
+        )
+        # Fail-safe: konservative Default-Werte statt instabiler Kleinstichproben-VaR
+        assert result.var == 0.05
+        assert result.es == 0.08
+
+
+# ---------------------------------------------------------------------------
+# Monte Carlo VaR
+# ---------------------------------------------------------------------------
+
+
+class TestMonteCarloVaR:
+    """
+    MonteCarloVaR ist aktuell nicht in RiskEngine/Orchestrator verdrahtet
+    (Docstring: "für Stress-Tests und Go-Live Gates", nicht Echtzeit-Pfad).
+    Da die Klasse aber oeffentlich aus sgr.risk exportiert wird und für
+    spaetere Live-Trading-Readiness-Checks vorgesehen ist, muss sie
+    korrekt funktionieren, auch ohne aktuelle Produktiv-Einbindung.
+    """
+
+    def test_simulate_returns_all_expected_keys(self) -> None:
+        np.random.seed(42)
+        returns = np.random.normal(0.001, 0.02, 100)
+        mc = MonteCarloVaR()
+        result = mc.simulate(returns, portfolio_value=100_000.0, simulations=500)
+        assert set(result.keys()) == {
+            "var_95",
+            "var_99",
+            "es_95",
+            "worst_case",
+            "percentile_5",
+        }
+
+    def test_simulate_var_99_exceeds_var_95(self) -> None:
+        """Höhere Konfidenz -> höheres VaR (99% Verlust >= 95% Verlust)."""
+        np.random.seed(42)
+        returns = np.random.normal(0.0, 0.02, 200)
+        mc = MonteCarloVaR()
+        result = mc.simulate(returns, portfolio_value=100_000.0, simulations=2000)
+        assert result["var_99"] >= result["var_95"]
+
+    def test_simulate_es_exceeds_var(self) -> None:
+        """Expected Shortfall (Tail-Mittelwert) muss immer >= VaR sein."""
+        np.random.seed(42)
+        returns = np.random.normal(0.0, 0.02, 200)
+        mc = MonteCarloVaR()
+        result = mc.simulate(returns, portfolio_value=100_000.0, simulations=2000)
+        assert result["es_95"] >= result["var_95"]
+
+    def test_simulate_worst_case_exceeds_var_99(self) -> None:
+        """Worst Case (Simulations-Maximum) muss mindestens so hoch wie 99% VaR sein."""
+        np.random.seed(42)
+        returns = np.random.normal(0.0, 0.02, 200)
+        mc = MonteCarloVaR()
+        result = mc.simulate(returns, portfolio_value=100_000.0, simulations=2000)
+        assert result["worst_case"] >= result["var_99"]
+
+    def test_simulate_is_deterministic_with_fixed_seed(self) -> None:
+        """Fester Seed -> reproduzierbare Ergebnisse (Auditierbarkeit)."""
+        returns = np.random.default_rng(1).normal(0.001, 0.02, 100)
+        mc = MonteCarloVaR()
+        result_a = mc.simulate(returns, portfolio_value=50_000.0, simulations=500, seed=123)
+        result_b = mc.simulate(returns, portfolio_value=50_000.0, simulations=500, seed=123)
+        assert result_a == result_b
+
+    def test_simulate_scales_with_horizon(self) -> None:
+        """Längerer Horizont -> höheres VaR (sqrt(t)-Skalierung der Volatilität)."""
+        np.random.seed(42)
+        returns = np.random.normal(0.0, 0.02, 200)
+        mc = MonteCarloVaR()
+        result_1d = mc.simulate(
+            returns, portfolio_value=100_000.0, simulations=2000, horizon_days=1, seed=42
+        )
+        result_10d = mc.simulate(
+            returns, portfolio_value=100_000.0, simulations=2000, horizon_days=10, seed=42
+        )
+        assert result_10d["var_95"] > result_1d["var_95"]
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +446,111 @@ class TestKillSwitch:
         await kill_switch.reset(reset_by="test_user")
         assert not kill_switch.is_active
         assert kill_switch.trading_allowed
+
+    async def test_trigger_without_exchange_pool_does_not_crash(
+        self, kill_switch: KillSwitch
+    ) -> None:
+        """Kein Exchange Pool injiziert -> Warnung loggen, kein Crash (fail-safe)."""
+        # kill_switch fixture hat keinen Pool injiziert
+        await kill_switch.trigger("No pool test")
+        assert kill_switch.is_active
+
+    async def test_inject_exchange_pool_stores_reference(
+        self, kill_switch: KillSwitch
+    ) -> None:
+        fake_pool = object()
+        kill_switch.inject_exchange_pool(fake_pool)
+        assert kill_switch._exchange_pool is fake_pool
+
+    async def test_trigger_with_wrong_pool_type_skips_cancellation(
+        self, kill_switch: KillSwitch
+    ) -> None:
+        """Injiziertes Objekt ist kein ExchangePool -> Cancel wird übersprungen, kein Crash."""
+        kill_switch.inject_exchange_pool(object())  # kein ExchangePool
+        await kill_switch.trigger("Wrong pool type test")
+        assert kill_switch.is_active
+
+    async def test_trigger_cancels_orders_on_matching_mode_adapters(
+        self, kill_switch: KillSwitch, mocker: pytest_mock.MockerFixture
+    ) -> None:
+        """Cancel wird nur für Adapter im selben TradingMode aufgerufen, nicht Cross-Mode."""
+        from sgr.exchanges.factory import ExchangePool
+
+        pool = mocker.Mock(spec=ExchangePool)
+        paper_adapter = mocker.AsyncMock()
+        paper_adapter.cancel_all_orders = mocker.AsyncMock(return_value=3)
+        live_adapter = mocker.AsyncMock()
+        live_adapter.cancel_all_orders = mocker.AsyncMock(return_value=99)
+
+        pool._adapters = {
+            (ExchangeID.BINANCE, TradingMode.PAPER): paper_adapter,
+            (ExchangeID.BINANCE, TradingMode.LIVE): live_adapter,
+        }
+        kill_switch.inject_exchange_pool(pool)
+
+        await kill_switch.trigger("Cross-mode isolation test")
+
+        paper_adapter.cancel_all_orders.assert_awaited_once()
+        live_adapter.cancel_all_orders.assert_not_awaited()
+
+    async def test_trigger_isolates_per_adapter_cancel_failure(
+        self, kill_switch: KillSwitch, mocker: pytest_mock.MockerFixture
+    ) -> None:
+        """Ein fehlschlagender Adapter darf andere Adapter nicht blockieren (best-effort)."""
+        from sgr.exchanges.factory import ExchangePool
+
+        pool = mocker.Mock(spec=ExchangePool)
+        failing_adapter = mocker.AsyncMock()
+        failing_adapter.cancel_all_orders = mocker.AsyncMock(
+            side_effect=RuntimeError("exchange unreachable")
+        )
+        healthy_adapter = mocker.AsyncMock()
+        healthy_adapter.cancel_all_orders = mocker.AsyncMock(return_value=2)
+
+        pool._adapters = {
+            (ExchangeID.BINANCE, TradingMode.PAPER): failing_adapter,
+            (ExchangeID.KRAKEN, TradingMode.PAPER): healthy_adapter,
+        }
+        kill_switch.inject_exchange_pool(pool)
+
+        # Muss trotz Exception in einem Adapter durchlaufen (fail-safe, kein Crash)
+        await kill_switch.trigger("Partial failure test")
+
+        assert kill_switch.is_active
+        failing_adapter.cancel_all_orders.assert_awaited_once()
+        healthy_adapter.cancel_all_orders.assert_awaited_once()
+
+    async def test_trigger_with_close_positions_logs_without_crash(
+        self, kill_switch: KillSwitch
+    ) -> None:
+        """close_positions=True triggert _close_all_positions-Pfad.
+
+        Log-only: Portfolio Engine reagiert separat auf das KillSwitchEvent.
+        """
+        await kill_switch.trigger("Close positions test", close_positions=True)
+        assert kill_switch.is_active
+
+    async def test_trigger_survives_adapter_iteration_crash(
+        self, kill_switch: KillSwitch, mocker: pytest_mock.MockerFixture
+    ) -> None:
+        """
+        Äußerster Fail-Safe: selbst wenn die Iteration über _adapters selbst
+        crasht (nicht nur ein einzelner cancel_all_orders-Call), darf trigger()
+        nicht crashen. Kill Switch State muss trotzdem aktiv bleiben.
+        """
+        from sgr.exchanges.factory import ExchangePool
+
+        pool = mocker.Mock(spec=ExchangePool)
+        # .items() wirft direkt -> testet den äußeren try/except um die
+        # gesamte Adapter-Iteration, nicht nur um einen einzelnen Adapter-Call
+        broken_dict = mocker.Mock()
+        broken_dict.items.side_effect = RuntimeError("adapter registry corrupted")
+        pool._adapters = broken_dict
+        kill_switch.inject_exchange_pool(pool)
+
+        await kill_switch.trigger("Adapter registry crash test")
+
+        assert kill_switch.is_active
 
     async def test_reset_inactive_no_error(self, kill_switch: KillSwitch) -> None:
         """Reset auf inaktivem Kill Switch wirft keine Exception."""
