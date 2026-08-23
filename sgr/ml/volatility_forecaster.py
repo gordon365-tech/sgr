@@ -156,14 +156,23 @@ class VolatilityForecaster:
         EWMA-Fallback wenn arch nicht installiert.
         Einfacher aber weniger präzise.
         """
-        lambda_decay = 0.93  # Adjusted for stationarity: alpha + beta < 1.0
+        # Stationaritaet (alpha + beta < 1.0) darf nicht von exakter
+        # IEEE-754-Komplementaritaet zwischen alpha und beta abhaengen:
+        # JEDES Paar (1-x) + x kann durch unabhaengiges Runden von
+        # Subtraktion und Addition exakt 1.0 ergeben, unabhaengig vom
+        # gewaehlten x (z.B. bei x=0.90: 1.0-0.90 -> 0.09999999999999998,
+        # aber (1.0-0.90)+0.90 rundet wieder auf exakt 1.0). Deshalb hier
+        # ein expliziter numerischer Sicherheitsabstand (margin) statt
+        # reiner Komplementaer-Subtraktion.
+        lambda_decay = 0.90
+        stationarity_margin = 0.01
         var = float(np.var(returns))
         for r in returns:
             var = lambda_decay * var + (1 - lambda_decay) * r**2
 
-        self._omega = var * (1 - 0.93)
-        self._alpha = 1 - 0.93
-        self._beta = 0.93
+        self._beta = lambda_decay
+        self._alpha = max(1.0 - lambda_decay - stationarity_margin, 0.0)
+        self._omega = var * self._alpha
         self._long_run_var = var
         self._last_variance = var
         self._last_residual = float(returns[-1]) ** 2

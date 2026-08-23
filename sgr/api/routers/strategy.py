@@ -78,10 +78,19 @@ async def activate_strategy(
 @router.post("/{name}/deactivate")
 async def deactivate_strategy(
     name: str,
-    reason: str = "Manual deactivation",
     user: Annotated[TokenData, Depends(require_auth)],
+    reason: str = "Manual deactivation",
 ) -> dict:
-    """Strategie deaktivieren (Admin only)."""
+    """Strategie deaktivieren.
+
+    Bewusst require_auth statt require_admin: Deaktivieren ist die
+    defensive/sichere Richtung (eine Strategy vom Trading auszuschliessen
+    darf niedrigschwelliger sein als sie zu aktivieren). Parameter-
+    Reihenfolge: `user` (kein Default) muss vor `reason` (mit Default)
+    stehen, sonst SyntaxError. FastAPI löst Dependencies über den
+    Parameternamen auf, nicht über die Position, daher ist die Umsortierung
+    ohne Verhaltensänderung möglich.
+    """
     registry = StrategyRegistry.get()
     if registry.get_entry(name) is None:
         raise HTTPException(status_code=404, detail=f"Strategy '{name}' not found")
