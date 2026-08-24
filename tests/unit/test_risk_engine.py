@@ -716,6 +716,207 @@ class TestRiskEngineLimits:
 
 
 # ---------------------------------------------------------------------------
+# Risk Engine – Coverage-Lücken (deterministisch, kein Coverage-Theater)
+# ---------------------------------------------------------------------------
+
+
+class TestRiskEngineRemainingGaps:
+    """
+    Deckt die verbleibenden 16 Zeilen in sgr/risk/engine.py ab:
+    142-151 (echter except-Block), 235-236 (reduction_factor angewendet),
+    246, 248 (Soft-Limit- und Warning-Sammlung), 313-318 (VaR mit >=10
+    Return-History-Einträgen), 346-349 (Rolling-Window-Trim), 451 (WARNING-
+    Status-Zweig in _check_threshold).
+
+    Jeder Test verifiziert deterministisch den Zielpfad statt auf einen
+    zufällig zutreffenden Zustand zu hoffen.
+    """
+
+    async def test_except_block_on_internal_exception(
+        self,
+        risk_engine: RiskEngine,
+        sample_signal: Signal,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        Zeilen 142-151: der äußere except-Block in evaluate() wird nur
+        erreicht, wenn _evaluate_internal selbst wirft – nicht durch einen
+        Guard-Pfad wie portfolio_value=0 (der landet in _reject via
+        PositionSizer, siehe test_fail_safe_on_exception oben).
+        Wir lassen _compute_metrics gezielt crashen.
+        """
+        await risk_engine.initialize()
+
+        def boom(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("simulated metrics computation failure")
+
+        monkeypatch.setattr(risk_engine, "_compute_metrics", boom)
+
+        assessment = await risk_engine.evaluate(
+            signal=sample_signal,
+            open_positions=[],
+            portfolio_value=Decimal("100000"),
+            available_capital=Decimal("50000"),
+            current_price=Decimal("50000"),
+        )
+
+        assert assessment.decision == RiskDecision.REJECTED
+        assert assessment.rejection_reason is not None
+        assert "Risk engine error" in assessment.rejection_reason
+        assert "simulated metrics computation failure" in assessment.rejection_reason
+        assert any("error" in w.lower() for w in assessment.warnings)
+
+    async def test_reduction_factor_applied_on_soft_breach(
+        self,
+        risk_engine: RiskEngine,
+        sample_signal: Signal,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        Zeilen 235-236: reduction_factor < 1.0 muss die Quantity tatsächlich
+        multiplizieren und eine Warning erzeugen. Wir mocken _run_all_checks,
+        um einen deterministischen Soft-Breach zu erzwingen, statt auf
+        zufällige Heat-Werte aus vielen offenen Positionen zu hoffen.
+        """
+        await risk_engine.initialize()
+
+        from sgr.risk.types import LimitCheck, LimitStatus, LimitType
+
+        soft_breach_check = LimitCheck(
+            name="portfolio_heat",
+            limit_type=LimitType.SOFT,
+            status=LimitStatus.BREACHED,
+            current_value=0.9,
+            limit_value=0.8,
+            message="Portfolio heat 0.90 exceeds limit 0.80",
+            reduction_factor=0.5,
+        )
+
+        def fake_checks(metrics: object) -> list[LimitCheck]:
+            return [soft_breach_check]
+
+        monkeypatch.setattr(risk_engine, "_run_all_checks", fake_checks)
+
+        assessment = await risk_engine.evaluate(
+            signal=sample_signal,
+            open_positions=[],
+            portfolio_value=Decimal("100000"),
+            available_capital=Decimal("50000"),
+            current_price=Decimal("50000"),
+        )
+
+        assert assessment.decision == RiskDecision.REDUCED
+        assert any("reduced to 50%" in w.lower() for w in assessment.warnings)
+
+    async def test_soft_breach_and_warning_messages_collected(
+        self,
+        risk_engine: RiskEngine,
+        sample_signal: Signal,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """
+        Zeilen 246 und 248: sowohl der SOFT+BREACHED-Zweig ("Soft limit: ...")
+        als auch der WARNING-Zweig ("Warning: ...") müssen jeweils eine
+        eigene Warning-Message erzeugen. reduction_factor bleibt bei 1.0,
+        damit qty > 0 bleibt und wir den Loop-Body sicher erreichen.
+        """
+        await risk_engine.initialize()
+
+        from sgr.risk.types import LimitCheck, LimitStatus, LimitType
+
+        soft_breach_no_reduction = LimitCheck(
+            name="correlation_exposure",
+            limit_type=LimitType.SOFT,
+            status=LimitStatus.BREACHED,
+            current_value=1.0,
+            limit_value=0.9,
+            message="Correlation exposure 1.00 exceeds limit 0.90",
+            reduction_factor=1.0,
+        )
+        warning_check = LimitCheck(
+            name="daily_loss",
+            limit_type=LimitType.SOFT,
+            status=LimitStatus.WARNING,
+            current_value=0.85,
+            limit_value=0.90,
+            message="Daily loss approaching limit",
+            reduction_factor=1.0,
+        )
+
+        def fake_checks(metrics: object) -> list[LimitCheck]:
+            return [soft_breach_no_reduction, warning_check]
+
+        monkeypatch.setattr(risk_engine, "_run_all_checks", fake_checks)
+
+        assessment = await risk_engine.evaluate(
+            signal=sample_signal,
+            open_positions=[],
+            portfolio_value=Decimal("100000"),
+            available_capital=Decimal("50000"),
+            current_price=Decimal("50000"),
+        )
+
+        assert any(w.startswith("Soft limit:") for w in assessment.warnings)
+        assert any(w.startswith("Warning:") for w in assessment.warnings)
+
+    def test_var_computed_with_sufficient_return_history(
+        self,
+        risk_engine: RiskEngine,
+    ) -> None:
+        """
+        Zeilen 313-318: VaR/ES werden nur berechnet, wenn mindestens 10
+        Werte in der Return-History vorliegen. Mit weniger bleibt var_95
+        bei 0.0 (siehe Default oben im Code).
+        """
+        for r in [0.01, -0.02, 0.015, -0.01, 0.02, -0.015, 0.01, -0.005, 0.03, -0.02]:
+            risk_engine.update_returns(r)
+
+        assert len(risk_engine._return_history) == 10
+
+        metrics = risk_engine._compute_metrics(Decimal("100000"), [])
+
+        assert metrics.var_95 != 0.0
+        assert metrics.var_95 >= 0.0
+
+    def test_return_history_rolling_window_trim(
+        self,
+        risk_engine: RiskEngine,
+    ) -> None:
+        """
+        Zeilen 346-349: bei mehr als 252 Einträgen wird die Historie auf
+        die letzten 252 (1 Handelsjahr) gekürzt.
+        """
+        for i in range(260):
+            risk_engine.update_returns(0.001 * (i % 5))
+
+        assert len(risk_engine._return_history) == 252
+        # Die ältesten 8 Einträge (Index 0-7) müssen verworfen worden sein.
+        assert risk_engine._return_history[0] == 0.001 * (8 % 5)
+
+    def test_check_threshold_warning_status_branch(
+        self,
+        risk_engine: RiskEngine,
+    ) -> None:
+        """
+        Zeile 451: current liegt zwischen warning_threshold*limit und limit
+        selbst -> Status muss WARNING sein, nicht OK oder BREACHED.
+        """
+        from sgr.risk.types import LimitStatus, LimitType
+
+        check = risk_engine._check_threshold(
+            name="test_metric",
+            limit_type=LimitType.SOFT,
+            current=0.95,
+            limit=1.0,
+            message_template="{current:.2f} vs {limit:.2f}",
+            warning_threshold=0.9,
+            reduction_factor=0.5,
+        )
+
+        assert check.status == LimitStatus.WARNING
+
+
+# ---------------------------------------------------------------------------
 # Risk Engine – Order Construction
 # ---------------------------------------------------------------------------
 
