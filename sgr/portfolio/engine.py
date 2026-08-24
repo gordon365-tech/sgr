@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 from uuid import uuid4
 
 from sgr.core.logging import get_logger
@@ -102,10 +103,14 @@ class PortfolioEngine:
         self,
         trading_mode: TradingMode,
         initial_cash: Decimal = Decimal("10000"),
+        position_repository: Any = None,
     ) -> None:
         self._trading_mode = trading_mode
         self._state = PortfolioState(trading_mode, initial_cash)
         self._trade_history: list[dict] = []  # Closed trades
+        # Optional: PositionRepository fuer Crash-Recovery und Phase 7B
+        # Reconciliation. None = rein in-memory (Tests, Backtesting).
+        self._position_repo: Any = position_repository
 
     # ------------------------------------------------------------------
     # Event Handlers
@@ -132,10 +137,10 @@ class PortfolioEngine:
 
         if existing is None:
             # Neue Position öffnen
-            self._open_position(result, symbol_key)
+            await self._open_position(result, symbol_key)
         else:
             # Bestehende Position anpassen (reduce/close/flip)
-            self._update_position(existing, result, symbol_key)
+            await self._update_position(existing, result, symbol_key)
 
         self._state.update_peak()
 
@@ -146,7 +151,7 @@ class PortfolioEngine:
             open_positions=len(self._state.positions),
         )
 
-    def _open_position(self, result: OrderResult, symbol_key: str) -> None:
+    async def _open_position(self, result: OrderResult, symbol_key: str) -> None:
         """Öffnet neue Position nach Fill."""
         side = PositionSide.LONG if self._infer_side(result) == Side.BUY else PositionSide.SHORT
 
@@ -167,6 +172,8 @@ class PortfolioEngine:
         notional = result.filled_quantity * result.average_fill_price  # type: ignore[operator]
         self._state._cash -= notional + result.fees
 
+        await self._persist_position_upsert(position)
+
         log.info(
             "portfolio.position_opened",
             symbol=symbol_key,
@@ -176,7 +183,7 @@ class PortfolioEngine:
             fees=str(result.fees),
         )
 
-    def _update_position(
+    async def _update_position(
         self,
         existing: Position,
         result: OrderResult,
@@ -208,6 +215,8 @@ class PortfolioEngine:
                 # Cash wieder erhöhen
                 self._state._cash += exit_price * close_qty - result.fees
 
+                await self._persist_position_close(existing.id, existing.realized_pnl + realized)
+
                 log.info(
                     "portfolio.position_closed",
                     symbol=symbol_key,
@@ -231,6 +240,8 @@ class PortfolioEngine:
                 )
                 self._state._positions[symbol_key] = updated
                 self._state._cash += exit_price * close_qty - result.fees
+
+                await self._persist_position_upsert(updated)
 
     def _record_trade(
         self,
@@ -337,6 +348,127 @@ class PortfolioEngine:
             ),
             "trading_mode": self._trading_mode.value,
         }
+
+    # ------------------------------------------------------------------
+    # Persistence (Crash-Recovery, Phase 7B Reconciliation)
+    # ------------------------------------------------------------------
+
+    async def restore_from_persistence(self) -> int:
+        """
+        Laedt offene Positionen aus der DB in den in-memory State.
+        Muss beim Startup aufgerufen werden, BEVOR Trading beginnt.
+
+        Fail-Closed: Ein DB-Fehler wird NICHT geschluckt. Silent-Empty-Start
+        waere gefaehrlicher als ein expliziter Crash, weil das System sonst
+        mit leerem Portfolio-State startet, obwohl real offene Positionen
+        existieren (doppeltes Hedging, falsche Risk-Berechnung, verwaiste
+        Exchange-Positionen ohne lokale Kill-Switch-Kontrolle).
+
+        Returns: Anzahl wiederhergestellter Positionen.
+
+        Raises:
+            RuntimeError: wenn kein PositionRepository injiziert wurde.
+            Exception: jede DB-Exception wird weitergereicht (fail-closed).
+        """
+        if self._position_repo is None:
+            raise RuntimeError(
+                "restore_from_persistence() aufgerufen ohne injiziertes "
+                "PositionRepository. Fail-closed: kein impliziter Empty-Start."
+            )
+
+        rows = await self._position_repo.get_open_positions(self._trading_mode)
+
+        restored = 0
+        for row in rows:
+            position = self._position_from_row(row)
+            symbol_key = str(position.symbol)
+            self._state._positions[symbol_key] = position
+            restored += 1
+
+        self._state.update_peak()
+
+        log.info(
+            "portfolio.restored_from_persistence",
+            trading_mode=self._trading_mode.value,
+            restored_positions=restored,
+        )
+        return restored
+
+    @staticmethod
+    def _position_from_row(row: dict[str, Any]) -> Position:
+        """Rekonstruiert Position (Domain) aus PositionRepository-Row (dict)."""
+        from sgr.core.types import ExchangeID
+
+        base, _, quote = row["symbol"].partition("/")
+        symbol = Symbol(base=base, quote=quote, exchange=ExchangeID(row["exchange"]))
+
+        return Position(
+            id=row["id"],
+            symbol=symbol,
+            side=PositionSide(row["side"]),
+            quantity=row["quantity"],
+            entry_price=row["entry_price"],
+            current_price=row["current_price"],
+            leverage=row["leverage"],
+            unrealized_pnl=row["unrealized_pnl"],
+            realized_pnl=row["realized_pnl"],
+            opened_at=row["opened_at"],
+            strategy_name=row["strategy_name"],
+            trading_mode=TradingMode(row["trading_mode"]),
+        )
+
+    async def _persist_position_upsert(self, position: Position) -> None:
+        """
+        Schreibt eine offene/aktualisierte Position in die DB.
+        Best-effort: DB-Fehler dürfen den Trading-Betrieb NICHT blockieren
+        (gleiches Fail-Safe-Muster wie KillSwitch._cancel_all_orders --
+        Persistenz-Fehler werden geloggt, nicht propagiert).
+        """
+        if self._position_repo is None:
+            return
+        try:
+            await self._position_repo.upsert_open(
+                {
+                    "id": str(position.id),
+                    "symbol": position.symbol.ccxt_symbol,
+                    "exchange": position.symbol.exchange.value,
+                    "side": position.side.value,
+                    "quantity": position.quantity,
+                    "entry_price": position.entry_price,
+                    "current_price": position.current_price,
+                    "leverage": position.leverage,
+                    "unrealized_pnl": position.unrealized_pnl,
+                    "realized_pnl": position.realized_pnl,
+                    "opened_at": position.opened_at,
+                    "strategy_name": position.strategy_name,
+                    "trading_mode": position.trading_mode.value,
+                }
+            )
+        except Exception as e:
+            log.error(
+                "portfolio.persist_position_failed",
+                symbol=str(position.symbol),
+                error=str(e),
+            )
+
+    async def _persist_position_close(
+        self, position_id: Any, realized_pnl: Decimal
+    ) -> None:
+        """Markiert eine Position in der DB als geschlossen. Best-effort."""
+        if self._position_repo is None:
+            return
+        try:
+            await self._position_repo.close(
+                position_id=str(position_id),
+                closed_at=datetime.now(tz=UTC),
+                realized_pnl=realized_pnl,
+            )
+        except Exception as e:
+            log.error(
+                "portfolio.persist_close_failed",
+                position_id=str(position_id),
+                error=str(e),
+            )
 
     # ------------------------------------------------------------------
     # Helpers

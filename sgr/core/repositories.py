@@ -30,6 +30,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sgr.core.database import (
     CandleModel,
     OrderModel,
+    PositionModel,
     RiskEventModel,
     StrategyModel,
     TradeModel,
@@ -224,6 +225,151 @@ class OrderRepository:
                 }
                 for r in rows
             ]
+
+
+# ---------------------------------------------------------------------------
+# Position Repository
+# ---------------------------------------------------------------------------
+
+
+class PositionRepository:
+    """
+    Persistenz für offene und geschlossene Positionen.
+
+    Notwendig für:
+        - Crash-Recovery: PortfolioEngine haelt Positionen aktuell nur
+          in-memory. Bei Neustart gehen offene Positionen sonst verloren.
+        - Phase 7B Reconciliation: Abgleich DB-Positionen <-> Exchange-State.
+
+    Upsert-Semantik ueber (symbol, exchange, trading_mode, is_open) statt
+    reinem Insert: PortfolioEngine haelt pro Symbol maximal eine offene
+    Position (siehe PortfolioState._positions: dict[str, Position], ein
+    Eintrag pro Symbol-Key). Ein zweiter Fill auf dasselbe Symbol aktualisiert
+    dieselbe offene Position, statt eine zweite Zeile anzulegen.
+    """
+
+    async def upsert_open(self, position_data: dict[str, Any]) -> str:
+        """
+        Legt eine offene Position an oder aktualisiert die bestehende offene
+        Position fuer (symbol, exchange, trading_mode).
+
+        Erwartete Keys in position_data: id, symbol, exchange, side, quantity,
+        entry_price, current_price, leverage, unrealized_pnl, realized_pnl,
+        opened_at, strategy_name, trading_mode, user_id (optional).
+
+        Returns: position_id (str)
+        """
+        async with get_session() as session:
+            stmt = (
+                select(PositionModel)
+                .where(
+                    and_(
+                        PositionModel.symbol == position_data["symbol"],
+                        PositionModel.exchange == position_data["exchange"],
+                        PositionModel.trading_mode == position_data["trading_mode"],
+                        PositionModel.is_open.is_(True),
+                    )
+                )
+                .limit(1)
+            )
+            result = await session.execute(stmt)
+            existing = result.scalar_one_or_none()
+
+            if existing is not None:
+                updates = {
+                    k: v
+                    for k, v in position_data.items()
+                    if k not in ("id", "symbol", "exchange", "trading_mode", "opened_at")
+                }
+                update_stmt = (
+                    update(PositionModel)
+                    .where(PositionModel.id == existing.id)
+                    .values(**updates)
+                )
+                await session.execute(update_stmt)
+                return str(existing.id)
+
+            position_id = position_data.get("id") or str(uuid4())
+            row = {**position_data, "id": position_id, "is_open": True}
+            position = PositionModel(**row)
+            session.add(position)
+            await session.flush()
+            return str(position.id)
+
+    async def close(
+        self,
+        position_id: str,
+        closed_at: datetime,
+        realized_pnl: Decimal | None = None,
+    ) -> None:
+        """Markiert eine Position als geschlossen. Idempotent (kein Fehler bei doppeltem Close)."""
+        updates: dict[str, Any] = {"is_open": False, "closed_at": closed_at}
+        if realized_pnl is not None:
+            updates["realized_pnl"] = realized_pnl
+
+        async with get_session() as session:
+            stmt = update(PositionModel).where(PositionModel.id == position_id).values(**updates)
+            await session.execute(stmt)
+
+    async def get_open_positions(
+        self,
+        trading_mode: TradingMode,
+        user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Alle aktuell offenen Positionen fuer einen Trading Mode (fuer Startup-Restore)."""
+        async with get_session() as session:
+            conditions = [
+                PositionModel.trading_mode == trading_mode.value,
+                PositionModel.is_open.is_(True),
+            ]
+            if user_id is not None:
+                conditions.append(PositionModel.user_id == user_id)
+
+            stmt = select(PositionModel).where(and_(*conditions)).order_by(PositionModel.opened_at)
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+            return [self._to_dict(r) for r in rows]
+
+    async def get_by_symbol(
+        self,
+        symbol: str,
+        exchange: str,
+        trading_mode: TradingMode,
+    ) -> dict[str, Any] | None:
+        """Aktuell offene Position fuer ein Symbol, falls vorhanden."""
+        async with get_session() as session:
+            stmt = select(PositionModel).where(
+                and_(
+                    PositionModel.symbol == symbol,
+                    PositionModel.exchange == exchange,
+                    PositionModel.trading_mode == trading_mode.value,
+                    PositionModel.is_open.is_(True),
+                )
+            )
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            return self._to_dict(row) if row is not None else None
+
+    @staticmethod
+    def _to_dict(r: PositionModel) -> dict[str, Any]:
+        return {
+            "id": str(r.id),
+            "symbol": r.symbol,
+            "exchange": r.exchange,
+            "side": r.side,
+            "quantity": r.quantity,
+            "entry_price": r.entry_price,
+            "current_price": r.current_price,
+            "leverage": r.leverage,
+            "unrealized_pnl": r.unrealized_pnl,
+            "realized_pnl": r.realized_pnl,
+            "is_open": r.is_open,
+            "opened_at": r.opened_at,
+            "closed_at": r.closed_at,
+            "strategy_name": r.strategy_name,
+            "trading_mode": r.trading_mode,
+            "user_id": str(r.user_id) if r.user_id else None,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +588,7 @@ class Repositories:
     def __init__(self) -> None:
         self.candles = CandleRepository()
         self.orders = OrderRepository()
+        self.positions = PositionRepository()
         self.trades = TradeRepository()
         self.strategies = StrategyRepository()
         self.users = UserRepository()

@@ -483,3 +483,198 @@ class TestPortfolioEngine:
         assert "open_positions" in summary
         assert "trading_mode" in summary
         assert summary["trading_mode"] == "paper"
+
+
+# ===========================================================================
+# Portfolio Persistence (PositionRepository Integration)
+# ===========================================================================
+
+
+class _FakePositionRepo:
+    """
+    Test-Double für PositionRepository. Kein Mock-Framework noetig, da das
+    Verhalten (Erfolg/Fehler-Simulation) explizit steuerbar sein muss.
+    """
+
+    def __init__(self) -> None:
+        self.upserted: list[dict] = []
+        self.closed: list[dict] = []
+        self._open_rows: list[dict] = []
+        self.raise_on_get_open: Exception | None = None
+        self.raise_on_upsert: Exception | None = None
+        self.raise_on_close: Exception | None = None
+
+    async def get_open_positions(self, trading_mode, user_id=None):
+        if self.raise_on_get_open is not None:
+            raise self.raise_on_get_open
+        return self._open_rows
+
+    async def upsert_open(self, position_data: dict) -> str:
+        if self.raise_on_upsert is not None:
+            raise self.raise_on_upsert
+        self.upserted.append(position_data)
+        return position_data.get("id", "generated-id")
+
+    async def close(self, position_id, closed_at, realized_pnl=None) -> None:
+        if self.raise_on_close is not None:
+            raise self.raise_on_close
+        self.closed.append(
+            {"position_id": position_id, "closed_at": closed_at, "realized_pnl": realized_pnl}
+        )
+
+
+class TestPortfolioRestoreFromPersistence:
+    async def test_raises_without_injected_repository(self) -> None:
+        """Fail-closed: kein Repo injiziert -> RuntimeError, kein impliziter Empty-Start."""
+        engine = PortfolioEngine(TradingMode.PAPER)
+        with pytest.raises(RuntimeError, match="ohne injiziertes"):
+            await engine.restore_from_persistence()
+
+    async def test_db_error_propagates_fail_closed(self) -> None:
+        """Fail-closed: DB-Fehler beim Restore wird NICHT geschluckt."""
+        repo = _FakePositionRepo()
+        repo.raise_on_get_open = ConnectionError("db unreachable")
+        engine = PortfolioEngine(TradingMode.PAPER, position_repository=repo)
+
+        with pytest.raises(ConnectionError):
+            await engine.restore_from_persistence()
+
+        # State darf nicht heimlich als "leer aber gueltig" markiert werden
+        assert len(engine.positions) == 0
+
+    async def test_restores_open_positions_into_state(self) -> None:
+        """Erfolgreicher Restore rekonstruiert Position-Objekte korrekt aus DB-Rows."""
+        repo = _FakePositionRepo()
+        repo._open_rows = [
+            {
+                "id": str(uuid4()),
+                "symbol": "BTC/USDT",
+                "exchange": "binance",
+                "side": "long",
+                "quantity": Decimal("0.5"),
+                "entry_price": Decimal("48000"),
+                "current_price": Decimal("49000"),
+                "leverage": Decimal("1"),
+                "unrealized_pnl": Decimal("500"),
+                "realized_pnl": Decimal("0"),
+                "opened_at": datetime.now(tz=UTC),
+                "closed_at": None,
+                "strategy_name": "trend_following",
+                "trading_mode": "paper",
+                "user_id": None,
+            }
+        ]
+        engine = PortfolioEngine(TradingMode.PAPER, position_repository=repo)
+
+        restored = await engine.restore_from_persistence()
+
+        assert restored == 1
+        assert len(engine.positions) == 1
+        pos = engine.positions[0]
+        assert pos.symbol.base == "BTC"
+        assert pos.symbol.quote == "USDT"
+        assert pos.side == PositionSide.LONG
+        assert pos.quantity == Decimal("0.5")
+        assert pos.entry_price == Decimal("48000")
+
+    async def test_restore_empty_db_is_valid_zero_positions(self) -> None:
+        """Kein DB-Fehler, aber auch keine offenen Positionen -> gueltiger Start mit 0."""
+        repo = _FakePositionRepo()
+        repo._open_rows = []
+        engine = PortfolioEngine(TradingMode.PAPER, position_repository=repo)
+
+        restored = await engine.restore_from_persistence()
+
+        assert restored == 0
+        assert len(engine.positions) == 0
+
+
+class TestPortfolioPersistenceWriteThrough:
+    async def test_open_position_persists_when_repo_injected(self) -> None:
+        repo = _FakePositionRepo()
+        engine = PortfolioEngine(
+            TradingMode.PAPER, initial_cash=Decimal("10000"), position_repository=repo
+        )
+        result = _make_order_result(qty=Decimal("0.1"), price=Decimal("50000"), side="buy")
+
+        await engine.on_order_filled(result)
+
+        assert len(repo.upserted) == 1
+        assert repo.upserted[0]["symbol"] == "BTC/USDT"
+        assert repo.upserted[0]["side"] == "long"
+
+    async def test_no_persistence_without_injected_repo(self) -> None:
+        """Ohne injiziertes Repo (position_repository=None): reines in-memory
+        Verhalten, kein Crash."""
+        engine = PortfolioEngine(TradingMode.PAPER, initial_cash=Decimal("10000"))
+        result = _make_order_result(qty=Decimal("0.1"), price=Decimal("50000"), side="buy")
+
+        await engine.on_order_filled(result)  # darf nicht crashen
+
+        assert len(engine.positions) == 1
+
+    async def test_persist_failure_does_not_block_trading(self) -> None:
+        """
+        Best-effort: DB-Fehler beim Schreiben darf den Trading-Betrieb NICHT
+        stoppen (gleiches Fail-Safe-Muster wie KillSwitch._cancel_all_orders).
+        """
+        repo = _FakePositionRepo()
+        repo.raise_on_upsert = RuntimeError("db write failed")
+        engine = PortfolioEngine(
+            TradingMode.PAPER, initial_cash=Decimal("10000"), position_repository=repo
+        )
+        result = _make_order_result(qty=Decimal("0.1"), price=Decimal("50000"), side="buy")
+
+        # Darf trotz DB-Fehler nicht crashen
+        await engine.on_order_filled(result)
+
+        # In-memory State ist trotzdem korrekt aktualisiert
+        assert len(engine.positions) == 1
+
+    async def test_close_position_persists_close(self) -> None:
+        repo = _FakePositionRepo()
+        engine = PortfolioEngine(
+            TradingMode.PAPER, initial_cash=Decimal("10000"), position_repository=repo
+        )
+        buy = _make_order_result(qty=Decimal("0.1"), price=Decimal("50000"), side="buy")
+        await engine.on_order_filled(buy)
+        repo.upserted.clear()
+
+        sell = _make_order_result(qty=Decimal("0.1"), price=Decimal("55000"), side="sell")
+        await engine.on_order_filled(sell)
+
+        assert len(repo.closed) == 1
+        assert len(engine.positions) == 0
+
+    async def test_partial_close_persists_upsert_not_close(self) -> None:
+        """Teilclose aktualisiert die Position (upsert), schliesst sie nicht (close)."""
+        repo = _FakePositionRepo()
+        engine = PortfolioEngine(
+            TradingMode.PAPER, initial_cash=Decimal("10000"), position_repository=repo
+        )
+        buy = _make_order_result(qty=Decimal("0.2"), price=Decimal("50000"), side="buy")
+        await engine.on_order_filled(buy)
+        repo.upserted.clear()
+
+        partial_sell = _make_order_result(qty=Decimal("0.1"), price=Decimal("55000"), side="sell")
+        await engine.on_order_filled(partial_sell)
+
+        assert len(repo.closed) == 0
+        assert len(repo.upserted) == 1
+        assert len(engine.positions) == 1
+        assert engine.positions[0].quantity == Decimal("0.1")
+
+    async def test_close_persist_failure_does_not_block_trading(self) -> None:
+        """Best-effort auch beim Close-Pfad: DB-Fehler blockiert nicht den In-Memory-Close."""
+        repo = _FakePositionRepo()
+        engine = PortfolioEngine(
+            TradingMode.PAPER, initial_cash=Decimal("10000"), position_repository=repo
+        )
+        buy = _make_order_result(qty=Decimal("0.1"), price=Decimal("50000"), side="buy")
+        await engine.on_order_filled(buy)
+
+        repo.raise_on_close = RuntimeError("db write failed")
+        sell = _make_order_result(qty=Decimal("0.1"), price=Decimal("55000"), side="sell")
+        await engine.on_order_filled(sell)  # darf nicht crashen
+
+        assert len(engine.positions) == 0  # in-memory trotzdem korrekt geschlossen
