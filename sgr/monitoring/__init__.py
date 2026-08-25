@@ -2,28 +2,24 @@
 
 from sgr.monitoring.engine import MonitoringEngine, add_metrics_middleware, create_metrics_app
 from sgr.monitoring.metrics import (
-    drawdown_pct,
-    kill_switch_triggered,
-    orders_filled,
-    orders_rejected,
-    orders_submitted,
-    portfolio_value,
-    record_kill_switch_trigger,
-    signals_generated,
-    var_95,
+    SGRMetrics,
+    get_metrics,
+    record_candle_received,
+    record_portfolio_snapshot,
+    record_risk_snapshot,
+    record_signal_generated,
+    record_trade_executed,
 )
 
 __all__ = [
     "MonitoringEngine",
     "create_metrics_app",
     "add_metrics_middleware",
-    "orders_submitted",
-    "orders_filled",
-    "orders_rejected",
-    "portfolio_value",
-    "drawdown_pct",
-    "var_95",
-    "kill_switch_triggered",
-    "signals_generated",
-    "record_kill_switch_trigger",
+    "SGRMetrics",
+    "get_metrics",
+    "record_candle_received",
+    "record_portfolio_snapshot",
+    "record_risk_snapshot",
+    "record_signal_generated",
+    "record_trade_executed",
 ]
