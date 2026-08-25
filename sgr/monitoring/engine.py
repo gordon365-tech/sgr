@@ -1,15 +1,15 @@
 """
 SGR Monitoring Engine
 =====================
-Sammelt periodisch Metriken aus allen Engines und schreibt
-sie in Prometheus Gauges.
+Sammelt periodisch Metriken aus allen Engines über die OTel-basierte
+SGRMetrics API.
 
 Warum separater Monitoring Loop?
-    Engines selbst sollen keine Prometheus-Abhängigkeit haben.
+    Engines selbst sollen keine Monitoring-Abhängigkeit haben.
     Monitoring Engine ist ein Beobachter – kein Teil der Trading-Logik.
     Kann deaktiviert werden ohne Trading zu beeinflussen.
 
-Zusätzlich: FastAPI Middleware für API-Metriken (Request Count, Latenz).
+Zusätzlich: FastAPI Middleware für API-Metriken.
 """
 
 from __future__ import annotations
@@ -22,14 +22,22 @@ from prometheus_client import make_asgi_app
 
 from sgr.core.config import get_config
 from sgr.core.logging import get_logger
-from sgr.monitoring import metrics as m
+from sgr.monitoring.metrics import (
+    get_metrics,
+    record_candle_received,
+    record_portfolio_snapshot,
+    record_risk_snapshot,
+    record_signal_generated,
+    record_trade_executed,
+)
 
 log = get_logger(__name__)
 
 
 class MonitoringEngine:
     """
-    Liest periodisch State aus allen Engines und updated Metriken.
+    Liest periodisch State aus allen Engines und schreibt ihn über die
+    zentrale OTel-Metrik-API.
     Läuft als separater asyncio Task.
     """
 
@@ -51,18 +59,19 @@ class MonitoringEngine:
 
     async def start(self) -> None:
         config = get_config()
-        m.update_system_info(
-            version=config.version,
-            environment=config.environment.value,
-            trading_mode=config.trading_mode.value,
-        )
+        get_metrics()
 
         self._running = True
         self._task = asyncio.create_task(
             self._collect_loop(),
             name="monitoring_engine",
         )
-        log.info("monitoring_engine.started", interval=self._interval)
+        log.info(
+            "monitoring_engine.started",
+            interval=self._interval,
+            environment=config.environment.value,
+            trading_mode=config.trading_mode.value,
+        )
 
     async def stop(self) -> None:
         self._running = False
@@ -83,73 +92,120 @@ class MonitoringEngine:
             await asyncio.sleep(self._interval)
 
     async def _collect(self) -> None:
-        """Sammelt alle Metriken in einem Durchlauf."""
-        mode = self._trading_mode
+        """Sammelt alle verfügbaren Metriken in einem Durchlauf."""
+        portfolio_value = None
+        cash = None
 
-        # Portfolio Metriken
         if self._portfolio_engine:
             try:
-                val = self._portfolio_engine.portfolio_value
-                m.portfolio_value.labels(trading_mode=mode).set(float(val))
-                m.open_positions.labels(trading_mode=mode).set(
-                    len(self._portfolio_engine.positions)
-                )
+                portfolio_value = self._portfolio_engine.portfolio_value
+                positions = self._portfolio_engine.positions
+                cash = getattr(self._portfolio_engine, "cash", None)
+
+                if cash is None:
+                    cash = getattr(self._portfolio_engine, "cash_balance", 0)
+
+                # Portfolio snapshot wird nach Möglichkeit mit den Risk-Daten
+                # ergänzt. Ohne Risk Engine werden nur die verfügbaren Werte
+                # geschrieben.
+                if self._risk_engine:
+                    try:
+                        risk_metrics = self._risk_engine._compute_metrics(
+                            portfolio_value=portfolio_value,
+                            positions=positions,
+                        )
+                        record_portfolio_snapshot(
+                            portfolio_value=portfolio_value,
+                            cash=cash,
+                            daily_pnl=getattr(risk_metrics, "daily_pnl", 0),
+                            daily_pnl_pct=float(
+                                getattr(risk_metrics, "daily_pnl_pct", 0)
+                            ) * 100,
+                        )
+                    except Exception as e:
+                        log.debug(
+                            "monitoring.portfolio_risk_snapshot_error",
+                            error=str(e),
+                        )
+                else:
+                    record_portfolio_snapshot(
+                        portfolio_value=portfolio_value,
+                        cash=cash,
+                        daily_pnl=0,
+                        daily_pnl_pct=0,
+                    )
             except Exception as e:
                 log.debug("monitoring.portfolio_error", error=str(e))
 
-        # Risk Metriken
         if self._risk_engine and self._portfolio_engine:
             try:
-                metrics = self._risk_engine._compute_metrics(
+                risk_metrics = self._risk_engine._compute_metrics(
                     portfolio_value=self._portfolio_engine.portfolio_value,
                     positions=self._portfolio_engine.positions,
                 )
-                m.drawdown_pct.labels(trading_mode=mode).set(metrics.drawdown_from_peak * 100)
-                m.var_95.labels(trading_mode=mode).set(metrics.var_95 * 100)
-                m.portfolio_heat.labels(trading_mode=mode).set(metrics.portfolio_heat * 100)
-                m.portfolio_pnl_daily.labels(trading_mode=mode).set(metrics.daily_pnl_pct * 100)
 
-                # Kill Switch Status
-                from sgr.core.types import TradingMode
-                from sgr.risk.kill_switch import get_kill_switch
-
-                ks = get_kill_switch(TradingMode(mode))
-                m.kill_switch_active.labels(trading_mode=mode).set(1.0 if ks.is_active else 0.0)
+                record_risk_snapshot(
+                    portfolio_heat=float(risk_metrics.portfolio_heat),
+                    max_drawdown_pct=float(risk_metrics.drawdown_from_peak) * 100,
+                    leverage=float(getattr(risk_metrics, "leverage", 0)),
+                    open_positions=len(self._portfolio_engine.positions),
+                    var_95_pct=float(risk_metrics.var_95) * 100,
+                )
             except Exception as e:
                 log.debug("monitoring.risk_error", error=str(e))
 
-        # Strategy Metriken
         if self._strategy_registry:
             try:
                 active = self._strategy_registry.get_active()
-                m.strategy_active_count.set(len(active))
+                log.debug(
+                    "monitoring.strategy_state",
+                    active_count=len(active),
+                )
 
                 for name, entry in self._strategy_registry.get_all().items():
                     if entry.performance:
                         p = entry.performance
-                        m.strategy_sharpe.labels(strategy=name, trading_mode=mode).set(
-                            p.sharpe_ratio
-                        )
-                        m.strategy_hit_rate.labels(strategy=name, trading_mode=mode).set(
-                            p.hit_rate * 100
+                        # Strategy performance remains observable through the
+                        # existing registry data. Signal recording is delegated
+                        # to record_signal_generated() at signal creation time.
+                        log.debug(
+                            "monitoring.strategy_performance",
+                            strategy=name,
+                            sharpe=p.sharpe_ratio,
+                            hit_rate=p.hit_rate,
                         )
             except Exception as e:
                 log.debug("monitoring.strategy_error", error=str(e))
 
 
+# Keep these imports available for callers that use the monitoring engine as
+# the central metrics integration point. The actual recording happens through
+# the OTel-based metrics module above.
+__all__ = [
+    "MonitoringEngine",
+    "create_metrics_app",
+    "add_metrics_middleware",
+    "record_candle_received",
+    "record_portfolio_snapshot",
+    "record_risk_snapshot",
+    "record_signal_generated",
+    "record_trade_executed",
+]
+
+
 def create_metrics_app():
     """
-    Erstellt ASGI-App für Prometheus Metrics Endpoint.
-    Mounten in FastAPI: app.mount("/metrics", create_metrics_app())
+    Erstellt die bestehende Prometheus ASGI-App.
+
+    Hinweis: Die eigentlichen SGR Custom Metrics sind inzwischen OTel-basiert.
+    Die OTel-Prometheus-Exporter-Anbindung wird separat in observability.py
+    hergestellt.
     """
     return make_asgi_app()
 
 
 def add_metrics_middleware(app: Any) -> None:
-    """
-    Fügt Request-Tracking Middleware zu FastAPI hinzu.
-    Tracked: request count, latency per route.
-    """
+    """Fügt Request-Tracking über die zentrale OTel-Metrics-API hinzu."""
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.requests import Request
     from starlette.responses import Response
@@ -160,18 +216,24 @@ def add_metrics_middleware(app: Any) -> None:
             response = await call_next(request)
             duration = time.monotonic() - start
 
-            # Nur API-Routen tracken (kein /metrics, /health spam)
             path = request.url.path
             if path.startswith("/api/") or path in ("/health",):
-                m.api_requests.labels(
+                metrics = get_metrics()
+                metrics.api_requests_total.add(
+                    1,
+                    {
+                        "method": request.method,
+                        "path": path,
+                        "status_code": str(response.status_code),
+                    },
+                )
+                log.debug(
+                    "monitoring.api_request",
                     method=request.method,
                     path=path,
                     status_code=response.status_code,
-                ).inc()
-                m.api_latency.labels(
-                    method=request.method,
-                    path=path,
-                ).observe(duration)
+                    duration_seconds=duration,
+                )
 
             return response
 
