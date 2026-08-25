@@ -19,6 +19,14 @@ SET timezone = 'UTC';
 ALTER DATABASE sgr SET timezone = 'UTC';
 
 -- Hilfsfunktion: Candle-Gap-Detection auf DB-Ebene (optional, für Monitoring)
+--
+-- WARNUNG: Referenziert die Tabelle "candles", die von diesem init-Skript
+-- NICHT angelegt wird (das übernimmt "alembic upgrade head", siehe
+-- alembic/versions/0001_initial.py). CREATE FUNCTION selbst schlägt trotzdem
+-- nicht fehl (plpgsql-Funktionskörper werden erst beim Aufruf geparst/
+-- validiert, nicht bei CREATE) - ruft aber jemand check_candle_completeness()
+-- auf, BEVOR die erste Migration gelaufen ist, crasht der Aufruf mit
+-- "relation \"candles\" does not exist". Immer erst migrieren, dann nutzen.
 CREATE OR REPLACE FUNCTION check_candle_completeness(
     p_symbol TEXT,
     p_timeframe TEXT,
@@ -34,6 +42,11 @@ RETURNS TABLE (
 DECLARE
     expected_ts TIMESTAMPTZ := p_from;
 BEGIN
+    IF to_regclass('public.candles') IS NULL THEN
+        RAISE EXCEPTION
+            'check_candle_completeness: table "candles" does not exist yet - run "alembic upgrade head" first';
+    END IF;
+
     FOR gap_start, gap_end, missing_bars IN
         WITH series AS (
             SELECT generate_series(p_from, p_to, p_interval) AS ts

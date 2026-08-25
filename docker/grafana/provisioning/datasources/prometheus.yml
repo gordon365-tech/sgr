@@ -1,0 +1,15 @@
+# Grafana Datasource Provisioning
+# ================================
+# Bindet den Prometheus-Service aus docker-compose.yml automatisch als
+# Datasource ein. Ohne diese Datei muss die Datasource nach jedem
+# `docker compose down -v` manuell in der Grafana-UI neu angelegt werden.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true

@@ -1,0 +1,22 @@
+# Grafana Dashboard Provisioning
+# ===============================
+# Lädt alle Dashboards aus monitoring/grafana/dashboards/ automatisch beim
+# Start. Der Pfad /var/lib/grafana/dashboards wird in docker-compose.yml auf
+# ../monitoring/grafana/dashboards gemountet.
+#
+# Zuvor referenzierte docker-compose.yml einen nicht existierenden Ordner
+# (docker/grafana/provisioning) -> Grafana startete ohne Provisioning und
+# das vorbereitete sgr-trading.json Dashboard wurde nie geladen.
+
+apiVersion: 1
+
+providers:
+  - name: SGR
+    orgId: 1
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

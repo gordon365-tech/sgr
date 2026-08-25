@@ -80,6 +80,7 @@ services:
     volumes:
       - grafanadata:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning
+      - ../monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
     restart: unless-stopped
@@ -94,7 +95,20 @@ services:
     container_name: sgr-api
     ports:
       - "8000:8000"
+    # env_file lädt .env explizit (Secrets, Risk-Limits, Exchange-Keys etc.).
+    # Vorher wurde .env nur zufällig via "volumes: ..:/app" mitgemountet und
+    # von pydantic-settings (env_file=".env" in SGRConfig) implizit gelesen -
+    # das bricht sofort, sobald der Mount-Pfad sich ändert oder ein anderer
+    # Volume-Layout verwendet wird. .env ist optional (fehlt sie, greifen
+    # reine Code-Defaults + die unten gesetzten Werte).
+    env_file:
+      - path: ../.env
+        required: false
     environment:
+      # Diese Werte überschreiben ggf. Gleichnamiges aus .env, damit der
+      # Container IMMER auf die Compose-internen Service-Hostnamen zeigt,
+      # unabhängig davon was lokal in .env für Alembic/native Runs steht
+      # (dort zeigt DB_HOST typischerweise auf localhost, siehe alembic.ini).
       DB_HOST: postgres
       DB_USER: sgr
       DB_PASSWORD: sgr_dev_password
