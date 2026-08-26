@@ -28,6 +28,7 @@ from sgr.core.types import TradingMode
 from sgr.market_data.feature_store import FeatureStore
 from sgr.orchestrator.engine import TradingOrchestrator
 from sgr.portfolio.engine import PortfolioEngine
+from sgr.reconciliation.engine import ReconciliationEngine
 from sgr.risk.engine import RiskEngine
 from sgr.strategy.engine import StrategyEngine
 
@@ -176,3 +177,12 @@ def get_orchestrator(request: Request) -> TradingOrchestrator:
     if orchestrator is None:
         raise HTTPException(status_code=503, detail="Trading orchestrator not initialized")
     return orchestrator
+
+
+def get_reconciliation_engine(request: Request) -> ReconciliationEngine:
+    engine: ReconciliationEngine | None = getattr(
+        request.app.state, "reconciliation_engine", None
+    )
+    if engine is None:
+        raise HTTPException(status_code=503, detail="Reconciliation engine not initialized")
+    return engine

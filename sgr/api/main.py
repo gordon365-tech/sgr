@@ -24,6 +24,8 @@ Routers:
     /api/v1/strategy → Strategy Engine Status
     /api/v1/orders   → Order History
     /api/v1/system   → Kill Switch, Status
+    /api/v1/trading  → Manueller Trading-Cycle-Trigger (Orchestrator)
+    /api/v1/reconciliation → Exchange- vs. lokaler State-Abgleich (Phase 7B)
     /ws              → WebSocket Streams
 """
 
@@ -64,6 +66,7 @@ class AppState:
     portfolio_engine: Any = None
     execution_engine: Any = None
     orchestrator: Any = None
+    reconciliation_engine: Any = None
     feature_store: Any = None
 
 
@@ -171,6 +174,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         trading_mode=config.trading_mode,
     )
     app.state.orchestrator = orchestrator
+
+    # 8c. Reconciliation Engine (Phase 7B)
+    # Nur in LIVE aussagekräftig (siehe sgr/reconciliation/engine.py
+    # Modul-Docstring) - wird trotzdem immer instanziiert, damit
+    # get_reconciliation_engine() nicht je nach Modus fehlschlägt.
+    # reconcile() selbst gibt in PAPER/DRY_RUN fail-safe SKIPPED_NOT_LIVE
+    # zurück, statt einen Fehler zu werfen.
+    from sgr.reconciliation.engine import ReconciliationEngine
+
+    reconciliation_engine = ReconciliationEngine(
+        exchange_pool=pool,
+        portfolio_engine=portfolio_engine,
+        trading_mode=config.trading_mode,
+    )
+    app.state.reconciliation_engine = reconciliation_engine
 
     # 9. Market Data Engine
     from sgr.market_data.engine import MarketDataEngine
@@ -284,6 +302,7 @@ def create_app() -> FastAPI:
         market,
         orders,
         portfolio,
+        reconciliation,
         risk,
         strategy,
         system,
@@ -300,6 +319,9 @@ def create_app() -> FastAPI:
     app.include_router(orders.router, prefix="/api/v1/orders", tags=["orders"])
     app.include_router(system.router, prefix="/api/v1/system", tags=["system"])
     app.include_router(trading.router, prefix="/api/v1/trading", tags=["trading"])
+    app.include_router(
+        reconciliation.router, prefix="/api/v1/reconciliation", tags=["reconciliation"]
+    )
     app.include_router(websocket.router, prefix="/ws", tags=["websocket"])
 
     # SaaS Layer

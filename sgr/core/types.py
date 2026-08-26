@@ -447,3 +447,75 @@ class TradingCycleFailedEvent(BaseEvent):
     symbol_key: str
     timeframe: str
     error: str
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation (Phase 7B): Exchange-State vs. lokaler Portfolio-State
+# ---------------------------------------------------------------------------
+
+
+class DiscrepancyType(StrEnum):
+    """
+    Klassifizierung einer Positions-Abweichung zwischen SGR (DB/in-memory)
+    und der tatsächlichen Exchange-Position.
+    """
+
+    MATCHED = "matched"
+    QUANTITY_MISMATCH = "quantity_mismatch"
+    # Position existiert auf der Exchange, aber nicht lokal bekannt.
+    # Das ist der eigentliche Split-Brain-Fall: eine Order wurde auf der
+    # Exchange ausgeführt, aber der lokale State (DB-Write oder In-Memory-
+    # Update) ist dem nie gefolgt.
+    MISSING_LOCALLY = "missing_locally"
+    # Position existiert lokal, aber nicht (mehr) auf der Exchange
+    # (z.B. manuell auf der Exchange geschlossen, außerhalb SGR).
+    MISSING_ON_EXCHANGE = "missing_on_exchange"
+
+
+class PositionDiscrepancy(BaseModel):
+    """Einzelne Abweichung für ein Symbol, Teil eines ReconciliationResult."""
+
+    symbol_key: str
+    discrepancy_type: DiscrepancyType
+    local_quantity: Decimal | None = None
+    exchange_quantity: Decimal | None = None
+    local_side: PositionSide | None = None
+    exchange_side: PositionSide | None = None
+
+
+class ReconciliationStatus(StrEnum):
+    """Ergebnis-Status eines Reconciliation-Laufs."""
+
+    CLEAN = "clean"  # Keine Abweichungen gefunden
+    DISCREPANCIES_FOUND = "discrepancies_found"
+    SKIPPED_NOT_LIVE = "skipped_not_live"  # Nur in LIVE sinnvoll (siehe Modul-Docstring)
+    FAILED = "failed"  # Exchange-Abfrage o.ä. fehlgeschlagen
+
+
+class ReconciliationResult(BaseModel):
+    """
+    Ergebnis eines vollständigen Reconciliation-Laufs.
+    Auditierbar: enthält jede geprüfte Position und jede gefundene Abweichung.
+    """
+
+    id: UUID = Field(default_factory=uuid4)
+    started_at: datetime
+    completed_at: datetime
+    status: ReconciliationStatus
+    trading_mode: TradingMode
+    exchange: ExchangeID
+    checked_symbols: int = 0
+    discrepancies: list[PositionDiscrepancy] = Field(default_factory=list)
+    error: str | None = None
+
+    @property
+    def has_split_brain_risk(self) -> bool:
+        """True, wenn mindestens eine MISSING_LOCALLY-Abweichung vorliegt."""
+        return any(
+            d.discrepancy_type == DiscrepancyType.MISSING_LOCALLY for d in self.discrepancies
+        )
+
+
+class ReconciliationCompletedEvent(BaseEvent):
+    source: str = "reconciliation_engine"
+    result: ReconciliationResult
