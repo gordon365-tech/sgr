@@ -24,11 +24,8 @@ from sgr.core.config import get_config
 from sgr.core.logging import get_logger
 from sgr.monitoring.metrics import (
     get_metrics,
-    record_candle_received,
     record_portfolio_snapshot,
     record_risk_snapshot,
-    record_signal_generated,
-    record_trade_executed,
 )
 
 log = get_logger(__name__)
@@ -162,12 +159,14 @@ class MonitoringEngine:
                     active_count=len(active),
                 )
 
+                sgr_metrics = get_metrics()
                 for name, entry in self._strategy_registry.get_all().items():
                     if entry.performance:
                         p = entry.performance
-                        # Strategy performance remains observable through the
-                        # existing registry data. Signal recording is delegated
-                        # to record_signal_generated() at signal creation time.
+                        sgr_metrics.strategy_win_rate.set(
+                            p.hit_rate * 100,
+                            {"strategy": name, "trading_mode": self._trading_mode},
+                        )
                         log.debug(
                             "monitoring.strategy_performance",
                             strategy=name,
@@ -176,21 +175,6 @@ class MonitoringEngine:
                         )
             except Exception as e:
                 log.debug("monitoring.strategy_error", error=str(e))
-
-
-# Keep these imports available for callers that use the monitoring engine as
-# the central metrics integration point. The actual recording happens through
-# the OTel-based metrics module above.
-__all__ = [
-    "MonitoringEngine",
-    "create_metrics_app",
-    "add_metrics_middleware",
-    "record_candle_received",
-    "record_portfolio_snapshot",
-    "record_risk_snapshot",
-    "record_signal_generated",
-    "record_trade_executed",
-]
 
 
 def create_metrics_app():
@@ -218,22 +202,17 @@ def add_metrics_middleware(app: Any) -> None:
 
             path = request.url.path
             if path.startswith("/api/") or path in ("/health",):
-                metrics = get_metrics()
-                metrics.api_requests_total.add(
-                    1,
-                    {
-                        "method": request.method,
-                        "path": path,
-                        "status_code": str(response.status_code),
-                    },
-                )
-                log.debug(
-                    "monitoring.api_request",
-                    method=request.method,
-                    path=path,
-                    status_code=response.status_code,
-                    duration_seconds=duration,
-                )
+                sgr_metrics = get_metrics()
+                attrs = {
+                    "method": request.method,
+                    "path": path,
+                    "status_code": str(response.status_code),
+                }
+                if response.status_code >= 400:
+                    sgr_metrics.api_errors_total.add(1, attrs)
+                else:
+                    sgr_metrics.api_requests_total.add(1, attrs)
+                log.debug("monitoring.api_request", duration_s=duration, **attrs)
 
             return response
 
