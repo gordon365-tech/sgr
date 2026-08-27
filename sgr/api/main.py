@@ -102,6 +102,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     await init_db()
 
+    # 2b. Repositories (Persistenz-Schicht)
+    # Vorher NIRGENDS im Lifespan instanziiert - PositionRepository,
+    # OrderRepository, StrategyRepository etc. existierten isoliert von
+    # der laufenden App, obwohl vollstaendig implementiert und getestet.
+    # Ohne diesen Schritt ist echte Crash-Recovery unmoeglich (keine
+    # Injektion in PortfolioEngine/ExecutionEngine/StrategyRegistry).
+    from sgr.core.repositories import get_repositories
+
+    repos = get_repositories()
+    app.state.repositories = repos
+
     # 3. Event Bus
     from sgr.core.event_bus import get_event_bus
 
@@ -143,7 +154,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # 7. Portfolio Engine
     from sgr.portfolio.engine import PortfolioEngine
 
-    portfolio_engine = PortfolioEngine(config.trading_mode)
+    portfolio_engine = PortfolioEngine(config.trading_mode, position_repository=repos.positions)
     app.state.portfolio_engine = portfolio_engine
 
     # 8. Strategy Engine
@@ -151,6 +162,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     import sgr.strategy.mean_reversion  # noqa: F401
     import sgr.strategy.trend_following  # noqa: F401
     from sgr.strategy.engine import StrategyEngine
+    from sgr.strategy.registry import StrategyRegistry
+
+    registry = StrategyRegistry.get()
+    registry.inject_repository(repos.strategies)
+    await registry.sync_registrations_to_db()
 
     strategy_engine = StrategyEngine(config.trading_mode, feature_store)
     await strategy_engine.start()
@@ -162,7 +178,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from sgr.execution.engine import ExecutionEngine
     from sgr.orchestrator.engine import TradingOrchestrator
 
-    execution_engine = ExecutionEngine(pool, config.trading_mode)
+    execution_engine = ExecutionEngine(pool, config.trading_mode, order_repository=repos.orders)
     app.state.execution_engine = execution_engine
 
     orchestrator = TradingOrchestrator(
@@ -189,6 +205,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         trading_mode=config.trading_mode,
     )
     app.state.reconciliation_engine = reconciliation_engine
+
+    # 8d. Crash Recovery
+    # Frueher reiner Pseudo-Code (RecoveryManager._restore_*() taten
+    # nichts). Jetzt echter Delegat an die gerade injizierten Komponenten.
+    # Laeuft VOR dem Market-Data-Start (Schritt 9), damit Recovery
+    # abgeschlossen ist, bevor Live-Candle-Events den Orchestrator ausloesen.
+    # Fehler hier stoppen den Start NICHT (fail-safe, nicht fail-fast) -
+    # ein unvollstaendiges Recovery ist besser als ein Server, der gar
+    # nicht hochkommt; die naechste ReconciliationEngine (Phase 7B)
+    # deckt verbleibende Diskrepanzen ohnehin auf.
+    from sgr.core.resilience import RecoveryManager
+
+    recovery_manager = RecoveryManager(
+        portfolio_engine=portfolio_engine,
+        order_repository=repos.orders,
+        strategy_registry=registry,
+        trading_mode=config.trading_mode,
+    )
+    await recovery_manager.recover_after_crash()
 
     # 9. Market Data Engine
     from sgr.market_data.engine import MarketDataEngine

@@ -7,16 +7,18 @@ Handles crash recovery & exchange outage resilience.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import datetime, timedelta
-from enum import Enum
-from typing import Any, Callable
+from enum import StrEnum
+from typing import Any
 
 from sgr.core.logging import get_logger
+from sgr.core.types import TradingMode
 
 log = get_logger(__name__)
 
 
-class CircuitBreakerState(str, Enum):
+class CircuitBreakerState(StrEnum):
     CLOSED = "closed"
     OPEN = "open"
     HALF_OPEN = "half_open"
@@ -25,7 +27,7 @@ class CircuitBreakerState(str, Enum):
 class CircuitBreaker:
     """
     Prevents cascading failures when external service (Exchange) is down.
-    
+
     States:
         CLOSED: Normal operation, all requests pass through
         OPEN: Service failed threshold, reject all requests immediately
@@ -52,11 +54,11 @@ class CircuitBreaker:
     async def call(self, func: Callable, *args: Any, **kwargs: Any) -> Any:
         """
         Executes function through circuit breaker.
-        
+
         Args:
             func: Async function to call
             *args, **kwargs: Arguments to pass
-            
+
         Returns:
             Function result or CircuitBreakerError
         """
@@ -81,7 +83,7 @@ class CircuitBreaker:
 
             return result
 
-        except Exception as e:
+        except Exception:
             self.failure_count += 1
             self.last_failure_time = datetime.utcnow()
 
@@ -134,7 +136,7 @@ class CircuitBreakerError(Exception):
 class GracefulShutdownManager:
     """
     Manages graceful shutdown of services.
-    
+
     Sequence:
     1. Stop accepting new requests
     2. Wait for in-flight requests to complete (30s timeout)
@@ -159,7 +161,7 @@ class GracefulShutdownManager:
                 self._wait_for_active_tasks(),
                 timeout=self.grace_period_seconds,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.warning(
                 "shutdown.timeout",
                 remaining_tasks=len(self.active_tasks),
@@ -197,58 +199,119 @@ class GracefulShutdownManager:
 
 class RecoveryManager:
     """
-    Handles recovery after crashes.
-    
-    Restores:
-    1. Position state from database
-    2. Pending orders
-    3. Strategy state
+    Koordiniert Wiederherstellung des Systemzustands nach einem Crash /
+    ungeplanten Neustart.
+
+    Delegiert an die bereits existierenden, echten Restore-Mechanismen
+    statt sie zu duplizieren:
+        1. Positionen: PortfolioEngine.restore_from_persistence()
+           (fail-closed, existiert bereits, ist im Lifespan verdrahtet -
+           dieser Schritt ruft dieselbe Instanz auf, dupliziert sie nicht)
+        2. Offene Orders: OrderRepository.get_open_orders() liest den
+           zuletzt bekannten Order-State. SGR kann Orders nicht "wieder-
+           herstellen" im Sinne von erneut einreichen (das waere ein
+           Duplicate-Order-Risiko) - stattdessen werden offene Orders
+           geloggt und sollten per naechstem ReconciliationEngine-Lauf
+           (Phase 7B) gegen den tatsaechlichen Exchange-Status abgeglichen
+           werden. Reine Bestandsaufnahme, keine automatische Aktion.
+        3. Strategien: StrategyRepository.get_active_names() + jeweils
+           StrategyRegistry.activate() fuer jede zuvor aktive Strategie.
+
+    Frueher (vor diesem Fix) waren alle drei Schritte auskommentierter
+    Pseudo-Code ohne Wirkung - dieser Fund wurde dokumentiert und jetzt
+    aufgeloest.
     """
 
-    @staticmethod
-    async def recover_after_crash() -> bool:
+    def __init__(
+        self,
+        portfolio_engine: Any,
+        order_repository: Any,
+        strategy_registry: Any,
+        trading_mode: TradingMode,
+    ) -> None:
+        self._portfolio_engine = portfolio_engine
+        self._order_repo = order_repository
+        self._registry = strategy_registry
+        self._trading_mode = trading_mode
+
+    async def recover_after_crash(self) -> bool:
         """
-        Recovers system state after unplanned shutdown.
-        
+        Stellt Systemzustand nach ungeplantem Neustart wieder her.
+        Fail-safe insgesamt: jeder einzelne Schritt wird versucht, ein
+        Fehler in einem Schritt bricht recover_after_crash() nicht
+        vollstaendig ab, wird aber im Rueckgabewert reflektiert.
+
         Returns:
-            True if recovery successful
+            True nur wenn ALLE drei Schritte erfolgreich waren.
         """
         log.info("recovery.started")
 
-        try:
-            # 1. Restore positions from DB
-            await RecoveryManager._restore_positions()
+        positions_ok = await self._restore_positions()
+        orders_ok = await self._restore_orders()
+        strategies_ok = await self._restore_strategies()
 
-            # 2. Restore pending orders
-            await RecoveryManager._restore_orders()
-
-            # 3. Restore strategy state
-            await RecoveryManager._restore_strategies()
-
+        success = positions_ok and orders_ok and strategies_ok
+        if success:
             log.info("recovery.complete")
-            return True
+        else:
+            log.warning(
+                "recovery.partial_or_failed",
+                positions_ok=positions_ok,
+                orders_ok=orders_ok,
+                strategies_ok=strategies_ok,
+            )
+        return success
 
+    async def _restore_positions(self) -> bool:
+        """
+        Delegiert an PortfolioEngine.restore_from_persistence() - die
+        echte, fail-closed Implementierung. Wird hier NICHT dupliziert.
+        """
+        log.info("recovery.restoring_positions")
+        try:
+            await self._portfolio_engine.restore_from_persistence()
+            return True
         except Exception as e:
-            log.error("recovery.failed", error=str(e))
+            log.error("recovery.restore_positions_failed", error=str(e))
             return False
 
-    @staticmethod
-    async def _restore_positions() -> None:
-        """Restores open positions from database."""
-        log.info("recovery.restoring_positions")
-        # Pseudo-code
-        # await portfolio_engine.restore_from_db()
-
-    @staticmethod
-    async def _restore_orders() -> None:
-        """Restores pending orders from database."""
+    async def _restore_orders(self) -> bool:
+        """
+        Liest offene Orders aus der DB (Bestandsaufnahme, keine
+        automatische Aktion - siehe Klassendocstring). Die eigentliche
+        Abstimmung mit dem tatsaechlichen Exchange-Status obliegt der
+        ReconciliationEngine (Phase 7B), nicht diesem Schritt.
+        """
         log.info("recovery.restoring_orders")
-        # Pseudo-code
-        # await execution_engine.restore_pending_orders()
+        try:
+            open_orders = await self._order_repo.get_open_orders(self._trading_mode)
+            log.info("recovery.open_orders_found", count=len(open_orders))
+            return True
+        except Exception as e:
+            log.error("recovery.restore_orders_failed", error=str(e))
+            return False
 
-    @staticmethod
-    async def _restore_strategies() -> None:
-        """Restores strategy state from database."""
+    async def _restore_strategies(self) -> bool:
+        """
+        Liest zuletzt aktive Strategien aus der DB und aktiviert sie
+        erneut in der (rein in-memory startenden) StrategyRegistry.
+        Strategien, die vor dem Crash aktiv waren, aber inzwischen nicht
+        mehr registriert sind (z.B. Code-Deploy hat sie entfernt), werden
+        uebersprungen und geloggt statt einen Fehler zu werfen.
+        """
         log.info("recovery.restoring_strategies")
-        # Pseudo-code
-        # await strategy_engine.restore_state()
+        try:
+            active_names = await self._registry.get_active_names_from_db()
+            for name in active_names:
+                if self._registry.get_entry(name) is None:
+                    log.warning(
+                        "recovery.strategy_no_longer_registered",
+                        name=name,
+                    )
+                    continue
+                await self._registry.activate(name)
+            log.info("recovery.strategies_restored", count=len(active_names))
+            return True
+        except Exception as e:
+            log.error("recovery.restore_strategies_failed", error=str(e))
+            return False

@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 from sgr.core.event_bus import get_event_bus
 from sgr.core.logging import audit_log, get_logger
@@ -68,10 +69,16 @@ class ExecutionEngine:
         self,
         pool: ExchangePool,
         trading_mode: TradingMode,
+        order_repository: Any = None,
     ) -> None:
         self._pool = pool
         self._trading_mode = trading_mode
         self._kill_switch = get_kill_switch(trading_mode)
+        # Optional: OrderRepository fuer Persistenz. None = rein
+        # In-Memory/Event-basiert (Tests, isolierte Nutzung) - additiv,
+        # analog zu PortfolioEngine._position_repo. Ohne Injektion
+        # verhaelt sich die Engine exakt wie vor diesem Feature.
+        self._order_repo = order_repository
 
     async def execute(self, order: OrderRequest) -> OrderResult:
         """
@@ -134,6 +141,8 @@ class ExecutionEngine:
             mode=self._trading_mode.value,
         )
 
+        await self._persist_order_create(order, result)
+
         # Falls sofort filled (Market Order, Paper Mode)
         if result.status == OrderStatus.FILLED:
             await self._on_fill(result)
@@ -150,6 +159,67 @@ class ExecutionEngine:
         )
 
         return final_result
+
+    async def _persist_order_create(self, order: OrderRequest, result: OrderResult) -> None:
+        """
+        Legt den initialen Order-Record in der DB an (best-effort).
+        Bisher schrieb ExecutionEngine Orders NIE in die DB - nur Events
+        und Audit-Log-Zeilen, die keinen abfragbaren State darstellen.
+        OrderRepository.create()/update_status() existierten, wurden aber
+        nirgends aufgerufen. Ohne diesen Schritt ist Order-Recovery nach
+        einem Crash unmoeglich, da keine Datenquelle existiert.
+
+        id wird explizit auf order.id gesetzt (nicht die von create()
+        zurueckgegebene generierte ID), damit spaetere update_status()-
+        Aufrufe via order.id dieselbe Row treffen.
+        """
+        if self._order_repo is None:
+            return
+        try:
+            await self._order_repo.create(
+                {
+                    "id": str(order.id),
+                    "signal_id": str(order.signal_id),
+                    "exchange_order_id": result.exchange_order_id,
+                    "symbol": str(order.symbol),
+                    "exchange": order.symbol.exchange.value,
+                    "side": order.side.value,
+                    "order_type": order.order_type.value,
+                    "quantity": order.quantity,
+                    "limit_price": order.limit_price,
+                    "filled_quantity": result.filled_quantity,
+                    "status": result.status.value,
+                    "trading_mode": self._trading_mode.value,
+                    "strategy_name": str(order.metadata.get("strategy", "unknown")),
+                    "submitted_at": result.submitted_at,
+                }
+            )
+        except Exception as e:
+            log.error(
+                "execution_engine.persist_order_create_failed",
+                order_id=str(order.id),
+                error=str(e),
+            )
+
+    async def _persist_order_status(self, order_id: str, result: OrderResult) -> None:
+        """Aktualisiert Order-Status in der DB (best-effort, fail-safe)."""
+        if self._order_repo is None:
+            return
+        try:
+            await self._order_repo.update_status(
+                order_id=order_id,
+                status=result.status.value,
+                filled_quantity=result.filled_quantity,
+                average_fill_price=result.average_fill_price,
+                fees=result.fees,
+                filled_at=datetime.now(tz=UTC) if result.status == OrderStatus.FILLED else None,
+            )
+        except Exception as e:
+            log.error(
+                "execution_engine.persist_order_status_failed",
+                order_id=order_id,
+                error=str(e),
+            )
 
     async def _monitor_fill(
         self,
@@ -172,6 +242,7 @@ class ExecutionEngine:
                     order_id=str(order.id),
                 )
                 await self._cancel_order(order, current)
+                await self._persist_order_status(str(order.id), current)
                 return current
 
             await asyncio.sleep(_FILL_POLL_INTERVAL_S)
@@ -191,6 +262,8 @@ class ExecutionEngine:
                 continue
 
             if current.status in (OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED):
+                if current.status != OrderStatus.FILLED:
+                    await self._persist_order_status(str(order.id), current)
                 break
 
         # Timeout erreicht: cancel offene Order
@@ -202,6 +275,7 @@ class ExecutionEngine:
                 status=current.status.value,
             )
             await self._cancel_order(order, current)
+            await self._persist_order_status(str(order.id), current)
 
         if current.status == OrderStatus.FILLED:
             await self._on_fill(current)
@@ -271,6 +345,8 @@ class ExecutionEngine:
             await get_event_bus().publish(event)
         except Exception as e:
             log.error("execution_engine.publish_fill_failed", error=str(e))
+
+        await self._persist_order_status(str(result.request_id), result)
 
     def _rejected_result(self, order: OrderRequest, reason: str) -> OrderResult:
         """Erstellt REJECTED OrderResult ohne Exchange-Kontakt."""

@@ -71,7 +71,7 @@ async def activate_strategy(
             status_code=400,
             detail=f"Strategy '{name}' has not passed validation. Cannot activate.",
         )
-    registry.activate(name)
+    await registry.activate(name)
     return {"activated": name}
 
 
@@ -94,5 +94,5 @@ async def deactivate_strategy(
     registry = StrategyRegistry.get()
     if registry.get_entry(name) is None:
         raise HTTPException(status_code=404, detail=f"Strategy '{name}' not found")
-    registry.deactivate(name, reason)
+    await registry.deactivate(name, reason)
     return {"deactivated": name, "reason": reason}

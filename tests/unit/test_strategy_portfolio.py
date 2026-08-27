@@ -331,20 +331,20 @@ class TestStrategyRegistry:
         registry.register_instance(strategy)
         assert "trend_following_v1" in registry.get_all()
 
-    def test_activate_deactivate(self) -> None:
+    async def test_activate_deactivate(self) -> None:
         registry = StrategyRegistry.get()
         registry.register_instance(TrendFollowingStrategy())
-        registry.activate("trend_following_v1")
+        await registry.activate("trend_following_v1")
         assert registry.is_active("trend_following_v1")
-        registry.deactivate("trend_following_v1", "test")
+        await registry.deactivate("trend_following_v1", "test")
         assert not registry.is_active("trend_following_v1")
 
-    def test_get_active_filters_by_regime(self) -> None:
+    async def test_get_active_filters_by_regime(self) -> None:
         registry = StrategyRegistry.get()
         registry.register_instance(TrendFollowingStrategy())
         registry.register_instance(MeanReversionStrategy())
-        registry.activate("trend_following_v1")
-        registry.activate("mean_reversion_v1")
+        await registry.activate("trend_following_v1")
+        await registry.activate("mean_reversion_v1")
 
         trending = registry.get_active(MarketRegime.TRENDING_UP)
         ranging = registry.get_active(MarketRegime.RANGING)
@@ -353,12 +353,12 @@ class TestStrategyRegistry:
         assert not any(s.name == "mean_reversion_v1" for s in trending)
         assert any(s.name == "mean_reversion_v1" for s in ranging)
 
-    def test_auto_deactivate_underperforming(self) -> None:
+    async def test_auto_deactivate_underperforming(self) -> None:
         from sgr.strategy.base import StrategyPerformance
 
         registry = StrategyRegistry.get()
         registry.register_instance(TrendFollowingStrategy())
-        registry.activate("trend_following_v1")
+        await registry.activate("trend_following_v1")
 
         bad_perf = StrategyPerformance(
             strategy_name="trend_following_v1",
@@ -374,21 +374,135 @@ class TestStrategyRegistry:
             expected_value=-10.0,
             computed_at=datetime.now(tz=UTC),
         )
-        registry.update_performance("trend_following_v1", bad_perf)
+        await registry.update_performance("trend_following_v1", bad_perf)
         assert not registry.is_active("trend_following_v1")
 
-    def test_deactivation_reason_stored(self) -> None:
+    async def test_deactivation_reason_stored(self) -> None:
         registry = StrategyRegistry.get()
         registry.register_instance(TrendFollowingStrategy())
-        registry.deactivate("trend_following_v1", "underperformance")
+        await registry.deactivate("trend_following_v1", "underperformance")
         entry = registry.get_entry("trend_following_v1")
         assert entry is not None
         assert entry.deactivation_reason == "underperformance"
 
-    def test_get_missing_raises_keyerror(self) -> None:
+    async def test_get_missing_raises_keyerror(self) -> None:
         registry = StrategyRegistry.get()
         with pytest.raises(KeyError):
-            registry.activate("nonexistent_strategy")
+            await registry.activate("nonexistent_strategy")
+
+
+class TestStrategyRegistryPersistence:
+    """
+    Persistenz-Hooks der Registry (inject_repository, sync_registrations_
+    to_db, get_active_names_from_db, _persist_active). Zuvor hielt die
+    Registry is_active rein in-memory, obwohl StrategyRepository bereits
+    upsert()/set_active()/get_active_names() implementiert hatte - beide
+    Seiten existierten, waren aber nie verbunden.
+    """
+
+    @pytest.fixture(autouse=True)
+    def reset_registry(self):
+        StrategyRegistry.get().clear()
+        yield
+        StrategyRegistry.get().clear()
+
+    async def test_activate_persists_via_injected_repository(self) -> None:
+        from unittest.mock import AsyncMock
+
+        registry = StrategyRegistry.get()
+        registry.register_instance(TrendFollowingStrategy())
+        repo = AsyncMock()
+        registry.inject_repository(repo)
+
+        await registry.activate("trend_following_v1")
+
+        repo.set_active.assert_called_once_with("trend_following_v1", True, None)
+
+    async def test_deactivate_persists_reason_via_injected_repository(self) -> None:
+        from unittest.mock import AsyncMock
+
+        registry = StrategyRegistry.get()
+        registry.register_instance(TrendFollowingStrategy())
+        repo = AsyncMock()
+        registry.inject_repository(repo)
+
+        await registry.deactivate("trend_following_v1", "manual stop")
+
+        repo.set_active.assert_called_once_with("trend_following_v1", False, "manual stop")
+
+    async def test_persist_failure_does_not_raise(self) -> None:
+        """Fail-safe: In-Memory-Aktivierung darf trotz DB-Fehler gelingen."""
+        from unittest.mock import AsyncMock
+
+        registry = StrategyRegistry.get()
+        registry.register_instance(TrendFollowingStrategy())
+        repo = AsyncMock()
+        repo.set_active.side_effect = RuntimeError("db down")
+        registry.inject_repository(repo)
+
+        await registry.activate("trend_following_v1")
+
+        assert registry.is_active("trend_following_v1")  # In-Memory-State trotzdem gesetzt
+
+    async def test_no_repository_injected_is_safe_noop(self) -> None:
+        registry = StrategyRegistry.get()
+        registry.register_instance(TrendFollowingStrategy())
+
+        await registry.activate("trend_following_v1")  # kein inject_repository() zuvor
+
+        assert registry.is_active("trend_following_v1")
+
+    async def test_sync_registrations_to_db_upserts_all_entries(self) -> None:
+        from unittest.mock import AsyncMock
+
+        registry = StrategyRegistry.get()
+        registry.register_instance(TrendFollowingStrategy())
+        registry.register_instance(MeanReversionStrategy())
+        repo = AsyncMock()
+        registry.inject_repository(repo)
+
+        await registry.sync_registrations_to_db()
+
+        assert repo.upsert.call_count == 2
+
+    async def test_sync_registrations_noop_without_repository(self) -> None:
+        registry = StrategyRegistry.get()
+        registry.register_instance(TrendFollowingStrategy())
+
+        await registry.sync_registrations_to_db()  # darf nicht crashen
+
+    async def test_sync_registrations_one_failure_does_not_block_others(self) -> None:
+        from unittest.mock import AsyncMock
+
+        registry = StrategyRegistry.get()
+        registry.register_instance(TrendFollowingStrategy())
+        registry.register_instance(MeanReversionStrategy())
+        repo = AsyncMock()
+        repo.upsert.side_effect = [RuntimeError("db down"), None]
+        registry.inject_repository(repo)
+
+        await registry.sync_registrations_to_db()  # darf nicht crashen
+
+        assert repo.upsert.call_count == 2
+
+    async def test_get_active_names_from_db_delegates_to_repository(self) -> None:
+        from unittest.mock import AsyncMock
+
+        registry = StrategyRegistry.get()
+        repo = AsyncMock()
+        repo.get_active_names.return_value = ["trend_following_v1"]
+        registry.inject_repository(repo)
+
+        result = await registry.get_active_names_from_db()
+
+        assert result == ["trend_following_v1"]
+
+    async def test_get_active_names_from_db_empty_without_repository(self) -> None:
+        registry = StrategyRegistry.get()
+
+        result = await registry.get_active_names_from_db()
+
+        assert result == []
 
 
 # ===========================================================================

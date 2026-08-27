@@ -241,6 +241,31 @@ class RiskEventModel(Base):
     )
 
 
+class AuditLogModel(Base):
+    """
+    Generisches Audit Log fuer sicherheitsrelevante Aktionen (API-Key-
+    Rotation, Login-Versuche, Config-Aenderungen, etc.). Immutable.
+
+    Getrennt von RiskEventModel: risk_events ist Trading-spezifisch und
+    verlangt trading_mode (nicht optional). AuditLogModel deckt
+    Security-/Account-Ereignisse ab, die keinen Trading-Mode-Bezug haben
+    (z.B. LOGIN_FAILED).
+    """
+
+    __tablename__ = "audit_log"
+
+    id: Mapped[str] = mapped_column(PG_UUID(as_uuid=False), primary_key=True)
+    action: Mapped[str] = mapped_column(String(50), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(100), nullable=False, default="system")
+    details: Mapped[dict] = mapped_column(JSONB, default=dict)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index("ix_audit_log_ts", "timestamp"),
+        Index("ix_audit_log_action", "action", "timestamp"),
+    )
+
+
 class UserModel(Base):
     """SaaS user accounts. Multi-tenant foundation."""
 

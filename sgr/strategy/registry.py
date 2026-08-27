@@ -22,6 +22,7 @@ Registry ist ein Singleton – alle Module teilen dieselbe Instanz.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 from sgr.core.logging import get_logger
 from sgr.core.types import MarketRegime
@@ -67,6 +68,28 @@ class StrategyRegistry:
 
     _instance: StrategyRegistry | None = None
     _entries: dict[str, StrategyEntry] = {}
+
+    def __init__(self) -> None:
+        # Optional: StrategyRepository fuer Persistenz von
+        # Aktivierung/Deaktivierung. None = rein in-memory (Tests,
+        # Backtesting) - additiv, kein Pflichtfeld.
+        self._strategy_repo: Any = None
+
+    def inject_repository(self, repository: Any) -> None:
+        """Injiziert StrategyRepository fuer Persistenz. Additiv, optional."""
+        self._strategy_repo = repository
+
+    async def get_active_names_from_db(self) -> list[str]:
+        """
+        Liest die Namen der beim letzten Shutdown aktiven Strategien aus
+        der DB. Fuer RecoveryManager._restore_strategies(). Liefert eine
+        leere Liste, wenn kein Repository injiziert wurde (z.B. Tests,
+        Backtesting) - kein Fehler, einfach nichts wiederherzustellen.
+        """
+        if self._strategy_repo is None:
+            return []
+        result: list[str] = await self._strategy_repo.get_active_names()
+        return result
 
     @classmethod
     def get(cls) -> StrategyRegistry:
@@ -114,21 +137,52 @@ class StrategyRegistry:
         """Registriert eine Strategie-Instanz direkt (für Tests)."""
         self._register(strategy)
 
+    async def sync_registrations_to_db(self) -> None:
+        """
+        Schreibt alle aktuell registrierten Strategien in die DB
+        (upsert). Explizit im Lifespan aufzurufen, NACH allen
+        @StrategyRegistry.register-Decorators (die synchron zur
+        Modul-Importzeit laufen, i.d.R. vor einem laufenden Event Loop -
+        Persistenz kann dort nicht inline passieren).
+
+        Best-effort pro Strategie: ein einzelner DB-Fehler blockiert
+        nicht die Registrierung der uebrigen Strategien.
+        """
+        if self._strategy_repo is None:
+            return
+        for entry in self._entries.values():
+            strategy = entry.strategy
+            try:
+                await self._strategy_repo.upsert(
+                    name=strategy.name,
+                    version=strategy.version,
+                    supported_regimes=[r.value for r in strategy.supported_regimes],
+                )
+            except Exception as e:
+                log.error(
+                    "strategy_registry.sync_upsert_failed",
+                    name=strategy.name,
+                    error=str(e),
+                )
+
     # ------------------------------------------------------------------
     # Activation / Deactivation
     # ------------------------------------------------------------------
 
-    def activate(self, name: str) -> None:
+    async def activate(self, name: str) -> None:
         """
         Aktiviert Strategie für Trading.
         Nur Strategien die Validierung bestanden haben sollten aktiviert werden.
+        Persistiert best-effort in der DB (falls Repository injiziert) -
+        Voraussetzung fuer Recovery nach einem Neustart.
         """
         entry = self._get_entry(name)
         entry.is_active = True
         entry.deactivation_reason = None
         log.info("strategy_registry.activated", name=name)
+        await self._persist_active(name, True)
 
-    def deactivate(self, name: str, reason: str) -> None:
+    async def deactivate(self, name: str, reason: str) -> None:
         """
         Deaktiviert Strategie. Kein Trading mehr bis manuelle Re-Aktivierung.
         reason wird für Audit-Trail gespeichert.
@@ -141,6 +195,21 @@ class StrategyRegistry:
             name=name,
             reason=reason,
         )
+        await self._persist_active(name, False, reason)
+
+    async def _persist_active(self, name: str, is_active: bool, reason: str | None = None) -> None:
+        """Best-effort DB-Persistenz des Aktivierungsstatus. Fail-safe."""
+        if self._strategy_repo is None:
+            return
+        try:
+            await self._strategy_repo.set_active(name, is_active, reason)
+        except Exception as e:
+            log.error(
+                "strategy_registry.persist_active_failed",
+                name=name,
+                is_active=is_active,
+                error=str(e),
+            )
 
     def mark_validated(
         self,
@@ -157,7 +226,7 @@ class StrategyRegistry:
             can_go_live=validation_status.can_go_live,
         )
 
-    def update_performance(
+    async def update_performance(
         self,
         name: str,
         performance: StrategyPerformance,
@@ -175,7 +244,7 @@ class StrategyRegistry:
                 f"HitRate={performance.hit_rate:.1%}, "
                 f"PF={performance.profit_factor:.2f}"
             )
-            self.deactivate(name, reason)
+            await self.deactivate(name, reason)
 
     # ------------------------------------------------------------------
     # Query
@@ -217,4 +286,5 @@ class StrategyRegistry:
     def clear(self) -> None:
         """Löscht alle Registrierungen (nur für Tests!)."""
         self._entries.clear()
+        self._strategy_repo = None
         log.warning("strategy_registry.cleared", note="FOR TESTING ONLY")

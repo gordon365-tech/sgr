@@ -229,14 +229,14 @@ class MLEngine:
             if score.recommended and not entry.is_active:
                 # Nur aktivieren wenn validiert
                 if entry.is_validated:
-                    self._registry.activate(score.strategy_name)
+                    await self._registry.activate(score.strategy_name)
                     log.info(
                         "ml_engine.strategy_activated",
                         strategy=score.strategy_name,
                         score=score.score,
                     )
             elif not score.recommended and entry.is_active:
-                self._registry.deactivate(
+                await self._registry.deactivate(
                     score.strategy_name,
                     reason=f"ML Score {score.score:.2f} below threshold",
                 )

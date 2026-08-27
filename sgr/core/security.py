@@ -6,18 +6,18 @@ API Key Rotation, Audit Logging, Input Validation.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-from enum import Enum
 import secrets
+from datetime import datetime, timedelta
+from enum import StrEnum
 from typing import Any
 
-from sgr.core.database import async_db_session
 from sgr.core.logging import get_logger
+from sgr.core.repositories import get_repositories
 
 log = get_logger(__name__)
 
 
-class AuditAction(str, Enum):
+class AuditAction(StrEnum):
     """Audit log action types."""
     API_KEY_CREATED = "api_key_created"
     API_KEY_ROTATED = "api_key_rotated"
@@ -39,30 +39,24 @@ async def audit_log(
 ) -> None:
     """
     Records audit log entry for sensitive operations.
-    
+
+    Fail-safe: eine DB-Schreibfehler darf den Aufrufer nie blockieren -
+    gleiches Muster wie PortfolioEngine._persist_position_upsert() und
+    KillSwitch._cancel_all_orders(). Ein Audit-Log-Fehler ist wichtig,
+    aber weniger kritisch als die eigentliche Aktion, die er protokolliert.
+
     Args:
         action: Action type
         user_id: User performing action
         details: Additional context
     """
     try:
-        async with async_db_session() as session:
-            # Insert into audit_log table
-            # Pseudo-code – requires audit_log table migration
-            query = """
-            INSERT INTO audit_log (action, user_id, details, timestamp)
-            VALUES (:action, :user_id, :details, :timestamp)
-            """
-            await session.execute(
-                query,
-                {
-                    "action": action.value,
-                    "user_id": user_id or "system",
-                    "details": details or {},
-                    "timestamp": datetime.utcnow(),
-                },
-            )
-            await session.commit()
+        repos = get_repositories()
+        await repos.audit_log.log_action(
+            action=action.value,
+            user_id=user_id,
+            details=details,
+        )
 
         log.info(
             f"audit.{action.value}",
@@ -70,7 +64,7 @@ async def audit_log(
             details=details,
         )
     except Exception as e:
-        log.error("audit.logging_failed", action=action, error=str(e))
+        log.error("audit.logging_failed", action=action.value, error=str(e))
 
 
 class APIKeyRotationManager:
@@ -91,7 +85,7 @@ class APIKeyRotationManager:
     ) -> str:
         """
         Rotates API key with grace period.
-        
+
         Process:
         1. Generate new key
         2. Mark old key as deprecated (grace period: 7 days)
@@ -127,7 +121,7 @@ class RateLimiter:
     Prevents abuse of sensitive endpoints.
     """
 
-    def __init__(self, redis_client: Any, window_seconds: int = 60, limit: int = 100):
+    def __init__(self, redis_client: Any, window_seconds: int = 60, limit: int = 100) -> None:
         self.redis = redis_client
         self.window_seconds = window_seconds
         self.limit = limit
@@ -135,11 +129,11 @@ class RateLimiter:
     async def is_allowed(self, user_id: str, action: str) -> bool:
         """
         Check if user is within rate limit.
-        
+
         Args:
             user_id: User identifier
             action: Action being rate-limited (e.g., "login_attempt")
-        
+
         Returns:
             True if request allowed, False if rate-limited
         """
@@ -172,7 +166,9 @@ class InputValidator:
     Prevents injection attacks, path traversal, etc.
     """
 
-    ALLOWED_CHARS_STRATEGY_NAME = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+    ALLOWED_CHARS_STRATEGY_NAME = set(
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+    )
     ALLOWED_CHARS_SYMBOL = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/-")
     MAX_STRING_LEN = 1000
     MAX_DESC_LEN = 10000
@@ -219,7 +215,7 @@ async def validate_sensitive_action(
 ) -> tuple[bool, str | None]:
     """
     Validates user is allowed to perform sensitive action.
-    
+
     Returns:
         (allowed, error_message)
     """
@@ -233,8 +229,14 @@ async def validate_sensitive_action(
     #     return False, "MFA verification required"
 
     # Log attempt
+    try:
+        audit_action = AuditAction(action)
+    except ValueError:
+        log.warning("security.unknown_audit_action", action=action, user_id=user_id)
+        return False, f"Unknown action: {action}"
+
     await audit_log(
-        action=AuditAction(action),
+        action=audit_action,
         user_id=user_id,
     )
 

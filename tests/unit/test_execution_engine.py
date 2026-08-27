@@ -372,3 +372,148 @@ class TestEventPublishFailureIsolation:
         result = await engine.execute(order)
 
         assert result.status == OrderStatus.FILLED  # trotz Publish-Fehler
+
+
+class TestOrderPersistence:
+    """
+    ExecutionEngine schrieb Orders zuvor NIE in die DB - nur Events und
+    Audit-Log-Zeilen (kein abfragbarer State). OrderRepository.create()/
+    update_status() existierten, wurden aber nirgends aufgerufen.
+    Ohne order_repository-Injektion bleibt das Verhalten unveraendert
+    (No-Op) - siehe bestehende Tests oben, die alle ohne Repository laufen.
+    """
+
+    @pytest.fixture
+    def engine_with_repo(
+        self, mock_pool: tuple[MagicMock, AsyncMock]
+    ) -> tuple[ExecutionEngine, AsyncMock]:
+        pool, _adapter = mock_pool
+        order_repo = AsyncMock()
+        eng = ExecutionEngine(pool, TradingMode.PAPER, order_repository=order_repo)
+        fake_kill_switch = MagicMock()
+        fake_kill_switch.is_active = False
+        eng._kill_switch = fake_kill_switch
+        return eng, order_repo
+
+    async def test_no_repository_injected_is_safe_noop(
+        self, engine: ExecutionEngine, mock_pool: tuple[MagicMock, AsyncMock]
+    ) -> None:
+        """Regressionstest: ohne Repository darf nichts crashen (bestehendes Verhalten)."""
+        _pool, adapter = mock_pool
+        order = _make_order_request()
+        filled = _make_order_result(order, status=OrderStatus.FILLED)
+        adapter.place_order = AsyncMock(return_value=filled)
+
+        result = await engine.execute(order)
+
+        assert result.status == OrderStatus.FILLED
+
+    async def test_immediate_fill_creates_and_updates_order(
+        self,
+        engine_with_repo: tuple[ExecutionEngine, AsyncMock],
+        mock_pool: tuple[MagicMock, AsyncMock],
+    ) -> None:
+        eng, order_repo = engine_with_repo
+        _pool, adapter = mock_pool
+        order = _make_order_request()
+        filled = _make_order_result(order, status=OrderStatus.FILLED)
+        adapter.place_order = AsyncMock(return_value=filled)
+
+        await eng.execute(order)
+
+        order_repo.create.assert_called_once()
+        created = order_repo.create.call_args.args[0]
+        assert created["id"] == str(order.id)
+        assert created["signal_id"] == str(order.signal_id)
+        # place_order() liefert hier bereits FILLED zurueck (Paper-Mode-
+        # Sofortfill-Fall) - create() persistiert den zum Zeitpunkt der
+        # Submission bekannten Status, nicht zwingend PENDING/SUBMITTED.
+        assert created["status"] == OrderStatus.FILLED.value
+
+        order_repo.update_status.assert_called_once()
+        update_kwargs = order_repo.update_status.call_args.kwargs
+        assert update_kwargs["order_id"] == str(order.id)
+        assert update_kwargs["status"] == OrderStatus.FILLED.value
+        assert update_kwargs["filled_quantity"] == filled.filled_quantity
+
+    async def test_create_uses_order_id_not_generated_id(
+        self,
+        engine_with_repo: tuple[ExecutionEngine, AsyncMock],
+        mock_pool: tuple[MagicMock, AsyncMock],
+    ) -> None:
+        """
+        Kritisch fuer Korrektheit: id muss explizit order.id sein, sonst
+        treffen spaetere update_status()-Aufrufe (per order.id) die
+        falsche Zeile oder keine.
+        """
+        eng, order_repo = engine_with_repo
+        _pool, adapter = mock_pool
+        order = _make_order_request()
+        filled = _make_order_result(order, status=OrderStatus.FILLED)
+        adapter.place_order = AsyncMock(return_value=filled)
+        order_repo.create.return_value = "some-different-generated-id"
+
+        await eng.execute(order)
+
+        created = order_repo.create.call_args.args[0]
+        assert created["id"] == str(order.id)
+
+    async def test_cancelled_order_updates_status(
+        self,
+        engine_with_repo: tuple[ExecutionEngine, AsyncMock],
+        mock_pool: tuple[MagicMock, AsyncMock],
+        mocker: pytest_mock.MockerFixture,
+    ) -> None:
+        eng, order_repo = engine_with_repo
+        _pool, adapter = mock_pool
+        order = _make_order_request(order_type=OrderType.LIMIT)
+        submitted = _make_order_result(order, status=OrderStatus.SUBMITTED)
+        adapter.place_order = AsyncMock(return_value=submitted)
+        adapter.cancel_order = AsyncMock(return_value=True)
+        mocker.patch("asyncio.sleep", new=AsyncMock())
+
+        # Kill Switch wird erst NACH der ersten Submission aktiv (analog
+        # test_kill_switch_activated_during_monitoring_cancels_order).
+        eng._kill_switch = _DelayedActiveKillSwitch(activate_after_checks=1)
+
+        await eng.execute(order)
+
+        # Ein create() beim Submit, ein update_status() beim Cancel
+        order_repo.create.assert_called_once()
+        order_repo.update_status.assert_called_once()
+        update_kwargs = order_repo.update_status.call_args.kwargs
+        assert update_kwargs["status"] == OrderStatus.SUBMITTED.value
+
+    async def test_persist_create_failure_does_not_block_execution(
+        self,
+        engine_with_repo: tuple[ExecutionEngine, AsyncMock],
+        mock_pool: tuple[MagicMock, AsyncMock],
+    ) -> None:
+        """Fail-safe: ein DB-Fehler beim Order-Anlegen darf den Fill nicht verhindern."""
+        eng, order_repo = engine_with_repo
+        _pool, adapter = mock_pool
+        order = _make_order_request()
+        filled = _make_order_result(order, status=OrderStatus.FILLED)
+        adapter.place_order = AsyncMock(return_value=filled)
+        order_repo.create.side_effect = RuntimeError("db down")
+
+        result = await eng.execute(order)
+
+        assert result.status == OrderStatus.FILLED
+
+    async def test_persist_status_failure_does_not_block_execution(
+        self,
+        engine_with_repo: tuple[ExecutionEngine, AsyncMock],
+        mock_pool: tuple[MagicMock, AsyncMock],
+    ) -> None:
+        """Fail-safe: ein DB-Fehler beim Status-Update darf den Fill-Report nicht verhindern."""
+        eng, order_repo = engine_with_repo
+        _pool, adapter = mock_pool
+        order = _make_order_request()
+        filled = _make_order_result(order, status=OrderStatus.FILLED)
+        adapter.place_order = AsyncMock(return_value=filled)
+        order_repo.update_status.side_effect = RuntimeError("db down")
+
+        result = await eng.execute(order)
+
+        assert result.status == OrderStatus.FILLED

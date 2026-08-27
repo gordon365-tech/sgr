@@ -161,7 +161,7 @@ class BacktestingEngine:
         registry = StrategyRegistry.get()
         for name in strategy_names:
             if not registry.is_active(name):
-                registry.activate(name)
+                await registry.activate(name)
 
         # 2. Daten laden
         candles_by_symbol: dict[str, Any] = {}
@@ -269,7 +269,7 @@ class BacktestingEngine:
         registry = StrategyRegistry.get()
         for name in strategy_names:
             if not registry.is_active(name):
-                registry.activate(name)
+                await registry.activate(name)
 
         if not candles:
             log.warning("backtesting_engine.quick.no_candles")

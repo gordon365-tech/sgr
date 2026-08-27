@@ -28,6 +28,7 @@ from sqlalchemy import and_, desc, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from sgr.core.database import (
+    AuditLogModel,
     CandleModel,
     OrderModel,
     PositionModel,
@@ -38,7 +39,7 @@ from sgr.core.database import (
     get_session,
 )
 from sgr.core.logging import get_logger
-from sgr.core.types import Candle, TradingMode
+from sgr.core.types import Candle, OrderStatus, TradingMode
 
 log = get_logger(__name__)
 
@@ -222,6 +223,50 @@ class OrderRepository:
                     "strategy": r.strategy_name,
                     "submitted_at": r.submitted_at.isoformat(),
                     "filled_at": r.filled_at.isoformat() if r.filled_at else None,
+                }
+                for r in rows
+            ]
+
+    async def get_open_orders(
+        self,
+        trading_mode: TradingMode,
+    ) -> list[dict[str, Any]]:
+        """
+        Alle Orders in einem nicht-terminalen Status (PENDING/SUBMITTED/
+        PARTIALLY_FILLED) fuer einen Trading Mode - system-weit, nicht
+        nach user_id gefiltert. Fuer Startup-Recovery gedacht: nach einem
+        Crash muss geprueft werden, ob eine als "offen" bekannte Order
+        inzwischen auf der Exchange gefuellt/storniert wurde, unabhaengig
+        davon welcher User sie ausgeloest hat.
+        """
+        open_statuses = (
+            OrderStatus.PENDING.value,
+            OrderStatus.SUBMITTED.value,
+            OrderStatus.PARTIALLY_FILLED.value,
+        )
+        async with get_session() as session:
+            stmt = select(OrderModel).where(
+                and_(
+                    OrderModel.trading_mode == trading_mode.value,
+                    OrderModel.status.in_(open_statuses),
+                )
+            )
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+            return [
+                {
+                    "id": str(r.id),
+                    "signal_id": str(r.signal_id),
+                    "exchange_order_id": r.exchange_order_id,
+                    "symbol": r.symbol,
+                    "exchange": r.exchange,
+                    "side": r.side,
+                    "order_type": r.order_type,
+                    "quantity": r.quantity,
+                    "status": r.status,
+                    "trading_mode": r.trading_mode,
+                    "strategy_name": r.strategy_name,
+                    "submitted_at": r.submitted_at,
                 }
                 for r in rows
             ]
@@ -489,6 +534,19 @@ class StrategyRepository:
             stmt = update(StrategyModel).where(StrategyModel.name == name).values(**updates)
             await session.execute(stmt)
 
+    async def get_active_names(self) -> list[str]:
+        """
+        Namen aller Strategien, die beim letzten Shutdown als aktiv
+        markiert waren. Fuer Startup-Recovery: StrategyRegistry haelt
+        is_active nur in-memory (siehe strategy/registry.py) - ohne
+        diesen Restore-Schritt startet jede Strategie nach einem Neustart
+        deaktiviert, unabhaengig vom Zustand davor.
+        """
+        async with get_session() as session:
+            stmt = select(StrategyModel.name).where(StrategyModel.is_active.is_(True))
+            result = await session.execute(stmt)
+            return list(result.scalars().all())
+
 
 # ---------------------------------------------------------------------------
 # User Repository (SaaS)
@@ -578,6 +636,34 @@ class RiskEventRepository:
 
 
 # ---------------------------------------------------------------------------
+# Audit Log Repository (Security)
+# ---------------------------------------------------------------------------
+
+
+class AuditLogRepository:
+    """
+    Immutable Audit Log fuer sicherheitsrelevante Aktionen.
+    Backing-Store fuer sgr.core.security.audit_log().
+    """
+
+    async def log_action(
+        self,
+        action: str,
+        user_id: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        async with get_session() as session:
+            entry = AuditLogModel(
+                id=str(uuid4()),
+                action=action,
+                user_id=user_id or "system",
+                details=details or {},
+                timestamp=datetime.utcnow(),
+            )
+            session.add(entry)
+
+
+# ---------------------------------------------------------------------------
 # Repository Factory (Dependency Injection)
 # ---------------------------------------------------------------------------
 
@@ -593,6 +679,7 @@ class Repositories:
         self.strategies = StrategyRepository()
         self.users = UserRepository()
         self.risk_events = RiskEventRepository()
+        self.audit_log = AuditLogRepository()
 
 
 # Singleton
