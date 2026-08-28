@@ -870,29 +870,36 @@ class TestErrorMapping:
         mapped = adapter._map_error(ccxt.NetworkError("down"))
         assert isinstance(mapped, ExchangeConnectionError)
 
-    def test_onmaintenance_is_shadowed_by_networkerror_check(self, adapter):
+    def test_onmaintenance_classified_correctly(self, adapter):
         """
-        ccxt.OnMaintenance subclasses ccxt.NetworkError, and the NetworkError
-        check in _map_error runs first, so OnMaintenance is unreachable in
-        practice: maintenance errors get classified as the generic
-        ExchangeConnectionError instead of ExchangeMaintenanceError.
-        Both are retryable=True so there's no acute behavioral risk, but this
-        is misleading for monitoring/alerting. Documented per deferred
-        finding; not fixed here without an explicit decision from Gordon.
+        ccxt.OnMaintenance subclasses ccxt.NetworkError. The specific
+        OnMaintenance check now runs BEFORE the generic NetworkError check,
+        so maintenance errors are correctly classified as
+        ExchangeMaintenanceError instead of the generic
+        ExchangeConnectionError. Fixes the previously deferred shadowing
+        finding (see memory: "ccxt_base.py _map_error()").
         """
         mapped = adapter._map_error(ccxt.OnMaintenance("under maintenance"))
-        assert isinstance(mapped, ExchangeConnectionError)
-        assert not isinstance(mapped, ExchangeMaintenanceError)
+        assert isinstance(mapped, ExchangeMaintenanceError)
         assert mapped.retryable is True
 
-    def test_requesttimeout_is_shadowed_by_networkerror_check(self, adapter):
+    def test_requesttimeout_classified_with_timeout_message(self, adapter):
         """
-        Same shadowing issue: ccxt.RequestTimeout also subclasses
-        ccxt.NetworkError, so the dedicated RequestTimeout branch below the
-        NetworkError check is unreachable too.
+        ccxt.RequestTimeout also subclasses ccxt.NetworkError. It is checked
+        before the generic NetworkError branch, so it reaches its own
+        dedicated mapping (still ExchangeConnectionError, but with a
+        "Timeout: ..." prefixed message for clearer monitoring/alerting).
         """
         mapped = adapter._map_error(ccxt.RequestTimeout("timed out"))
         assert isinstance(mapped, ExchangeConnectionError)
+        assert "Timeout" in str(mapped)
+
+    def test_generic_networkerror_not_onmaintenance_or_requesttimeout(self, adapter):
+        """A plain NetworkError (not OnMaintenance/RequestTimeout) still
+        falls through to the generic ExchangeConnectionError branch."""
+        mapped = adapter._map_error(ccxt.NetworkError("generic network issue"))
+        assert isinstance(mapped, ExchangeConnectionError)
+        assert not isinstance(mapped, ExchangeMaintenanceError)
 
     def test_insufficient_funds(self, adapter):
         mapped = adapter._map_error(ccxt.InsufficientFunds("no money"))

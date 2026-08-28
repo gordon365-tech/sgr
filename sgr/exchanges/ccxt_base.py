@@ -744,11 +744,19 @@ class CCXTBaseAdapter:
             if isinstance(exc, ccxt.RateLimitExceeded):
                 return RateLimitError(self.exchange_id.value)
 
-            if isinstance(exc, ccxt.NetworkError):
-                return ExchangeConnectionError(self.exchange_id.value, str(exc))
-
+            # WICHTIG: Spezifischere NetworkError-Subklassen MÜSSEN vor dem
+            # generischen NetworkError-Check geprüft werden, da sonst
+            # RequestTimeout und OnMaintenance durch die NetworkError-Prüfung
+            # abgefangen werden (isinstance-Check trifft auf Basisklasse zu)
+            # und nie ihre spezifischere Klassifikation erreichen.
             if isinstance(exc, ccxt.RequestTimeout):
                 return ExchangeConnectionError(self.exchange_id.value, f"Timeout: {exc}")
+
+            if isinstance(exc, ccxt.OnMaintenance):
+                return ExchangeMaintenanceError(self.exchange_id.value)
+
+            if isinstance(exc, ccxt.NetworkError):
+                return ExchangeConnectionError(self.exchange_id.value, str(exc))
 
             if isinstance(exc, ccxt.InsufficientFunds):
                 return InsufficientFundsError(
@@ -762,9 +770,6 @@ class CCXTBaseAdapter:
 
             if isinstance(exc, ccxt.BadSymbol):
                 return SymbolNotFoundError(self.exchange_id.value, str(exc))
-
-            if isinstance(exc, ccxt.OnMaintenance):
-                return ExchangeMaintenanceError(self.exchange_id.value)
 
             if isinstance(exc, ccxt.NotSupported):
                 return NotSupportedFeatureError(self.exchange_id.value, str(exc))
