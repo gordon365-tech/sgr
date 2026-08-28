@@ -222,34 +222,49 @@ class TestConnectClose:
 
 class TestParseRss:
     """
-    HINWEIS zu einem Bestandsbefund (nicht behoben, siehe Session-Notiz):
+    HINWEIS zu einem behobenen Bestandsbefund (siehe Session-Notiz 2026-08-28b/c):
 
     `item.find("title") or item.find("{atom}title")` (und die analogen
-    Konstrukte für link/pubDate) nutzen Python's `or`-Kurzschluss. Ein
+    Konstrukte für link/pubDate) nutzten Python's `or`-Kurzschluss. Ein
     gefundenes `xml.etree.ElementTree.Element` ohne Kind-Elemente ist
     jedoch falsy (`bool(elem) == False`, auch wenn `elem.text` gesetzt
-    ist) - das trifft auf praktisch jedes reale `<title>Text</title>`-Item
-    zu. Dadurch fällt der Ausdruck IMMER auf den Atom-Fallback durch, der
-    für Standard-RSS2-Items `None` liefert. Effekt: In der aktuellen
-    Implementierung werden reale RSS2-Feeds mit einfachen Text-Kindelementen
-    faktisch nie korrekt geparst (title_elem/link_elem/date_elem bleiben
-    None). Diese Tests dokumentieren das TATSÄCHLICHE Verhalten, nicht das
-    beabsichtigte - keine Korrektur ohne explizite Freigabe.
+    ist) - das traf auf praktisch jedes reale `<title>Text</title>`-Item
+    zu. Dadurch fiel der Ausdruck vorher IMMER auf den Atom-Fallback durch,
+    der für Standard-RSS2-Items `None` lieferte. Effekt vor der Korrektur:
+    reale RSS2-Feeds mit einfachen Text-Kindelementen wurden faktisch nie
+    korrekt geparst. Behoben durch explizite `is None`-Prüfung statt `or`.
+    Diese Tests decken jetzt das korrigierte Verhalten ab.
     """
 
-    def test_title_element_lookup_is_shadowed_by_falsy_element_bug(self):
-        """`item.find("title") or ...` ist immer falsy für ein gefundenes,
-        kindloses Element -> title_elem wird nie aus dem RSS-Zweig gesetzt."""
+    def test_rss2_title_link_pubdate_all_parsed_correctly(self):
+        """Regressionstest für den behobenen `or`/Falsy-Element-Bug: reale
+        RSS2-Items mit einfachen Text-Kindelementen müssen jetzt korrekt
+        geparst werden, inkl. Filterung nicht-relevanter Items."""
         fetcher = NewsFetcher()
         articles = fetcher._parse_rss(RSS2_XML, "https://feed.example.com", ["BTC", "ETH"])
-        # Aufgrund des Bugs bleibt title="" für alle Items -> alle werden
-        # durch `if not title: continue` verworfen.
-        assert articles == []
 
-    def test_atom_feed_unaffected_because_atom_lookup_is_the_fallback_branch(self):
-        """Atom-Feeds sind vom Bug nicht betroffen, weil `item.find("title")`
-        (ohne Namespace) dort nichts findet (None ist falsy wie erwartet)
-        und der Fallback auf den Atom-Namespace korrekt greift."""
+        headlines = [a.headline for a in articles]
+        assert "Local weather report" not in headlines
+        assert "Bitcoin surges past new milestone" in headlines
+        assert "Ethereum DeFi protocol launches" in headlines
+
+        btc_article = next(a for a in articles if "Bitcoin" in a.headline)
+        assert btc_article.url == "https://example.com/btc-surge"
+        assert btc_article.published_at == datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+
+    def test_rss2_item_without_pubdate_uses_now(self):
+        fetcher = NewsFetcher()
+        before = datetime.now(tz=UTC)
+        articles = fetcher._parse_rss(RSS2_XML, "https://feed.example.com", ["ETH"])
+        after = datetime.now(tz=UTC)
+
+        eth_article = next(a for a in articles if "Ethereum" in a.headline)
+        assert before <= eth_article.published_at <= after
+
+    def test_atom_feed_still_parsed_correctly(self):
+        """Atom-Feeds funktionierten schon vor der Korrektur, da dort
+        `item.find("title")` (ohne Namespace) None liefert und der
+        Fallback auf den Atom-Namespace korrekt greift."""
         fetcher = NewsFetcher()
         articles = fetcher._parse_rss(ATOM_XML, "https://feed.example.com", ["BTC"])
         assert len(articles) == 1
@@ -378,10 +393,9 @@ class TestFetchRss:
 
     async def test_success_parses_articles(self):
         fetcher = NewsFetcher()
-        fetcher._session = FakeSession(FakeResponse(status=200, text_data=ATOM_XML))
+        fetcher._session = FakeSession(FakeResponse(status=200, text_data=RSS2_XML))
         result = await fetcher._fetch_rss("https://feed.example.com", ["BTC", "ETH"])
-        assert len(result) == 1
-        assert result[0].headline == "Blockchain adoption grows"
+        assert len(result) == 2
 
     async def test_request_exception_returns_empty(self):
         fetcher = NewsFetcher()

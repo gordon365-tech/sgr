@@ -249,7 +249,9 @@ class NewsFetcher:
 
             for item in items[:20]:  # Max 20 pro Feed
                 # Titel
-                title_elem = item.find("title") or item.find("{http://www.w3.org/2005/Atom}title")
+                title_elem = item.find("title")
+                if title_elem is None:
+                    title_elem = item.find("{http://www.w3.org/2005/Atom}title")
                 title = title_elem.text if title_elem is not None else ""
 
                 if not title:
@@ -265,15 +267,17 @@ class NewsFetcher:
                     continue
 
                 # URL
-                link_elem = item.find("link") or item.find("{http://www.w3.org/2005/Atom}link")
+                link_elem = item.find("link")
+                if link_elem is None:
+                    link_elem = item.find("{http://www.w3.org/2005/Atom}link")
                 url = ""
                 if link_elem is not None:
                     url = link_elem.text or link_elem.get("href", "")
 
                 # Datum
-                date_elem = item.find("pubDate") or item.find(
-                    "{http://www.w3.org/2005/Atom}published"
-                )
+                date_elem = item.find("pubDate")
+                if date_elem is None:
+                    date_elem = item.find("{http://www.w3.org/2005/Atom}published")
                 published_at = datetime.now(tz=UTC)
                 if date_elem is not None and date_elem.text:
                     try:
