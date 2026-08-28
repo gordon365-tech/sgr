@@ -97,6 +97,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         trading_mode=config.trading_mode.value,
     )
 
+    # 1b. Observability (OpenTelemetry Metrics + Auto-Instrumentation)
+    # Wurde zuvor nirgends aufgerufen (deferred finding: monitoring/
+    # observability.py war reiner Dead Code, 0% Coverage). Jetzt verdrahtet:
+    # setup_metrics() registriert den Prometheus-MeterProvider, ohne den
+    # sgr.monitoring.metrics.SGRMetrics-Meter (bereits an anderer Stelle
+    # verwendet) stillschweigend gegen den OpenTelemetry-No-Op-Meter fällt.
+    # Tracing bleibt bewusst No-Op (siehe setup_tracing()-Docstring), bis
+    # die OTLP-Migration explizit angegangen wird.
+    from sgr.monitoring.observability import setup_observability
+
+    try:
+        setup_observability(app)
+    except Exception as e:
+        # Observability-Fehler sollen den Start nicht verhindern
+        # (fail-safe, nicht fail-fast - analog zu Crash Recovery unten).
+        log.warning("sgr.api.observability_setup_failed", error=str(e))
+
     # 2. Database
     from sgr.core.database import close_db, init_db
 

@@ -6,18 +6,23 @@ Distributed Tracing + Metrics Integration.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from opentelemetry import metrics
 from opentelemetry.exporter.prometheus import PrometheusMetricReader
-from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.instrumentation.asyncio import AsyncioInstrumentor
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
 from opentelemetry.instrumentation.redis import RedisInstrumentor
 from opentelemetry.instrumentation.requests import RequestsInstrumentor
-from opentelemetry.instrumentation.asyncio import AsyncioInstrumentor
+from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
+from opentelemetry.sdk.metrics import MeterProvider
 from prometheus_client import REGISTRY
 
 from sgr.core.config import get_config
 from sgr.core.logging import get_logger
+
+if TYPE_CHECKING:
+    from fastapi import FastAPI
 
 log = get_logger(__name__)
 
@@ -59,10 +64,17 @@ def setup_metrics() -> None:
     log.info("observability.metrics_enabled", prometheus_registry="REGISTRY")
 
 
-def setup_auto_instrumentation() -> None:
-    """Auto-instrumentation für FastAPI, SQL, Redis, etc."""
+def setup_auto_instrumentation(app: FastAPI) -> None:
+    """Auto-instrumentation für FastAPI, SQL, Redis, etc.
+
+    Erwartet die bereits erstellte FastAPI-App-Instanz direkt als Parameter
+    statt sie lazy über `from sgr.api.main import app` zu importieren. Das
+    vermeidet eine unnötige Modul-Rückimport-Indirektion, da der Aufrufer
+    (der Lifespan-Kontextmanager in api/main.py) die Instanz ohnehin bereits
+    als eigenen Parameter besitzt.
+    """
     try:
-        FastAPIInstrumentor.instrument_app(get_fastapi_app())
+        FastAPIInstrumentor.instrument_app(app)
         SQLAlchemyInstrumentor().instrument()
         RedisInstrumentor().instrument()
         RequestsInstrumentor().instrument()
@@ -73,16 +85,18 @@ def setup_auto_instrumentation() -> None:
         log.warning("observability.auto_instrumentation_error", error=str(e))
 
 
-def get_fastapi_app():
-    """Helper to get FastAPI app for instrumentation."""
-    from sgr.api.main import app
-    return app
+def setup_observability(app: FastAPI) -> None:
+    """Master setup function.
 
-
-def setup_observability() -> None:
-    """Master setup function."""
+    Muss mit der aktiven FastAPI-App-Instanz aufgerufen werden (siehe
+    setup_auto_instrumentation). Idempotent bzgl. Tracing (No-Op solange
+    Finding zurückgestellt ist), aber setup_metrics()/
+    setup_auto_instrumentation() dürfen nicht mehrfach pro Prozess laufen
+    (OpenTelemetry Instrumentoren sind nicht re-entrant) - Aufrufer ist
+    dafür verantwortlich, dies nur einmal beim App-Start aufzurufen.
+    """
     log.info("observability.setup_started")
     setup_tracing()
     setup_metrics()
-    setup_auto_instrumentation()
+    setup_auto_instrumentation(app)
     log.info("observability.setup_complete")

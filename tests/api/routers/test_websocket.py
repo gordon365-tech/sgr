@@ -464,6 +464,23 @@ class TestWsMarket:
 
         assert fake_ws.accepted is True
 
+    async def test_get_config_error_sends_error_and_closes(self):
+        """get_config() now runs inside its own try/except (deferred finding
+        fix). A failure there must send a graceful error message and close
+        the socket instead of propagating unhandled."""
+        pool = MagicMock()
+        fake_ws = FakeWebSocket()
+        request = FakeRequest(exchange_pool=pool)
+
+        with patch(
+            "sgr.core.config.get_config",
+            side_effect=RuntimeError("invalid configuration"),
+        ):
+            await ws_router.ws_market(fake_ws, "btc-usdt", request, token="")
+
+        assert fake_ws.closed is True
+        assert fake_ws.messages == [{"error": "Server configuration error"}]
+
 
 # ---------------------------------------------------------------------------
 # /ws/alerts
@@ -471,6 +488,21 @@ class TestWsMarket:
 
 
 class TestWsAlerts:
+    async def test_get_config_error_sends_error_and_closes(self):
+        """Same fix as ws_market: get_config() failure must be caught
+        gracefully instead of propagating unhandled (deferred finding)."""
+        fake_ws = FakeWebSocket()
+        request = FakeRequest()
+
+        with patch(
+            "sgr.core.config.get_config",
+            side_effect=RuntimeError("invalid configuration"),
+        ):
+            await ws_router.ws_alerts(fake_ws, request, token="")
+
+        assert fake_ws.closed is True
+        assert fake_ws.messages == [{"error": "Server configuration error"}]
+
     async def test_relays_pubsub_messages_and_unsubscribes(self):
         fake_ws = FakeWebSocket(disconnect_after=1)
 

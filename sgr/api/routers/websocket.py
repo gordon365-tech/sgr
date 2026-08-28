@@ -214,7 +214,20 @@ async def ws_market(
     from sgr.core.config import get_config
     from sgr.core.types import ExchangeID
 
-    config = get_config()
+    try:
+        config = get_config()
+    except Exception as e:
+        # get_config() kann bei fehlerhafter/fehlender Konfiguration werfen
+        # (z.B. pydantic-settings ValidationError). Vorher lief dieser Call
+        # außerhalb jedes try/except - ein Fehler hier hätte die Exception
+        # unbehandelt propagiert, statt dem bereits akzeptierten Client eine
+        # saubere Fehlermeldung + Close zu liefern (siehe deferred finding:
+        # api/routers/websocket.py ws_market Zeile 217).
+        log.error("ws.market.config_error", symbol=symbol, error=str(e))
+        await websocket.send_text(json.dumps({"error": "Server configuration error"}))
+        await websocket.close()
+        return
+
     ccxt_symbol = symbol.upper().replace("-", "/")
 
     log.info("ws.market.connected", symbol=ccxt_symbol)
@@ -274,7 +287,15 @@ async def ws_alerts(
 
     from sgr.core.config import get_config
 
-    config = get_config()
+    try:
+        config = get_config()
+    except Exception as e:
+        # Gleiches Muster wie ws_market: get_config() lief zuvor außerhalb
+        # jedes try/except (deferred finding, analog behoben).
+        log.error("ws.alerts.config_error", error=str(e))
+        await websocket.send_text(json.dumps({"error": "Server configuration error"}))
+        await websocket.close()
+        return
 
     try:
         # Redis Pub/Sub für Alert-Channel
