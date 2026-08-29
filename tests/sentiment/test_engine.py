@@ -1,0 +1,486 @@
+"""
+Tests für sgr.sentiment.engine (SentimentAggregator + SentimentEngine).
+
+Coverage-Ziel: 43% -> hoch.
+
+Teststrategie:
+    - SentimentAggregator wird REAL getestet (reine Aggregations-Logik
+      ohne I/O: Zeitfenster-Filterung, Konfidenz-Gewichtung, Rolling-
+      Window-Pruning, Source-Breakdown).
+    - SentimentEngine benötigt echte Infrastruktur (Redis, NewsFetcher/
+      MacroEventMonitor mit externen APIs, asyncio-Loops). Analog zum
+      etablierten Muster in tests/unit/test_event_bus.py wird hier
+      jede externe Abhängigkeit auf Instanz-Ebene mit AsyncMock/
+      MagicMock ersetzt, um die tatsächliche Orchestrierungslogik
+      (start/stop/get_sentiment/_process_article/_news_loop/
+      _macro_loop) ohne Netzwerkzugriff auszuführen.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from sgr.sentiment.engine import SentimentAggregator, SentimentEngine
+from sgr.sentiment.news_fetcher import RawArticle
+from sgr.sentiment.types import EventCategory, SentimentSignal, SentimentSource
+
+pytestmark_async = pytest.mark.asyncio
+
+
+def make_signal(
+    *,
+    source: SentimentSource = SentimentSource.NEWS,
+    raw_score: float = 0.5,
+    confidence: float = 0.8,
+    entity: str = "BTC",
+    age_seconds: float = 0.0,
+    event_category: EventCategory = EventCategory.BULLISH,
+) -> SentimentSignal:
+    return SentimentSignal(
+        source=source,
+        timestamp=datetime.now(tz=UTC) - timedelta(seconds=age_seconds),
+        raw_score=raw_score,
+        confidence=confidence,
+        event_category=event_category,
+        entity=entity,
+        headline="",
+        url="",
+    )
+
+
+# ---------------------------------------------------------------------
+# SentimentAggregator
+# ---------------------------------------------------------------------
+
+
+class TestSentimentAggregatorAddSignal:
+    def test_add_signal_below_min_confidence_is_dropped(self) -> None:
+        agg = SentimentAggregator()
+        agg.add_signal(make_signal(confidence=0.1))
+        assert agg._signals == []
+
+    def test_add_signal_at_or_above_min_confidence_is_kept(self) -> None:
+        agg = SentimentAggregator()
+        signal = make_signal(confidence=0.3)
+        agg.add_signal(signal)
+        assert agg._signals == [signal]
+
+    def test_add_signal_prunes_signals_older_than_24h(self) -> None:
+        agg = SentimentAggregator()
+        old_signal = make_signal(age_seconds=25 * 3600)
+        # Directly inject (bypassing the confidence filter/pruning of add_signal
+        # so we control exactly what's being pruned).
+        agg._signals = [old_signal]
+
+        agg.add_signal(make_signal(age_seconds=0))
+
+        assert old_signal not in agg._signals
+        assert len(agg._signals) == 1
+
+    def test_add_signal_caps_at_5000_entries(self) -> None:
+        agg = SentimentAggregator()
+        agg._signals = [make_signal(age_seconds=1) for _ in range(5000)]
+
+        agg.add_signal(make_signal(age_seconds=0))
+
+        assert len(agg._signals) == 5000
+
+
+class TestSentimentAggregatorAggregate:
+    def test_aggregate_with_no_signals_returns_zeros(self) -> None:
+        agg = SentimentAggregator()
+        result = agg.aggregate("BTC")
+
+        assert result.score_1h == 0.0
+        assert result.score_4h == 0.0
+        assert result.score_24h == 0.0
+        assert result.signals_1h == 0
+        assert result.source_scores == {}
+
+    def test_aggregate_filters_by_symbol_entity_match(self) -> None:
+        agg = SentimentAggregator()
+        agg.add_signal(make_signal(entity="BTC", raw_score=0.8, confidence=0.9))
+        agg.add_signal(make_signal(entity="ETH", raw_score=-0.8, confidence=0.9))
+
+        result = agg.aggregate("BTC")
+
+        assert result.score_1h > 0  # Only the BTC signal should count.
+        assert result.signals_1h == 1
+
+    def test_aggregate_includes_market_wide_signals(self) -> None:
+        agg = SentimentAggregator()
+        agg.add_signal(make_signal(entity="market", raw_score=0.6, confidence=0.9))
+
+        result = agg.aggregate("BTC")
+
+        assert result.signals_1h == 1
+        assert result.score_1h > 0
+
+    def test_aggregate_includes_empty_entity_signals(self) -> None:
+        agg = SentimentAggregator()
+        agg.add_signal(make_signal(entity="", raw_score=0.4, confidence=0.9))
+
+        result = agg.aggregate("BTC")
+
+        assert result.signals_1h == 1
+
+    def test_aggregate_confidence_weighted_score(self) -> None:
+        agg = SentimentAggregator()
+        agg.add_signal(make_signal(entity="BTC", raw_score=1.0, confidence=0.9))
+        agg.add_signal(make_signal(entity="BTC", raw_score=-1.0, confidence=0.3))
+
+        result = agg.aggregate("BTC")
+
+        # Weighted average should lean positive (higher-confidence signal dominates).
+        assert result.score_1h > 0
+
+    def test_aggregate_respects_window_boundaries(self) -> None:
+        agg = SentimentAggregator()
+        # Within 1h window.
+        agg.add_signal(make_signal(entity="BTC", age_seconds=1800, confidence=0.9))
+        # Outside 1h but inside 4h window.
+        agg.add_signal(make_signal(entity="BTC", age_seconds=7200, confidence=0.9))
+
+        result = agg.aggregate("BTC")
+
+        assert result.signals_1h == 1
+        assert result.signals_4h == 2
+
+    def test_aggregate_computes_source_breakdown(self) -> None:
+        agg = SentimentAggregator()
+        agg.add_signal(
+            make_signal(entity="BTC", source=SentimentSource.NEWS, raw_score=0.5, confidence=0.9)
+        )
+        agg.add_signal(
+            make_signal(
+                entity="BTC", source=SentimentSource.TWITTER, raw_score=-0.3, confidence=0.9
+            )
+        )
+
+        result = agg.aggregate("BTC")
+
+        assert "news" in result.source_scores
+        assert "twitter" in result.source_scores
+
+    def test_aggregate_applies_macro_bias(self) -> None:
+        agg = SentimentAggregator()
+        result = agg.aggregate("BTC", macro_bias=0.42)
+        assert result.macro_bias == 0.42
+
+
+# ---------------------------------------------------------------------
+# SentimentEngine.start() / stop()
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestSentimentEngineStartStop:
+    async def test_start_connects_news_fetcher_and_redis(self) -> None:
+        engine = SentimentEngine()
+        engine._news_fetcher = AsyncMock()
+        mock_redis = AsyncMock()
+
+        fake_config = MagicMock()
+        fake_config.redis.url = "redis://localhost:6379/0"
+
+        with (
+            patch("sgr.sentiment.engine.get_config", return_value=fake_config),
+            patch("redis.asyncio.from_url", return_value=mock_redis),
+        ):
+            await engine.start()
+
+        engine._news_fetcher.connect.assert_awaited_once()
+        mock_redis.ping.assert_awaited_once()
+        assert engine._redis is mock_redis
+        assert engine._running is True
+        assert len(engine._tasks) == 2
+
+        await engine.stop()
+
+    async def test_start_swallows_redis_connection_failure(self) -> None:
+        engine = SentimentEngine()
+        engine._news_fetcher = AsyncMock()
+
+        fake_config = MagicMock()
+        fake_config.redis.url = "redis://localhost:6379/0"
+
+        with (
+            patch("sgr.sentiment.engine.get_config", return_value=fake_config),
+            patch("redis.asyncio.from_url", side_effect=RuntimeError("no redis")),
+        ):
+            await engine.start()
+
+        assert engine._redis is None
+        assert engine._running is True
+
+        await engine.stop()
+
+    async def test_stop_cancels_tasks_and_closes_resources(self) -> None:
+        engine = SentimentEngine()
+        engine._news_fetcher = AsyncMock()
+        engine._redis = AsyncMock()
+        engine._running = True
+
+        async def _never_ending() -> None:
+            await asyncio.sleep(1000)
+
+        task = asyncio.create_task(_never_ending())
+        engine._tasks = [task]
+
+        await engine.stop()
+
+        assert engine._running is False
+        assert task.cancelled() or task.done()
+        engine._news_fetcher.close.assert_awaited_once()
+        engine._redis.aclose.assert_awaited_once()
+
+    async def test_stop_without_redis_or_tasks(self) -> None:
+        engine = SentimentEngine()
+        engine._news_fetcher = AsyncMock()
+        engine._redis = None
+        engine._tasks = []
+
+        await engine.stop()
+
+        engine._news_fetcher.close.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------
+# SentimentEngine.get_sentiment()
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestGetSentiment:
+    async def test_get_sentiment_without_redis_computes_fresh(self) -> None:
+        engine = SentimentEngine()
+        engine._redis = None
+        engine._aggregator.add_signal(make_signal(entity="BTC", confidence=0.9))
+
+        result = await engine.get_sentiment("BTC")
+
+        assert result.symbol == "BTC"
+
+    async def test_get_sentiment_returns_cached_value_on_hit(self) -> None:
+        import orjson
+
+        engine = SentimentEngine()
+        engine._redis = AsyncMock()
+
+        cached_payload = orjson.dumps(
+            {
+                "symbol": "BTC",
+                "timestamp": datetime.now(tz=UTC).isoformat(),
+                "score_1h": 0.5,
+                "score_4h": 0.4,
+                "score_24h": 0.3,
+                "confidence_1h": 0.9,
+                "confidence_4h": 0.8,
+                "confidence_24h": 0.7,
+                "signals_1h": 3,
+                "signals_4h": 5,
+                "signals_24h": 10,
+                "source_scores": {},
+                "macro_bias": 0.0,
+            }
+        )
+        engine._redis.get = AsyncMock(return_value=cached_payload)
+
+        result = await engine.get_sentiment("BTC")
+
+        assert result.score_1h == 0.5
+        engine._redis.get.assert_awaited_once()
+
+    async def test_get_sentiment_falls_back_to_fresh_on_cache_read_error(self) -> None:
+        engine = SentimentEngine()
+        engine._redis = AsyncMock()
+        engine._redis.get = AsyncMock(side_effect=RuntimeError("redis down"))
+        engine._redis.set = AsyncMock()
+
+        result = await engine.get_sentiment("BTC")
+
+        assert result.symbol == "BTC"
+
+    async def test_get_sentiment_caches_computed_result(self) -> None:
+        engine = SentimentEngine()
+        engine._redis = AsyncMock()
+        engine._redis.get = AsyncMock(return_value=None)
+        engine._redis.set = AsyncMock()
+
+        await engine.get_sentiment("BTC", cache_ttl_seconds=30)
+
+        engine._redis.set.assert_awaited_once()
+        args, kwargs = engine._redis.set.call_args
+        assert args[0] == "sentiment:BTC"
+        assert kwargs["ex"] == 30
+
+    async def test_get_sentiment_swallows_cache_write_error(self) -> None:
+        engine = SentimentEngine()
+        engine._redis = AsyncMock()
+        engine._redis.get = AsyncMock(return_value=None)
+        engine._redis.set = AsyncMock(side_effect=RuntimeError("write failed"))
+
+        result = await engine.get_sentiment("BTC")
+
+        assert result.symbol == "BTC"
+
+
+# ---------------------------------------------------------------------
+# SentimentEngine._process_article()
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestProcessArticle:
+    async def test_process_article_adds_signal_to_aggregator(self) -> None:
+        engine = SentimentEngine()
+        engine._scorer.score = MagicMock(return_value=(0.7, 0.9))  # type: ignore[method-assign]
+        engine._scorer.classify_event = MagicMock(  # type: ignore[method-assign]
+            return_value=EventCategory.BULLISH
+        )
+
+        article = RawArticle(
+            url="https://example.com/a",
+            headline="Bitcoin surges",
+            body="Bitcoin price surged today.",
+            source=SentimentSource.NEWS,
+            published_at=datetime.now(tz=UTC),
+            entities=["BTC"],
+        )
+
+        await engine._process_article(article)
+
+        assert len(engine._aggregator._signals) == 1
+        signal = engine._aggregator._signals[0]
+        assert signal.entity == "BTC"
+        assert signal.raw_score == 0.7
+        assert signal.headline == ""  # Privacy: never stored.
+
+    async def test_process_article_defaults_entity_to_market_when_missing(self) -> None:
+        engine = SentimentEngine()
+        engine._scorer.score = MagicMock(return_value=(0.1, 0.9))  # type: ignore[method-assign]
+        engine._scorer.classify_event = MagicMock(  # type: ignore[method-assign]
+            return_value=EventCategory.NEUTRAL
+        )
+
+        article = RawArticle(
+            url="https://example.com/b",
+            headline="Some macro headline",
+            body="Body text.",
+            source=SentimentSource.NEWS,
+            published_at=datetime.now(tz=UTC),
+            entities=[],
+        )
+
+        await engine._process_article(article)
+
+        assert engine._aggregator._signals[0].entity == "market"
+
+    async def test_process_article_skips_empty_text(self) -> None:
+        engine = SentimentEngine()
+        engine._scorer.score = MagicMock()  # type: ignore[method-assign]
+
+        article = RawArticle(
+            url="https://example.com/c",
+            headline="",
+            body="",
+            source=SentimentSource.NEWS,
+            published_at=datetime.now(tz=UTC),
+            entities=[],
+        )
+
+        await engine._process_article(article)
+
+        engine._scorer.score.assert_not_called()
+        assert engine._aggregator._signals == []
+
+
+# ---------------------------------------------------------------------
+# SentimentEngine._news_loop() / _macro_loop()
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestCollectionLoops:
+    async def test_news_loop_processes_articles_then_stops(self) -> None:
+        engine = SentimentEngine()
+        article = RawArticle(
+            url="https://example.com/a",
+            headline="Headline",
+            body="Body",
+            source=SentimentSource.NEWS,
+            published_at=datetime.now(tz=UTC),
+            entities=["BTC"],
+        )
+        engine._news_fetcher.fetch_recent = AsyncMock(return_value=[article])
+        engine._process_article = AsyncMock()  # type: ignore[method-assign]
+        engine._running = True
+
+        async def _stop_after_sleep(_seconds: float) -> None:
+            engine._running = False
+
+        with patch("asyncio.sleep", _stop_after_sleep):
+            await engine._news_loop()
+
+        engine._news_fetcher.fetch_recent.assert_awaited_once()
+        engine._process_article.assert_awaited_once_with(article)
+
+    async def test_news_loop_swallows_fetch_errors_and_continues_until_stopped(self) -> None:
+        engine = SentimentEngine()
+        engine._news_fetcher.fetch_recent = AsyncMock(side_effect=RuntimeError("api down"))
+        engine._running = True
+
+        async def _stop_after_sleep(_seconds: float) -> None:
+            engine._running = False
+
+        with patch("asyncio.sleep", _stop_after_sleep):
+            await engine._news_loop()  # Should not raise.
+
+        engine._news_fetcher.fetch_recent.assert_awaited_once()
+
+    async def test_news_loop_exits_cleanly_on_cancelled_error(self) -> None:
+        engine = SentimentEngine()
+        engine._news_fetcher.fetch_recent = AsyncMock(side_effect=asyncio.CancelledError())
+        engine._running = True
+
+        await engine._news_loop()  # Should exit via `break`, not propagate.
+
+    async def test_macro_loop_updates_bias_then_stops(self) -> None:
+        engine = SentimentEngine()
+        engine._macro_monitor.fetch_recent_events = AsyncMock(return_value=["event"])
+        engine._macro_monitor.get_macro_bias = MagicMock(return_value=0.25)  # type: ignore[method-assign]
+        engine._running = True
+
+        async def _stop_after_sleep(_seconds: float) -> None:
+            engine._running = False
+
+        with patch("asyncio.sleep", _stop_after_sleep):
+            await engine._macro_loop()
+
+        assert engine._macro_bias == 0.25
+
+    async def test_macro_loop_swallows_errors(self) -> None:
+        engine = SentimentEngine()
+        engine._macro_monitor.fetch_recent_events = AsyncMock(
+            side_effect=RuntimeError("macro api down")
+        )
+        engine._running = True
+
+        async def _stop_after_sleep(_seconds: float) -> None:
+            engine._running = False
+
+        with patch("asyncio.sleep", _stop_after_sleep):
+            await engine._macro_loop()  # Should not raise.
+
+    async def test_macro_loop_exits_cleanly_on_cancelled_error(self) -> None:
+        engine = SentimentEngine()
+        engine._macro_monitor.fetch_recent_events = AsyncMock(
+            side_effect=asyncio.CancelledError()
+        )
+        engine._running = True
+
+        await engine._macro_loop()  # Should exit via `break`, not propagate.
