@@ -6,7 +6,9 @@ Alert Manager für Telegram/Slack Notifications
 from __future__ import annotations
 
 from enum import Enum
+
 import httpx
+
 from sgr.core.config import get_config
 from sgr.core.logging import get_logger
 

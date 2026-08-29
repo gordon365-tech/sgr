@@ -36,7 +36,7 @@ async def get_ticker(
             "timestamp": ticker.timestamp.isoformat(),
         }
     except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(status_code=503, detail=str(e)) from e
 
 
 @router.get("/features/{symbol}")

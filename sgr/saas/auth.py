@@ -51,7 +51,7 @@ class AuthService:
             ctx = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=12)
             return ctx.hash(password)
         except ImportError:
-            raise RuntimeError("passlib not installed: pip install passlib[bcrypt]")
+            raise RuntimeError("passlib not installed: pip install passlib[bcrypt]") from None
 
     def verify_password(self, plain: str, hashed: str) -> bool:
         """Vergleicht Plaintext mit bcrypt-Hash."""
@@ -98,7 +98,7 @@ class AuthService:
         try:
             from jose import jwt
         except ImportError:
-            raise RuntimeError("python-jose not installed")
+            raise RuntimeError("python-jose not installed") from None
 
         now = datetime.now(tz=UTC)
         claims = {
@@ -123,7 +123,7 @@ class AuthService:
         try:
             from jose import jwt
         except ImportError:
-            raise RuntimeError("python-jose not installed")
+            raise RuntimeError("python-jose not installed") from None
 
         now = datetime.now(tz=UTC)
         claims = {
@@ -147,7 +147,7 @@ class AuthService:
         try:
             from jose import JWTError, jwt
         except ImportError:
-            raise RuntimeError("python-jose not installed")
+            raise RuntimeError("python-jose not installed") from None
 
         try:
             payload = jwt.decode(
@@ -184,7 +184,7 @@ class AuthService:
 
             return pyotp.random_base32()
         except ImportError:
-            raise RuntimeError("pyotp not installed: pip install pyotp")
+            raise RuntimeError("pyotp not installed: pip install pyotp") from None
 
     def get_totp_uri(
         self,
@@ -203,7 +203,7 @@ class AuthService:
             totp = pyotp.TOTP(secret)
             return totp.provisioning_uri(name=user_email, issuer_name=issuer)
         except ImportError:
-            raise RuntimeError("pyotp not installed")
+            raise RuntimeError("pyotp not installed") from None
 
     def verify_totp(self, secret: str, code: str) -> bool:
         """

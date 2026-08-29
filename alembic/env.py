@@ -35,9 +35,11 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 
-# Import ORM metadata
+# Import ORM metadata. The model imports below are required as side effects
+# (they register each model's table with Base.metadata) even though they are
+# not referenced directly here — needed for `alembic revision --autogenerate`.
 from sgr.core.database import Base
-from sgr.core.database import (
+from sgr.core.database import (  # noqa: F401
     APIKeyModel,
     CandleModel,
     OrderModel,

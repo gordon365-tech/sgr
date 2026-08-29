@@ -134,7 +134,7 @@ class CCXTBaseAdapter:
         try:
             import ccxt.async_support as ccxt
         except ImportError:
-            raise RuntimeError("ccxt not installed. Run: pip install ccxt")
+            raise RuntimeError("ccxt not installed. Run: pip install ccxt") from None
 
         exchange_class = getattr(ccxt, self._ccxt_id)
 

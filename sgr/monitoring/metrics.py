@@ -7,8 +7,10 @@ Portfolio, Risk, Strategy & Market Data Metrics.
 from __future__ import annotations
 
 from decimal import Decimal
+
 from opentelemetry import metrics
 from opentelemetry.metrics import Meter
+
 from sgr.core.logging import get_logger
 
 log = get_logger(__name__)

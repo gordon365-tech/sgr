@@ -96,7 +96,7 @@ async def register(body: RegisterRequest, request: Request) -> TokenResponse:
         result = await _auth.register_user(body.email, body.password, mode)
         return TokenResponse(**result)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @auth_router.post("/login", response_model=TokenResponse)
@@ -115,7 +115,7 @@ async def login(body: LoginRequest, request: Request) -> TokenResponse:
         )
         return TokenResponse(**result)
     except ValueError as e:
-        raise HTTPException(status_code=401, detail=str(e))
+        raise HTTPException(status_code=401, detail=str(e)) from e
 
 
 @auth_router.post("/refresh", response_model=TokenResponse)
@@ -139,7 +139,7 @@ async def refresh_token(body: RefreshRequest) -> TokenResponse:
             trading_mode=mode.value,
         )
     except ValueError as e:
-        raise HTTPException(status_code=401, detail=str(e))
+        raise HTTPException(status_code=401, detail=str(e)) from e
 
 
 @auth_router.post("/2fa/setup", response_model=Setup2FAResponse)
@@ -217,7 +217,7 @@ async def store_api_key(
             "message": "API key stored securely",
         }
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @apikey_router.get("/")

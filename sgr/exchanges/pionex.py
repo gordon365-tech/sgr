@@ -89,7 +89,7 @@ class PionexAdapter(CCXTBaseAdapter):
             except ImportError:
                 raise RuntimeError(
                     "ccxt not installed. Run: pip install ccxt"
-                )
+                ) from None
 
             exchange_class = getattr(ccxt, self._ccxt_id)
 

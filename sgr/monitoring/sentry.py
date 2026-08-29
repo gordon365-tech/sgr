@@ -6,9 +6,9 @@ Sentry Integration für Error Tracking
 from __future__ import annotations
 
 import sentry_sdk
+from sentry_sdk.integrations.asyncio import AsyncioIntegration
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.sqlalchemy import SqlalchemyIntegration
-from sentry_sdk.integrations.asyncio import AsyncioIntegration
 
 from sgr.core.config import get_config
 from sgr.core.logging import get_logger
