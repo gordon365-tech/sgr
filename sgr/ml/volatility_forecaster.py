@@ -118,8 +118,14 @@ class VolatilityForecaster:
             self._long_run_var = self._omega / denom if denom > 0 else self._omega
 
             # Letzte bekannte Varianz und Residual
-            conditional_vol = res.conditional_volatility
-            self._last_variance = float(conditional_vol.iloc[-1]) ** 2 / 10000
+            # HINWEIS: res.conditional_volatility ist je nach installierter
+            # `arch`-Version entweder ein pandas.Series (mit .iloc) oder ein
+            # numpy.ndarray (kein .iloc). np.asarray(...)[-1] funktioniert
+            # für beide Typen zuverlässig. Bug gefunden bei arch==8.0.0,
+            # das ein ndarray zurückgibt -> .iloc[-1] crashte mit
+            # AttributeError bei JEDEM echten GARCH-Fit.
+            conditional_vol = np.asarray(res.conditional_volatility)
+            self._last_variance = float(conditional_vol[-1]) ** 2 / 10000
             self._last_residual = float(returns[-1]) ** 2
 
             self._fitted = True
