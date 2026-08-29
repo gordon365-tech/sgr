@@ -716,6 +716,99 @@ class TestRiskEngineLimits:
 
 
 # ---------------------------------------------------------------------------
+# Leverage Guard (max_leverage Hard Limit)
+# ---------------------------------------------------------------------------
+
+
+class TestLeverageGuard:
+    """
+    max_leverage war konfiguriert (RiskLimitsConfig.max_leverage) aber wurde
+    nirgends geprüft - gefundene Sicherheitslücke, siehe Commit-Message für
+    Details. Diese Tests decken den neu hinzugefügten Hard-Limit-Check ab.
+    """
+
+    async def test_gross_leverage_within_limit_is_approved(
+        self,
+        risk_engine: RiskEngine,
+        sample_signal: Signal,
+        btc_symbol: Symbol,
+    ) -> None:
+        """Portfolio 100k, Position-Notional 51k -> Leverage ~0.51x, unter
+        Default-Limit 3.0x -> kein Leverage-Breach."""
+        await risk_engine.initialize()
+
+        modest_position = Position(
+            symbol=btc_symbol,
+            side=PositionSide.LONG,
+            quantity=Decimal("1.0"),
+            entry_price=Decimal("50000"),
+            current_price=Decimal("51000"),
+            opened_at=datetime.now(tz=UTC),
+            strategy_name="trend_v1",
+            trading_mode=TradingMode.PAPER,
+        )
+
+        assessment = await risk_engine.evaluate(
+            signal=sample_signal,
+            open_positions=[modest_position],
+            portfolio_value=Decimal("100000"),
+            available_capital=Decimal("40000"),
+            current_price=Decimal("50000"),
+        )
+
+        assert assessment.decision != RiskDecision.REJECTED
+        assert assessment.risk_metrics_snapshot.gross_leverage == pytest.approx(0.51)
+
+    async def test_gross_leverage_over_limit_triggers_kill_switch(
+        self,
+        risk_engine: RiskEngine,
+        sample_signal: Signal,
+        btc_symbol: Symbol,
+    ) -> None:
+        """Portfolio 100k, Position-Notional 400k -> Leverage 4.0x, über
+        Default-Limit 3.0x -> REJECTED + Kill Switch ausgelöst."""
+        await risk_engine.initialize()
+
+        leveraged_position = Position(
+            symbol=btc_symbol,
+            side=PositionSide.LONG,
+            quantity=Decimal("8.0"),
+            entry_price=Decimal("50000"),
+            current_price=Decimal("50000"),
+            opened_at=datetime.now(tz=UTC),
+            strategy_name="trend_v1",
+            trading_mode=TradingMode.PAPER,
+        )
+
+        assessment = await risk_engine.evaluate(
+            signal=sample_signal,
+            open_positions=[leveraged_position],
+            portfolio_value=Decimal("100000"),
+            available_capital=Decimal("10000"),
+            current_price=Decimal("50000"),
+        )
+
+        import asyncio
+
+        await asyncio.sleep(0.01)  # Kill Switch Task Zeit geben
+
+        assert assessment.decision == RiskDecision.REJECTED
+        assert "leverage" in (assessment.rejection_reason or "").lower()
+        assert risk_engine._kill_switch.is_active is True
+
+        # Cleanup
+        await risk_engine._kill_switch.reset("cleanup")
+
+    async def test_gross_leverage_included_in_empty_metrics(
+        self, risk_engine: RiskEngine
+    ) -> None:
+        """_empty_metrics() (Fail-Safe-Pfad) setzt gross_leverage explizit
+        auf 0.0 statt es implizit vom Pydantic-Default abhängen zu lassen."""
+        metrics = risk_engine._empty_metrics(Decimal("50000"))
+        assert metrics.gross_leverage == 0.0
+
+
+# ---------------------------------------------------------------------------
 # Risk Engine – Coverage-Lücken (deterministisch, kein Coverage-Theater)
 # ---------------------------------------------------------------------------
 

@@ -321,6 +321,13 @@ class RiskEngine:
         total_notional = sum(p.notional_value for p in positions)
         heat = float(total_notional / portfolio_value) if portfolio_value > 0 else 0.0
 
+        # Gross Leverage: Summe |Notional| aller Positionen / Portfolio Value.
+        # Notional ist bereits das mit Hebel gehandelte Exposure (quantity *
+        # current_price), daher approximiert total_notional / portfolio_value
+        # den tatsächlichen Portfolio-weiten Leverage-Faktor unabhängig
+        # davon, wie die einzelne Position selbst leveraged wurde.
+        gross_leverage = float(total_notional / portfolio_value) if portfolio_value > 0 else 0.0
+
         # Korrelations-Exposure (vereinfacht: Anzahl Positionen × Durchschnitts-Korrelation)
         # Vollständige Implementierung: Korrelationsmatrix aus Market Data Engine
         corr_exposure = min(len(positions) * 0.1, 1.0)  # Approximation
@@ -336,6 +343,7 @@ class RiskEngine:
             portfolio_heat=heat,
             active_positions=len(positions),
             correlation_exposure=corr_exposure,
+            gross_leverage=gross_leverage,
         )
 
     def update_returns(self, daily_return: float) -> None:
@@ -388,6 +396,17 @@ class RiskEngine:
                 current=float(metrics.active_positions),
                 limit=float(self._limits.max_open_positions),
                 message_template="Open positions {current:.0f} exceeds max {limit:.0f}",
+            )
+        )
+
+        # Max Leverage (Gross Exposure / Portfolio Value)
+        checks.append(
+            self._check_threshold(
+                name="max_leverage",
+                limit_type=LimitType.HARD,
+                current=metrics.gross_leverage,
+                limit=float(self._limits.max_leverage),
+                message_template="Gross leverage {current:.2f}x exceeds hard limit {limit:.2f}x",
             )
         )
 
@@ -504,6 +523,7 @@ class RiskEngine:
             portfolio_heat=0.0,
             active_positions=0,
             correlation_exposure=0.0,
+            gross_leverage=0.0,
         )
 
     def build_order_request(

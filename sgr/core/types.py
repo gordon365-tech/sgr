@@ -334,6 +334,7 @@ class RiskMetrics(BaseModel):
     portfolio_heat: float  # 0.0–1.0 (sum of risk units / max)
     active_positions: int
     correlation_exposure: float
+    gross_leverage: float = 0.0  # Summe |Notional| aller Positionen / Portfolio Value
 
 
 class RiskAssessment(BaseModel):
