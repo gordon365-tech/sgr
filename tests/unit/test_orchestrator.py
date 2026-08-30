@@ -454,3 +454,67 @@ def sample_candle_event_factory():
         return CandleEvent(timestamp=datetime.now(tz=UTC), candle=candle)
 
     return _make
+
+
+# ---------------------------------------------------------------------------
+# Symbol Kill Switch: allererster Check, vor Signal-Generierung
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_symbol_kill_switch():
+    """Isoliert den modul-globalen SymbolKillSwitch-Singleton zwischen Tests."""
+    from sgr.risk.symbol_kill_switch import SymbolKillSwitch
+
+    SymbolKillSwitch._instance = None
+    yield
+    SymbolKillSwitch._instance = None
+
+
+async def test_disabled_symbol_skips_signal_generation_entirely() -> None:
+    from sgr.risk.symbol_kill_switch import get_symbol_kill_switch
+
+    await get_symbol_kill_switch().deactivate("pionex:BTC/USDT", "anomalous behavior")
+
+    e = _Engines()
+    orchestrator = e.orchestrator()
+
+    result = orchestrator.run_cycle("pionex:BTC/USDT", "1h")
+    result = await result
+
+    assert result.status == TradingCycleStatus.SYMBOL_DISABLED
+    e.strategy_engine.process.assert_not_called()
+    e.risk_engine.evaluate.assert_not_called()
+    e.execution_engine.execute.assert_not_called()
+
+
+async def test_disabled_symbol_does_not_affect_other_symbols() -> None:
+    from sgr.risk.symbol_kill_switch import get_symbol_kill_switch
+
+    await get_symbol_kill_switch().deactivate("pionex:BTC/USDT", "reason")
+
+    e = _Engines()
+    e.strategy_engine.process.return_value = None  # NO_SIGNAL is sufficient proof.
+    orchestrator = e.orchestrator()
+
+    result = await orchestrator.run_cycle("pionex:ETH/USDT", "1h")
+
+    assert result.status == TradingCycleStatus.NO_SIGNAL
+    e.strategy_engine.process.assert_called_once()
+
+
+async def test_reactivated_symbol_runs_cycle_normally() -> None:
+    from sgr.risk.symbol_kill_switch import get_symbol_kill_switch
+
+    sks = get_symbol_kill_switch()
+    await sks.deactivate("pionex:BTC/USDT", "reason")
+    await sks.activate("pionex:BTC/USDT")
+
+    e = _Engines()
+    e.strategy_engine.process.return_value = None
+    orchestrator = e.orchestrator()
+
+    result = await orchestrator.run_cycle("pionex:BTC/USDT", "1h")
+
+    assert result.status == TradingCycleStatus.NO_SIGNAL
+    e.strategy_engine.process.assert_called_once()

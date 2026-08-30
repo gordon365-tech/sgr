@@ -61,6 +61,7 @@ from sgr.core.types import (
     TradingCycleStatus,
     TradingMode,
 )
+from sgr.risk.symbol_kill_switch import get_symbol_kill_switch
 
 log = get_logger(__name__)
 
@@ -144,6 +145,25 @@ class TradingOrchestrator:
         regime: MarketRegime,
         started_at: datetime,
     ) -> TradingCycleResult:
+        # 0. Symbol Kill Switch (synchron, O(1)) - allererster Check, noch
+        #    vor der Signal-Generierung. Ein deaktiviertes Symbol erzeugt
+        #    erst gar kein Signal, das später durch die Risk Engine laufen
+        #    müsste. Getrennt vom globalen KillSwitch (der wird bereits in
+        #    RiskEngine.evaluate() geprüft) - dieser Check ist symbolspezifisch.
+        if not get_symbol_kill_switch().is_active(symbol_key):
+            log.info(
+                "orchestrator.cycle.symbol_disabled",
+                symbol_key=symbol_key,
+                timeframe=timeframe,
+            )
+            return self._result(
+                TradingCycleStatus.SYMBOL_DISABLED,
+                started_at,
+                symbol_key,
+                timeframe,
+                error="Symbol trading disabled via symbol kill switch",
+            )
+
         # 1. Signal generation (StrategyEngine publiziert SignalEvent bereits
         #    selbst additiv - siehe strategy/engine.py _publish())
         signal = await self._strategy_engine.process(symbol_key, timeframe, regime)

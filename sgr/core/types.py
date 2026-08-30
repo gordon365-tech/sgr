@@ -411,6 +411,7 @@ class TradingCycleStatus(StrEnum):
     """Terminal-Status eines Trading-Zyklus (Orchestrator-Ebene)."""
 
     NO_SIGNAL = "no_signal"
+    SYMBOL_DISABLED = "symbol_disabled"  # Symbol Kill Switch aktiv
     SIGNAL_REJECTED = "signal_rejected"
     RISK_REJECTED = "risk_rejected"
     ORDER_FILLED = "order_filled"

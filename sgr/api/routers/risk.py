@@ -19,6 +19,7 @@ from sgr.core.config import get_config
 from sgr.portfolio.engine import PortfolioEngine
 from sgr.risk.engine import RiskEngine
 from sgr.risk.kill_switch import get_kill_switch
+from sgr.risk.symbol_kill_switch import get_symbol_kill_switch
 
 router = APIRouter()
 
@@ -153,3 +154,67 @@ async def reset_kill_switch(
     ks = get_kill_switch(risk._trading_mode)
     await ks.reset(reset_by=user.user_id)
     return {"reset": True, "reset_by": user.user_id}
+
+
+# ---------------------------------------------------------------------
+# Symbol Kill Switch
+# ---------------------------------------------------------------------
+
+
+class SymbolKillSwitchEntryResponse(BaseModel):
+    symbol_key: str
+    is_active: bool
+    deactivated_at: str | None
+    reason: str | None
+    deactivated_by: str | None
+
+
+@router.get("/symbol-kill-switch", response_model=list[SymbolKillSwitchEntryResponse])
+async def list_symbol_kill_switches(
+    user: Annotated[TokenData, Depends(require_auth)],
+) -> list[SymbolKillSwitchEntryResponse]:
+    """Alle Symbole mit explizitem Kill-Switch-Eintrag (aktiv + inaktiv)."""
+    sks = get_symbol_kill_switch()
+    return [
+        SymbolKillSwitchEntryResponse(
+            symbol_key=entry.symbol_key,
+            is_active=entry.is_active,
+            deactivated_at=entry.deactivated_at.isoformat() if entry.deactivated_at else None,
+            reason=entry.reason,
+            deactivated_by=entry.deactivated_by,
+        )
+        for entry in sks.get_all().values()
+    ]
+
+
+@router.post("/symbol-kill-switch/{symbol_key:path}/deactivate")
+async def deactivate_symbol(
+    symbol_key: str,
+    user: Annotated[TokenData, Depends(require_auth)],
+    reason: str = "Manual deactivation",
+) -> dict[str, str]:
+    """
+    Trading für ein einzelnes Symbol deaktivieren, ohne das gesamte
+    System zu stoppen (im Gegensatz zum globalen Kill Switch).
+
+    Bewusst require_auth statt require_admin: wie bei
+    strategy.deactivate_strategy() ist Deaktivieren die defensive
+    Richtung und darf niedrigschwelliger sein als Reaktivierung.
+    """
+    sks = get_symbol_kill_switch()
+    await sks.deactivate(symbol_key, reason, deactivated_by=f"user:{user.user_id}")
+    return {"deactivated": symbol_key, "reason": reason}
+
+
+@router.post("/symbol-kill-switch/{symbol_key:path}/activate")
+async def activate_symbol(
+    symbol_key: str,
+    user: Annotated[TokenData, Depends(require_admin)],
+) -> dict[str, str]:
+    """
+    Trading für ein zuvor deaktiviertes Symbol wieder erlauben.
+    Erfordert Admin-Rolle (Re-Aktivierung ist die riskante Richtung).
+    """
+    sks = get_symbol_kill_switch()
+    await sks.activate(symbol_key, activated_by=f"user:{user.user_id}")
+    return {"activated": symbol_key}
