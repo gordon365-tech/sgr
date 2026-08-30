@@ -99,6 +99,9 @@ async def get_limits(
         "futures": {
             "max_leverage": str(limits.max_leverage),
         },
+        "trading_behavior": {
+            "trade_cooldown_seconds": limits.trade_cooldown_seconds,
+        },
     }
 
 

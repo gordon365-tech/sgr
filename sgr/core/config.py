@@ -98,6 +98,10 @@ class RiskLimitsConfig(BaseSettings):
     min_hit_rate: float = Field(default=0.35)
     strategy_evaluation_window_days: int = Field(default=30)
 
+    # Cooldown nach Trades (pro Symbol+Strategie), verhindert
+    # Overtrading/Signal-Flackern direkt nach einem ausgeführten Trade.
+    trade_cooldown_seconds: int = Field(default=300, ge=0, le=86400)
+
 
 class ExchangeCredentials(BaseSettings):
     """

@@ -98,6 +98,12 @@ class RiskEngine:
         self._return_history: list[float] = []  # Rolling 30-day returns
         self._initialized = False
 
+        # Cooldown-Tracking: letzter ausgeführter Trade pro "symbol|strategy"
+        # Key. In-Memory, wie der übrige Portfolio-State dieser Klasse -
+        # geht bei Neustart verloren (akzeptabler Trade-off, siehe
+        # record_trade()-Docstring für Details).
+        self._last_trade_at: dict[str, datetime] = {}
+
     async def initialize(self) -> None:
         """Initialisiert Engine mit aktuellem Portfolio-State."""
         self._initialized = True
@@ -174,6 +180,20 @@ class RiskEngine:
             return self._reject(
                 signal.id,
                 "Kill switch is active",
+                portfolio_value,
+            )
+
+        # 1b. Cooldown Check (pro Symbol+Strategie, synchron, sofort).
+        # Verhindert Overtrading/Signal-Flackern direkt nach einem
+        # ausgeführten Trade. Getrennt vom Kill Switch: ein Cooldown ist
+        # eine normale, erwartete Ablehnung im Handelsalltag, kein
+        # Notfall-Zustand - daher kein Trigger des Kill Switch hier.
+        cooldown_remaining = self._cooldown_remaining_seconds(signal)
+        if cooldown_remaining > 0:
+            return self._reject(
+                signal.id,
+                f"Cooldown active: {cooldown_remaining:.0f}s remaining for "
+                f"{signal.symbol.ccxt_symbol}/{signal.strategy_name}",
                 portfolio_value,
             )
 
@@ -486,6 +506,56 @@ class RiskEngine:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _cooldown_key(self, symbol_key: str, strategy_name: str) -> str:
+        return f"{symbol_key}|{strategy_name}"
+
+    def _cooldown_remaining_seconds(self, signal: Signal) -> float:
+        """
+        Gibt die verbleibende Cooldown-Zeit in Sekunden zurück (0.0 =
+        kein aktiver Cooldown). trade_cooldown_seconds == 0 deaktiviert
+        den Mechanismus vollständig (Default-Konfiguration erlaubt das
+        bewusst, z.B. für Backtesting/schnelle Strategien).
+        """
+        cooldown_seconds = self._limits.trade_cooldown_seconds
+        if cooldown_seconds <= 0:
+            return 0.0
+
+        key = self._cooldown_key(signal.symbol.ccxt_symbol, signal.strategy_name)
+        last_trade_at = self._last_trade_at.get(key)
+        if last_trade_at is None:
+            return 0.0
+
+        elapsed = (datetime.now(tz=UTC) - last_trade_at).total_seconds()
+        remaining = cooldown_seconds - elapsed
+        return max(0.0, remaining)
+
+    def record_trade(self, symbol_key: str, strategy_name: str) -> None:
+        """
+        Muss nach jedem tatsächlich ausgeführten Trade (OrderStatus.FILLED)
+        vom Aufrufer (TradingOrchestrator) aufgerufen werden, damit der
+        Cooldown für dieses Symbol+Strategie-Paar zu laufen beginnt.
+
+        Bewusst NICHT automatisch in evaluate()/build_order_request()
+        aufgerufen: RiskEngine kennt den tatsächlichen Order-Ausgang
+        nicht (APPROVED bedeutet nur "darf versucht werden", nicht
+        "wurde gefüllt") - nur der Orchestrator weiß nach
+        ExecutionEngine.execute(), ob wirklich ein Trade stattfand.
+
+        In-Memory, wie der übrige Portfolio-State dieser Klasse: geht
+        bei einem Neustart verloren. Akzeptabler Trade-off (wie bei
+        _peak_portfolio_value/_daily_pnl_start) - ein Neustart direkt
+        nach einem Trade ist ein Edge Case, und ein zu kurzer statt zu
+        langer Cooldown nach Neustart ist die sicherere Richtung als
+        das System unnötig zu verkomplizieren.
+        """
+        key = self._cooldown_key(symbol_key, strategy_name)
+        self._last_trade_at[key] = datetime.now(tz=UTC)
+        log.info(
+            "risk_engine.trade_recorded",
+            symbol_key=symbol_key,
+            strategy_name=strategy_name,
+        )
 
     def _reject(
         self,

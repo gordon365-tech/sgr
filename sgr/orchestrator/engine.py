@@ -236,6 +236,9 @@ class TradingOrchestrator:
         #    NICHT über Event Bus, um Doppelverarbeitung/Race auszuschließen)
         if order_result.status == OrderStatus.FILLED:
             await self._portfolio_engine.on_order_filled(order_result)
+            # Cooldown-Tracking: erst jetzt ist sicher, dass ein Trade
+            # tatsächlich stattgefunden hat (APPROVED != FILLED).
+            self._risk_engine.record_trade(symbol_key, signal.strategy_name)
             status = TradingCycleStatus.ORDER_FILLED
         else:
             status = TradingCycleStatus.ORDER_NOT_FILLED

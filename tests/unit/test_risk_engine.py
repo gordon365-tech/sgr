@@ -15,7 +15,7 @@ Teststrategie:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -806,6 +806,124 @@ class TestLeverageGuard:
         auf 0.0 statt es implizit vom Pydantic-Default abhängen zu lassen."""
         metrics = risk_engine._empty_metrics(Decimal("50000"))
         assert metrics.gross_leverage == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Trade Cooldown (pro Symbol+Strategie)
+# ---------------------------------------------------------------------------
+
+
+class TestTradeCooldown:
+    """
+    trade_cooldown_seconds war im Auftrag explizit gefordert ("Cooldown
+    nach Trades") aber fehlte komplett - keine Konfiguration, kein Check.
+    Diese Tests decken den neu hinzugefügten Mechanismus ab.
+    """
+
+    async def test_no_cooldown_before_any_trade_recorded(
+        self, risk_engine: RiskEngine, sample_signal: Signal
+    ) -> None:
+        await risk_engine.initialize()
+
+        assessment = await risk_engine.evaluate(
+            signal=sample_signal,
+            open_positions=[],
+            portfolio_value=Decimal("10000"),
+            available_capital=Decimal("10000"),
+            current_price=Decimal("50000"),
+        )
+
+        assert assessment.decision != RiskDecision.REJECTED
+
+    async def test_signal_rejected_immediately_after_recorded_trade(
+        self, risk_engine: RiskEngine, sample_signal: Signal
+    ) -> None:
+        await risk_engine.initialize()
+        risk_engine.record_trade(sample_signal.symbol.ccxt_symbol, sample_signal.strategy_name)
+
+        assessment = await risk_engine.evaluate(
+            signal=sample_signal,
+            open_positions=[],
+            portfolio_value=Decimal("10000"),
+            available_capital=Decimal("10000"),
+            current_price=Decimal("50000"),
+        )
+
+        assert assessment.decision == RiskDecision.REJECTED
+        assert "cooldown" in (assessment.rejection_reason or "").lower()
+
+    async def test_cooldown_is_per_symbol_strategy_pair(
+        self, risk_engine: RiskEngine, sample_signal: Signal, btc_symbol: Symbol
+    ) -> None:
+        await risk_engine.initialize()
+        risk_engine.record_trade(sample_signal.symbol.ccxt_symbol, sample_signal.strategy_name)
+
+        # Different strategy on the same symbol - not affected by the cooldown.
+        other_strategy_signal = Signal(
+            timestamp=datetime.now(tz=UTC),
+            strategy_name="mean_reversion_v1",
+            symbol=btc_symbol,
+            direction=SignalDirection.LONG,
+            confidence=0.8,
+            regime=MarketRegime.RANGING,
+        )
+
+        assessment = await risk_engine.evaluate(
+            signal=other_strategy_signal,
+            open_positions=[],
+            portfolio_value=Decimal("10000"),
+            available_capital=Decimal("10000"),
+            current_price=Decimal("50000"),
+        )
+
+        assert assessment.decision != RiskDecision.REJECTED
+
+    async def test_cooldown_expires_after_configured_duration(
+        self, risk_engine: RiskEngine, sample_signal: Signal
+    ) -> None:
+        await risk_engine.initialize()
+        key = risk_engine._cooldown_key(
+            sample_signal.symbol.ccxt_symbol, sample_signal.strategy_name
+        )
+        # Simulate a trade recorded further in the past than the cooldown window.
+        risk_engine._last_trade_at[key] = datetime.now(tz=UTC) - timedelta(
+            seconds=risk_engine._limits.trade_cooldown_seconds + 1
+        )
+
+        assessment = await risk_engine.evaluate(
+            signal=sample_signal,
+            open_positions=[],
+            portfolio_value=Decimal("10000"),
+            available_capital=Decimal("10000"),
+            current_price=Decimal("50000"),
+        )
+
+        assert assessment.decision != RiskDecision.REJECTED
+
+    async def test_cooldown_disabled_when_zero(
+        self, risk_engine: RiskEngine, sample_signal: Signal
+    ) -> None:
+        await risk_engine.initialize()
+        risk_engine._limits.trade_cooldown_seconds = 0
+        risk_engine.record_trade(sample_signal.symbol.ccxt_symbol, sample_signal.strategy_name)
+
+        assessment = await risk_engine.evaluate(
+            signal=sample_signal,
+            open_positions=[],
+            portfolio_value=Decimal("10000"),
+            available_capital=Decimal("10000"),
+            current_price=Decimal("50000"),
+        )
+
+        assert assessment.decision != RiskDecision.REJECTED
+
+    def test_cooldown_remaining_seconds_zero_when_never_traded(
+        self, risk_engine: RiskEngine, sample_signal: Signal
+    ) -> None:
+        assert risk_engine._cooldown_remaining_seconds(sample_signal) == 0.0
+
+    def test_record_trade_does_not_raise(self, risk_engine: RiskEngine) -> None:
+        risk_engine.record_trade("BTC/USDT", "trend_v1")  # Should not raise.
 
 
 # ---------------------------------------------------------------------------

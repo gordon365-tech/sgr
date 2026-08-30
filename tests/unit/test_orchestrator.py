@@ -153,9 +153,11 @@ class _Engines:
     def __init__(self) -> None:
         self.strategy_engine = AsyncMock()
         self.risk_engine = AsyncMock()
-        # build_order_request ist synchron im echten RiskEngine (kein I/O) -
-        # AsyncMock würde hier einen ungeawaiteten Coroutine-Wert liefern.
+        # build_order_request und record_trade sind synchron im echten
+        # RiskEngine (kein I/O) - AsyncMock würde hier einen ungeawaiteten
+        # Coroutine-Wert liefern.
         self.risk_engine.build_order_request = MagicMock()
+        self.risk_engine.record_trade = MagicMock()
         self.execution_engine = AsyncMock()
         self.portfolio_engine = AsyncMock()
         self.portfolio_engine.positions = []
@@ -248,6 +250,9 @@ async def test_happy_path_updates_portfolio_on_fill(
     )
     e.execution_engine.execute.assert_called_once_with(order_request)
     e.portfolio_engine.on_order_filled.assert_called_once_with(order_result)
+    e.risk_engine.record_trade.assert_called_once_with(
+        "pionex:BTC/USDT", sample_signal.strategy_name
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +285,7 @@ async def test_unfilled_order_does_not_update_portfolio(
 
     assert result.status == TradingCycleStatus.ORDER_NOT_FILLED
     e.portfolio_engine.on_order_filled.assert_not_called()
+    e.risk_engine.record_trade.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
