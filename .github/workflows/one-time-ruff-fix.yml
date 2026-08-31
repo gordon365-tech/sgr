@@ -14,8 +14,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Apply targeted Ruff fixes
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -64,22 +62,16 @@ jobs:
               ],
           }
 
-          changed = []
           for filename, edits in replacements.items():
               path = Path(filename)
               text = path.read_text(encoding="utf-8")
-              original = text
               for old, new in edits:
-                  count = text.count(old)
-                  if count != 1:
-                      raise SystemExit(f"Expected exactly one occurrence in {filename}: {old!r}; found {count}")
-                  text = text.replace(old, new, 1)
-              if text != original:
-                  path.write_text(text, encoding="utf-8")
-                  changed.append(filename)
+                  if old not in text:
+                      raise SystemExit(f"Missing expected text in {filename}: {old!r}")
+                  text = text.replace(old, new)
+              path.write_text(text, encoding="utf-8")
 
           Path(".github/workflows/one-time-ruff-fix.yml").unlink()
-          print("Changed:", ", ".join(changed))
           PY
 
       - name: Commit fixes
