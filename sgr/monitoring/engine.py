@@ -177,7 +177,7 @@ class MonitoringEngine:
                 log.debug("monitoring.strategy_error", error=str(e))
 
 
-def create_metrics_app():
+def create_metrics_app() -> Any:
     """
     Erstellt die bestehende Prometheus ASGI-App.
 

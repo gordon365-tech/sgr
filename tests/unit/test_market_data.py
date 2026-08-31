@@ -276,9 +276,9 @@ class TestBollingerBands:
         arrays = candles_to_arrays(candles)
         upper, middle, lower = calc_bollinger_bands(arrays.close)
 
-        for u, m, lower in zip(upper, middle, lower, strict=False):
-            if not (np.isnan(u) or np.isnan(m) or np.isnan(lower)):
-                assert u > m > lower
+        for u, m, lower_band in zip(upper, middle, lower, strict=False):
+            if not (np.isnan(u) or np.isnan(m) or np.isnan(lower_band)):
+                assert u > m > lower_band
 
     def test_constant_price_narrow_bands(self) -> None:
         """Konstanter Preis → sehr enge Bänder (std ≈ 0)."""

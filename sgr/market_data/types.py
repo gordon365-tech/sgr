@@ -166,7 +166,10 @@ class FeatureSet(BaseModel):
     @property
     def latest_key(self) -> str:
         """Redis key für das neueste FeatureSet (überschreibt bei Update)."""
-        return f"features:latest:{self.symbol.exchange.value}:{self.symbol.ccxt_symbol}:{self.timeframe}"
+        return (
+            f"features:latest:{self.symbol.exchange.value}:"
+            f"{self.symbol.ccxt_symbol}:{self.timeframe}"
+        )
 
 
 class MarketContext(BaseModel):

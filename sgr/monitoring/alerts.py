@@ -5,7 +5,7 @@ Alert Manager für Telegram/Slack Notifications
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 import httpx
 
@@ -15,7 +15,7 @@ from sgr.core.logging import get_logger
 log = get_logger(__name__)
 
 
-class AlertSeverity(str, Enum):
+class AlertSeverity(StrEnum):
     CRITICAL = "critical"
     WARNING = "warning"
     INFO = "info"

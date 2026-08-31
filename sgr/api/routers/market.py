@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -15,7 +15,7 @@ router = APIRouter()
 @router.get("/ticker/{symbol}")
 async def get_ticker(
     symbol: str,
-    pool=Depends(get_exchange_pool),
+    pool: Annotated[Any, Depends(get_exchange_pool)],
     user: Annotated[TokenData, Depends(require_auth)] = None,  # type: ignore
 ) -> dict:
     """Aktueller Ticker für ein Symbol."""

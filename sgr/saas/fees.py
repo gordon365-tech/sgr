@@ -230,7 +230,9 @@ class PerformanceFeeEngine:
                     "fee_rate": str(calculation.fee_rate),
                     "fee_amount": str(calculation.fee_amount),
                     "high_water_mark": str(calculation.high_water_mark),
-                    "period": f"{calculation.period_start.date()} – {calculation.period_end.date()}",
+                    "period": (
+                        f"{calculation.period_start.date()} – {calculation.period_end.date()}"
+                    ),
                 }
             ],
         )

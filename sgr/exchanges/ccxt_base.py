@@ -738,7 +738,6 @@ class CCXTBaseAdapter:
         try:
             import ccxt
 
-            type(exc).__name__
             exc_str = str(exc).lower()
 
             if isinstance(exc, ccxt.RateLimitExceeded):
