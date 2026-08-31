@@ -1,0 +1,91 @@
+name: One Time Ruff Fix
+
+on:
+  push:
+    branches:
+      - fix/ci-lint-security-2026-08-31
+
+permissions:
+  contents: write
+
+jobs:
+  apply-fixes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply targeted Ruff fixes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          replacements = {
+              "sgr/api/dependencies.py": [
+                  ("def get_exchange_pool(request: Request):  # type: ignore[return]", "def get_exchange_pool(request: Request) -> Any:"),
+                  ("from typing import Annotated", "from typing import Annotated, Any"),
+              ],
+              "sgr/api/routers/market.py": [
+                  ("from typing import Annotated", "from typing import Annotated, Any"),
+                  ("    pool=Depends(get_exchange_pool),", "    pool: Annotated[Any, Depends(get_exchange_pool)],"),
+              ],
+              "sgr/backtesting/engine.py": [
+                  ("                    f\"Walk-Forward inconsistent (degradation: {walk_forward.degradation_factor:.1%})\"", "                    \"Walk-Forward inconsistent \"\n                    f\"(degradation: {walk_forward.degradation_factor:.1%})\""),
+                  ("                    f\"Walk-Forward degradation {walk_forward.degradation_factor:.1%} — monitor closely\"", "                    \"Walk-Forward degradation \"\n                    f\"{walk_forward.degradation_factor:.1%} — monitor closely\""),
+                  ("                    f\"Monte Carlo P95 Drawdown {monte_carlo.percentile_95_max_drawdown_pct:.1f}% > 25%\"", "                    \"Monte Carlo P95 Drawdown \"\n                    f\"{monte_carlo.percentile_95_max_drawdown_pct:.1f}% > 25%\""),
+              ],
+              "sgr/exchanges/ccxt_base.py": [
+                  ("            type(exc).__name__\n", ""),
+              ],
+              "sgr/market_data/feature_store.py": [
+                  ("        channel = f\"feature_update:{features.symbol.exchange.value}:{features.symbol.ccxt_symbol}:{features.timeframe}\"", "        channel = (\n            f\"feature_update:{features.symbol.exchange.value}:\"\n            f\"{features.symbol.ccxt_symbol}:{features.timeframe}\"\n        )"),
+              ],
+              "sgr/market_data/types.py": [
+                  ("        return f\"features:latest:{self.symbol.exchange.value}:{self.symbol.ccxt_symbol}:{self.timeframe}\"", "        return (\n            f\"features:latest:{self.symbol.exchange.value}:\"\n            f\"{self.symbol.ccxt_symbol}:{self.timeframe}\"\n        )"),
+              ],
+              "sgr/monitoring/alerts.py": [
+                  ("from enum import Enum", "from enum import StrEnum"),
+                  ("class AlertSeverity(str, Enum):", "class AlertSeverity(StrEnum):"),
+              ],
+              "sgr/monitoring/engine.py": [
+                  ("def create_metrics_app():", "def create_metrics_app() -> Any:"),
+              ],
+              "sgr/saas/fees.py": [
+                  ("                    \"period\": f\"{calculation.period_start.date()} – {calculation.period_end.date()}\",", "                    \"period\": (\n                        f\"{calculation.period_start.date()} – {calculation.period_end.date()}\"\n                    ),"),
+              ],
+              "tests/unit/test_config.py": [
+                  ("import pytest\n", "import pytest\nfrom pydantic import ValidationError\n"),
+                  ("pytest.raises(Exception)", "pytest.raises(ValidationError)"),
+              ],
+              "tests/unit/test_market_data.py": [
+                  ("for u, m, lower in zip(upper, middle, lower, strict=False):", "for u, m, lower_band in zip(upper, middle, lower, strict=False):"),
+                  ("np.isnan(lower))", "np.isnan(lower_band))"),
+                  ("u > m > lower", "u > m > lower_band"),
+              ],
+          }
+
+          changed = []
+          for filename, edits in replacements.items():
+              path = Path(filename)
+              text = path.read_text(encoding="utf-8")
+              original = text
+              for old, new in edits:
+                  count = text.count(old)
+                  if count != 1:
+                      raise SystemExit(f"Expected exactly one occurrence in {filename}: {old!r}; found {count}")
+                  text = text.replace(old, new, 1)
+              if text != original:
+                  path.write_text(text, encoding="utf-8")
+                  changed.append(filename)
+
+          Path(".github/workflows/one-time-ruff-fix.yml").unlink()
+          print("Changed:", ", ".join(changed))
+          PY
+
+      - name: Commit fixes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "fix: resolve remaining Ruff findings"
+          git push
