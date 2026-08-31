@@ -5,6 +5,7 @@ Haupteinstiegspunkt der REST + WebSocket API.
 
 Startup-Sequenz (via lifespan):
     1. Config validieren
+    1a. Startup Safety Checks (fail-fast, siehe core/startup_checks.py)
     2. Logging initialisieren
     3. DB + Redis verbinden
     4. Exchange Pool initialisieren
@@ -96,6 +97,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         environment=config.environment.value,
         trading_mode=config.trading_mode.value,
     )
+
+    # 1a. Startup Safety Checks
+    # Laufen bewusst VOR jeder Verbindung (DB, Redis, Exchange) und VOR
+    # Observability-Setup. Fail-Fast: eine unsichere LIVE-Konfiguration
+    # (fehlende Credentials, deaktivierte Fat-Finger-Caps, zu lasche Hard
+    # Limits, bereits aktiver Kill Switch) darf den Server nicht mit
+    # scheinbar funktionierenden, aber ungeschützten Trading-Pfaden
+    # hochfahren lassen. Anders als Crash Recovery (Schritt 8d, fail-safe)
+    # ist dieser Schritt absichtlich fail-fast - siehe
+    # sgr/core/startup_checks.py Modul-Docstring.
+    from sgr.core.startup_checks import StartupSafetyChecker
+
+    StartupSafetyChecker(config).run_or_raise()
 
     # 1b. Observability (OpenTelemetry Metrics + Auto-Instrumentation)
     # Wurde zuvor nirgends aufgerufen (deferred finding: monitoring/

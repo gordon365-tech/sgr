@@ -217,6 +217,13 @@ def _patch_lifespan_dependencies(paper_mode: bool = True, has_adapters: bool = T
         ),
         patch("sgr.core.resilience.RecoveryManager", return_value=recovery_manager),
         patch("sgr.market_data.engine.MarketDataEngine", return_value=md_engine),
+        # StartupSafetyChecker erwartet ein echtes SGRConfig-Objekt (reale
+        # Decimal/float-Vergleiche), nicht den hier verwendeten MagicMock.
+        # Diese Tests decken die Lifespan-Infrastruktur-Verdrahtung ab, nicht
+        # die Safety-Check-Logik selbst (siehe dediziert
+        # tests/unit/test_startup_checks.py) - daher hier bewusst als
+        # No-Op gepatcht.
+        patch("sgr.core.startup_checks.StartupSafetyChecker.run_or_raise", return_value=None),
     ]
 
     return patchers, mocks
