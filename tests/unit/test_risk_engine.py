@@ -412,6 +412,111 @@ class TestPositionSizer:
         kelly = sizer._fractional_kelly(win_rate=0.3, profit_factor=0.5)
         assert kelly == 0.0
 
+    def test_max_order_notional_caps_size_even_within_other_limits(
+        self, sample_signal: Signal
+    ) -> None:
+        """
+        Ein sehr großes Portfolio + hoher size_hint würde ohne den Cap eine
+        Order weit über max_order_notional erlauben, obwohl alle relativen
+        Constraints (max_position_pct, Heat, verfügbares Kapital) technisch
+        erfüllt sind. max_order_notional muss trotzdem greifen.
+        """
+        sizer = PositionSizer()
+        qty, reason = sizer.compute(
+            signal=sample_signal,
+            portfolio_value=Decimal("10000000"),  # 10M
+            available_capital=Decimal("10000000"),
+            current_price=Decimal("50000"),
+            atr=None,
+            portfolio_heat=0.0,
+            max_position_pct=0.10,  # würde 1M Notional erlauben
+            max_portfolio_heat=0.70,
+            max_order_notional=Decimal("10000"),
+        )
+
+        notional = qty * Decimal("50000")
+        assert notional <= Decimal("10000") * Decimal("1.01")  # Rundungstoleranz
+        assert reason is not None
+        assert "max order size" in reason.lower()
+
+    def test_max_order_notional_none_disables_cap(self, sample_signal: Signal) -> None:
+        """max_order_notional=None → kein zusätzlicher Cap (Default-Verhalten erhalten)."""
+        sizer = PositionSizer()
+        qty_uncapped, _ = sizer.compute(
+            signal=sample_signal,
+            portfolio_value=Decimal("100000"),
+            available_capital=Decimal("90000"),
+            current_price=Decimal("50000"),
+            atr=None,
+            portfolio_heat=0.1,
+            max_position_pct=0.10,
+            max_portfolio_heat=0.70,
+            max_order_notional=None,
+        )
+        qty_default, _ = sizer.compute(
+            signal=sample_signal,
+            portfolio_value=Decimal("100000"),
+            available_capital=Decimal("90000"),
+            current_price=Decimal("50000"),
+            atr=None,
+            portfolio_heat=0.1,
+            max_position_pct=0.10,
+            max_portfolio_heat=0.70,
+        )
+        assert qty_uncapped == qty_default
+
+    def test_max_order_notional_not_binding_when_above_other_caps(
+        self, sample_signal: Signal
+    ) -> None:
+        """Ein sehr hoher max_order_notional darf die Größe nicht künstlich
+        beeinflussen, wenn andere Constraints ohnehin enger sind."""
+        sizer = PositionSizer()
+        qty_high_cap, reason_high_cap = sizer.compute(
+            signal=sample_signal,
+            portfolio_value=Decimal("100000"),
+            available_capital=Decimal("90000"),
+            current_price=Decimal("50000"),
+            atr=None,
+            portfolio_heat=0.1,
+            max_position_pct=0.10,
+            max_portfolio_heat=0.70,
+            max_order_notional=Decimal("999999999"),
+        )
+        qty_no_cap, _ = sizer.compute(
+            signal=sample_signal,
+            portfolio_value=Decimal("100000"),
+            available_capital=Decimal("90000"),
+            current_price=Decimal("50000"),
+            atr=None,
+            portfolio_heat=0.1,
+            max_position_pct=0.10,
+            max_portfolio_heat=0.70,
+            max_order_notional=None,
+        )
+        assert qty_high_cap == qty_no_cap
+        assert reason_high_cap is None or "max order size" not in reason_high_cap.lower()
+
+    def test_max_order_notional_exactly_at_boundary_not_capped(
+        self, sample_signal: Signal
+    ) -> None:
+        """final_notional == max_order_notional darf nicht als 'capped' gelten
+        (strikt größer, nicht größer-gleich, siehe Implementierung)."""
+        sizer = PositionSizer()
+        # base_notional bei portfolio=100000, max_pct=0.10, size_hint=1.0 = 10000.
+        qty, reason = sizer.compute(
+            signal=sample_signal,
+            portfolio_value=Decimal("100000"),
+            available_capital=Decimal("90000"),
+            current_price=Decimal("50000"),
+            atr=None,
+            portfolio_heat=0.0,
+            max_position_pct=0.10,
+            max_portfolio_heat=0.70,
+            max_order_notional=Decimal("10000"),
+        )
+        assert qty > 0
+        assert reason is None or "max order size" not in reason.lower()
+
 
 # ---------------------------------------------------------------------------
 # Kill Switch
@@ -924,6 +1029,83 @@ class TestTradeCooldown:
 
     def test_record_trade_does_not_raise(self, risk_engine: RiskEngine) -> None:
         risk_engine.record_trade("BTC/USDT", "trend_v1")  # Should not raise.
+
+
+# ---------------------------------------------------------------------------
+# Max Order Size (absoluter Notional-Hard-Cap, Baustein 4 - Live Trading
+# Safety Mechanisms)
+# ---------------------------------------------------------------------------
+
+
+class TestMaxOrderSize:
+    """
+    max_order_notional (RiskLimitsConfig) begrenzt den Notional-Wert einer
+    einzelnen Order absolut, unabhängig vom Portfolio-Wert. Schützt gegen
+    Fat-Finger-/Konfigurationsfehler, ergänzend zu max_single_position_pct
+    (welches nur relativ zum Portfolio limitiert).
+    """
+
+    async def test_order_capped_when_portfolio_makes_size_exceed_max_notional(
+        self, risk_engine: RiskEngine, sample_signal: Signal
+    ) -> None:
+        await risk_engine.initialize()
+        risk_engine._limits.max_order_notional = Decimal("5000")
+
+        assessment = await risk_engine.evaluate(
+            signal=sample_signal,
+            open_positions=[],
+            portfolio_value=Decimal("10000000"),  # Sehr großes Portfolio
+            available_capital=Decimal("10000000"),
+            current_price=Decimal("50000"),
+        )
+
+        assert assessment.decision != RiskDecision.REJECTED
+        notional = assessment.approved_quantity * Decimal("50000")
+        assert notional <= Decimal("5000") * Decimal("1.01")
+
+    async def test_order_within_max_notional_not_flagged(
+        self, risk_engine: RiskEngine, sample_signal: Signal
+    ) -> None:
+        await risk_engine.initialize()
+        risk_engine._limits.max_order_notional = Decimal("999999999")
+
+        assessment = await risk_engine.evaluate(
+            signal=sample_signal,
+            open_positions=[],
+            portfolio_value=Decimal("100000"),
+            available_capital=Decimal("90000"),
+            current_price=Decimal("50000"),
+            atr=Decimal("500"),
+        )
+
+        assert assessment.decision in (RiskDecision.APPROVED, RiskDecision.REDUCED)
+        assert not any("max order size" in w.lower() for w in assessment.warnings)
+
+    async def test_max_order_notional_none_disables_cap_end_to_end(
+        self, risk_engine: RiskEngine, sample_signal: Signal
+    ) -> None:
+        await risk_engine.initialize()
+        risk_engine._limits.max_order_notional = None
+
+        assessment = await risk_engine.evaluate(
+            signal=sample_signal,
+            open_positions=[],
+            portfolio_value=Decimal("10000000"),
+            available_capital=Decimal("10000000"),
+            current_price=Decimal("50000"),
+        )
+
+        # Ohne Cap begrenzt nur max_single_position_pct (10% von 10M = 1M).
+        assert assessment.decision != RiskDecision.REJECTED
+        notional = assessment.approved_quantity * Decimal("50000")
+        assert notional > Decimal("5000")
+
+    def test_default_max_order_notional_is_set(self, risk_engine: RiskEngine) -> None:
+        """Default darf nicht None sein - Live Trading darf nicht versehentlich
+        durch eine ungeschützte Default-Konfiguration ungebremste Ordergrößen
+        zulassen."""
+        assert risk_engine._limits.max_order_notional is not None
+        assert risk_engine._limits.max_order_notional > Decimal("0")
 
 
 # ---------------------------------------------------------------------------

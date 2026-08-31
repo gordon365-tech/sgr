@@ -54,6 +54,7 @@ class PositionSizer:
         win_rate: float | None = None,
         profit_factor: float | None = None,
         min_order_size: Decimal = Decimal("0.001"),
+        max_order_notional: Decimal | None = None,
     ) -> tuple[Decimal, str | None]:
         """
         Berechnet optimale Qty unter allen Constraints.
@@ -111,6 +112,15 @@ class PositionSizer:
         # 7. Available Capital Cap
         final_notional = min(final_notional, available_capital)
 
+        # 7b. Max Order Size Cap (absoluter Hard Cap, unabhängig vom
+        # Portfolio-Wert). Schützt gegen Fat-Finger-/Konfigurationsfehler,
+        # auch wenn alle relativen Constraints (max_position_pct, Heat,
+        # verfügbares Kapital) technisch eine größere Order zulassen würden.
+        order_size_capped = False
+        if max_order_notional is not None and final_notional > max_order_notional:
+            final_notional = max_order_notional
+            order_size_capped = True
+
         # 8. Konfidenz-Reduktion (bei niedrigem Signal-Confidence)
         if signal.confidence < 0.6:
             confidence_factor = Decimal(str(signal.confidence / 0.6))
@@ -125,7 +135,9 @@ class PositionSizer:
 
         # Reduction Reason bestimmen
         reduction_reason: str | None = None
-        if final_notional < base_notional * Decimal("0.9"):
+        if order_size_capped:
+            reduction_reason = f"Max order size cap ({max_order_notional})"
+        elif final_notional < base_notional * Decimal("0.9"):
             if atr_notional and atr_notional < base_notional:
                 reduction_reason = "ATR-based sizing (high volatility)"
             elif kelly_notional and kelly_notional < base_notional:

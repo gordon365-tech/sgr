@@ -248,6 +248,7 @@ class RiskEngine:
             max_portfolio_heat=self._limits.portfolio_heat_limit,
             win_rate=strategy_win_rate,
             profit_factor=strategy_profit_factor,
+            max_order_notional=self._limits.max_order_notional,
         )
 
         # 7. Reduction Factor anwenden (Soft Limits)

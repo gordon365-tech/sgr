@@ -102,6 +102,15 @@ class RiskLimitsConfig(BaseSettings):
     # Overtrading/Signal-Flackern direkt nach einem ausgeführten Trade.
     trade_cooldown_seconds: int = Field(default=300, ge=0, le=86400)
 
+    # Absoluter Hard Cap für den Notional-Wert (qty * price) einer
+    # einzelnen Order, unabhängig vom Portfolio-Wert. Schützt gegen
+    # Fat-Finger-Fehler und Konfigurationsfehler (z.B. size_hint=1.0
+    # bei ungewöhnlich hohem Portfolio-Wert nach starkem Wachstum).
+    # None = deaktiviert. Getrennt von max_single_position_pct, welches
+    # relativ zum Portfolio-Wert begrenzt - dieser Cap ist absolut und
+    # greift zusätzlich, unabhängig davon wie groß das Portfolio ist.
+    max_order_notional: Decimal | None = Field(default=Decimal("10000"))
+
 
 class ExchangeCredentials(BaseSettings):
     """
