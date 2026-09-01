@@ -1,0 +1,492 @@
+From c358c90fdff3ffe222c3d82342df11587a9a173b Mon Sep 17 00:00:00 2001
+From: "Claude (SGR dev session)" <claude@sgr-dev.local>
+Date: Sat, 29 Aug 2026 07:30:12 +0000
+Subject: [PATCH 3/3] test(saas): cover routers (auth/apikey/billing) (53% ->
+ 100%)
+
+- Add tests/saas/test_routers.py: 20 tests covering
+  sgr/saas/routers.py's auth_router, apikey_router, billing_router.
+- Each router is tested on its own minimal FastAPI app via TestClient
+  (no full lifespan needed, same reasoning as tests/api/test_main.py).
+  require_auth is overridden via app.dependency_overrides with a
+  fixed TokenData where the test targets router logic rather than
+  auth itself; one dedicated test confirms require_auth is still
+  enforced when NOT overridden (401 without a token).
+- Module-level AuthService (_auth) and PerformanceFeeEngine
+  (_fee_engine) instances, plus DB session/repository access, are
+  patched with AsyncMock/MagicMock doubles, matching the pattern
+  established in tests/saas/test_auth.py.
+- Covers: register (paper/live rejection, success, duplicate-email
+  400), login (success, invalid-credentials 401), refresh (success,
+  invalid-token 401), 2fa/setup + 2fa/enable (success + failure 400),
+  API key store/list/delete (success, failure, masked fields,
+  not-found 404), billing performance-report/fees/invoices.
+- No production code changes. Full suite verified green: 1161
+  passed, 9 skipped, 0 failed. Coverage 91.98% -> 92.79%. ruff
+  unchanged (22, pre-existing). mypy sgr/ unchanged (118,
+  pre-existing).
+---
+ tests/saas/test_routers.py | 451 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 451 insertions(+)
+ create mode 100644 tests/saas/test_routers.py
+
+diff --git a/tests/saas/test_routers.py b/tests/saas/test_routers.py
+new file mode 100644
+index 0000000..1958acf
+--- /dev/null
++++ b/tests/saas/test_routers.py
+@@ -0,0 +1,451 @@
++"""
++Tests für sgr.saas.routers (auth_router, apikey_router, billing_router).
++
++Coverage-Ziel: 53% -> hoch.
++
++Teststrategie: Jeder Router wird auf einer eigenen minimalen FastAPI-App
++via TestClient getestet (kein voller lifespan nötig - siehe
++tests/api/test_main.py für die Begründung, warum ein einfacher
++TestClient(app) ohne `with`-Block lifespan überspringt).
++
++`require_auth` wird per `app.dependency_overrides` durch ein festes
++TokenData-Fixture ersetzt, wo der Test nicht die Auth-Ablehnung selbst
++prüft - das entkoppelt Router-Logik-Tests von JWT-Detail-Tests (die
++bereits in tests/saas/test_auth.py und tests/api/test_dependencies.py
++[falls vorhanden] abgedeckt sind).
++
++DB-Zugriffe (get_session, get_repositories) und der modul-globale
++AuthService/PerformanceFeeEngine (_auth, _fee_engine) werden mit
++AsyncMock/MagicMock gepatcht - analog zum etablierten Muster in
++tests/saas/test_auth.py.
++"""
++
++from __future__ import annotations
++
++from contextlib import asynccontextmanager
++from unittest.mock import AsyncMock, MagicMock, patch
++
++import pytest
++from fastapi import FastAPI
++from fastapi.testclient import TestClient
++
++from sgr.api.dependencies import TokenData, require_auth
++from sgr.core.types import TradingMode
++from sgr.saas.routers import apikey_router, auth_router, billing_router
++
++
++def _fake_session_cm(session: MagicMock):
++    @asynccontextmanager
++    async def _cm():
++        yield session
++
++    return _cm
++
++
++@pytest.fixture
++def token_data() -> TokenData:
++    return TokenData(user_id="user-1", trading_mode=TradingMode.PAPER, is_admin=False)
++
++
++# ---------------------------------------------------------------------
++# Auth Router
++# ---------------------------------------------------------------------
++
++
++@pytest.fixture
++def auth_app() -> FastAPI:
++    app = FastAPI()
++    app.include_router(auth_router, prefix="/api/v1")
++    return app
++
++
++class TestRegister:
++    def test_register_rejects_live_mode(self, auth_app: FastAPI) -> None:
++        client = TestClient(auth_app)
++
++        response = client.post(
++            "/api/v1/auth/register",
++            json={
++                "email": "new@example.com",
++                "password": "Str0ng!Passw0rd",
++                "trading_mode": "live",
++            },
++        )
++
++        assert response.status_code == 400
++        assert "paper mode" in response.json()["detail"]
++
++    def test_register_success(self, auth_app: FastAPI) -> None:
++        with patch(
++            "sgr.saas.routers._auth.register_user",
++            AsyncMock(
++                return_value={
++                    "user_id": "new-user",
++                    "access_token": "access-tok",
++                    "refresh_token": "refresh-tok",
++                    "token_type": "bearer",
++                    "trading_mode": "paper",
++                }
++            ),
++        ):
++            client = TestClient(auth_app)
++            response = client.post(
++                "/api/v1/auth/register",
++                json={"email": "new@example.com", "password": "Str0ng!Passw0rd"},
++            )
++
++        assert response.status_code == 201
++        body = response.json()
++        assert body["user_id"] == "new-user"
++
++    def test_register_maps_value_error_to_400(self, auth_app: FastAPI) -> None:
++        with patch(
++            "sgr.saas.routers._auth.register_user",
++            AsyncMock(side_effect=ValueError("Email already registered")),
++        ):
++            client = TestClient(auth_app)
++            response = client.post(
++                "/api/v1/auth/register",
++                json={"email": "dup@example.com", "password": "Str0ng!Passw0rd"},
++            )
++
++        assert response.status_code == 400
++        assert "already registered" in response.json()["detail"]
++
++
++class TestLogin:
++    def test_login_success(self, auth_app: FastAPI) -> None:
++        with patch(
++            "sgr.saas.routers._auth.login",
++            AsyncMock(
++                return_value={
++                    "user_id": "user-1",
++                    "access_token": "access-tok",
++                    "refresh_token": "refresh-tok",
++                    "token_type": "bearer",
++                    "trading_mode": "paper",
++                }
++            ),
++        ) as mock_login:
++            client = TestClient(auth_app)
++            response = client.post(
++                "/api/v1/auth/login",
++                json={"email": "trader@example.com", "password": "CorrectPass123!"},
++            )
++
++        assert response.status_code == 200
++        # ip_address should be derived from the request (TestClient default).
++        mock_login.assert_awaited_once()
++
++    def test_login_maps_value_error_to_401(self, auth_app: FastAPI) -> None:
++        with patch(
++            "sgr.saas.routers._auth.login",
++            AsyncMock(side_effect=ValueError("Invalid credentials")),
++        ):
++            client = TestClient(auth_app)
++            response = client.post(
++                "/api/v1/auth/login",
++                json={"email": "nobody@example.com", "password": "wrong"},
++            )
++
++        assert response.status_code == 401
++        assert "Invalid credentials" in response.json()["detail"]
++
++
++class TestRefreshToken:
++    def test_refresh_token_success(self, auth_app: FastAPI) -> None:
++        repos = MagicMock()
++        repos.users.get_by_email = AsyncMock(return_value=None)
++
++        with (
++            patch(
++                "sgr.saas.routers._auth.verify_refresh_token", return_value="user-1"
++            ),
++            patch(
++                "sgr.saas.routers._auth.create_access_token", return_value="new-access"
++            ),
++            patch(
++                "sgr.saas.routers._auth.create_refresh_token", return_value="new-refresh"
++            ),
++            patch("sgr.core.repositories.get_repositories", return_value=repos),
++        ):
++            client = TestClient(auth_app)
++            response = client.post(
++                "/api/v1/auth/refresh", json={"refresh_token": "some-refresh-token"}
++            )
++
++        assert response.status_code == 200
++        body = response.json()
++        assert body["access_token"] == "new-access"
++        assert body["user_id"] == "user-1"
++
++    def test_refresh_token_maps_value_error_to_401(self, auth_app: FastAPI) -> None:
++        with patch(
++            "sgr.saas.routers._auth.verify_refresh_token",
++            side_effect=ValueError("Invalid token"),
++        ):
++            client = TestClient(auth_app)
++            response = client.post(
++                "/api/v1/auth/refresh", json={"refresh_token": "garbage"}
++            )
++
++        assert response.status_code == 401
++
++
++class TestSetup2FA:
++    def test_setup_2fa_returns_totp_uri(
++        self, auth_app: FastAPI, token_data: TokenData
++    ) -> None:
++        auth_app.dependency_overrides[require_auth] = lambda: token_data
++
++        with (
++            patch("sgr.core.repositories.get_repositories", return_value=MagicMock()),
++            patch(
++                "sgr.saas.routers._auth.setup_2fa",
++                AsyncMock(return_value={"totp_uri": "otpauth://totp/x", "secret": "SECRET"}),
++            ),
++        ):
++            client = TestClient(auth_app)
++            response = client.post("/api/v1/auth/2fa/setup")
++
++        assert response.status_code == 200
++        body = response.json()
++        assert body["totp_uri"] == "otpauth://totp/x"
++        assert body["secret"] == "SECRET"
++
++
++class TestEnable2FA:
++    def test_enable_2fa_success(self, auth_app: FastAPI, token_data: TokenData) -> None:
++        auth_app.dependency_overrides[require_auth] = lambda: token_data
++
++        with patch("sgr.saas.routers._auth.enable_2fa", AsyncMock(return_value=True)):
++            client = TestClient(auth_app)
++            response = client.post("/api/v1/auth/2fa/enable", json={"totp_code": "123456"})
++
++        assert response.status_code == 200
++        assert response.json()["2fa_enabled"] is True
++
++    def test_enable_2fa_failure_returns_400(
++        self, auth_app: FastAPI, token_data: TokenData
++    ) -> None:
++        auth_app.dependency_overrides[require_auth] = lambda: token_data
++
++        with patch("sgr.saas.routers._auth.enable_2fa", AsyncMock(return_value=False)):
++            client = TestClient(auth_app)
++            response = client.post("/api/v1/auth/2fa/enable", json={"totp_code": "000000"})
++
++        assert response.status_code == 400
++
++
++# ---------------------------------------------------------------------
++# API Key Router
++# ---------------------------------------------------------------------
++
++
++@pytest.fixture
++def apikey_app(token_data: TokenData) -> FastAPI:
++    app = FastAPI()
++    app.include_router(apikey_router, prefix="/api/v1")
++    app.dependency_overrides[require_auth] = lambda: token_data
++    return app
++
++
++class TestStoreAPIKey:
++    def test_store_api_key_success(self, apikey_app: FastAPI) -> None:
++        manager = MagicMock()
++        manager.store_api_key = AsyncMock(return_value="key-123")
++
++        with patch("sgr.saas.tenant.get_tenant_manager", return_value=manager):
++            client = TestClient(apikey_app)
++            response = client.post(
++                "/api/v1/api-keys/",
++                json={
++                    "exchange": "pionex",
++                    "trading_mode": "paper",
++                    "api_key": "k",
++                    "secret": "s",
++                },
++            )
++
++        assert response.status_code == 200
++        assert response.json()["key_id"] == "key-123"
++
++    def test_store_api_key_failure_returns_400(self, apikey_app: FastAPI) -> None:
++        manager = MagicMock()
++        manager.store_api_key = AsyncMock(side_effect=RuntimeError("encryption failed"))
++
++        with patch("sgr.saas.tenant.get_tenant_manager", return_value=manager):
++            client = TestClient(apikey_app)
++            response = client.post(
++                "/api/v1/api-keys/",
++                json={
++                    "exchange": "pionex",
++                    "trading_mode": "paper",
++                    "api_key": "k",
++                    "secret": "s",
++                },
++            )
++
++        assert response.status_code == 400
++
++
++class TestListAPIKeys:
++    def test_list_api_keys_returns_masked_entries(self, apikey_app: FastAPI) -> None:
++        from datetime import UTC, datetime
++
++        key = MagicMock()
++        key.id = "key-1"
++        key.exchange = "pionex"
++        key.trading_mode = "paper"
++        key.label = "default"
++        key.is_active = True
++        key.created_at = datetime.now(tz=UTC)
++        key.last_used_at = None
++
++        session = MagicMock()
++        result_mock = MagicMock()
++        result_mock.scalars.return_value.all.return_value = [key]
++        session.execute = AsyncMock(return_value=result_mock)
++
++        with patch("sgr.core.database.get_session", _fake_session_cm(session)):
++            client = TestClient(apikey_app)
++            response = client.get("/api/v1/api-keys/")
++
++        assert response.status_code == 200
++        body = response.json()
++        assert len(body) == 1
++        assert body[0]["id"] == "key-1"
++        assert "api_key" not in body[0]
++        assert "secret" not in body[0]
++
++    def test_list_api_keys_serializes_last_used_at_when_present(
++        self, apikey_app: FastAPI
++    ) -> None:
++        from datetime import UTC, datetime
++
++        key = MagicMock()
++        key.id = "key-1"
++        key.exchange = "pionex"
++        key.trading_mode = "paper"
++        key.label = "default"
++        key.is_active = True
++        key.created_at = datetime.now(tz=UTC)
++        key.last_used_at = datetime.now(tz=UTC)
++
++        session = MagicMock()
++        result_mock = MagicMock()
++        result_mock.scalars.return_value.all.return_value = [key]
++        session.execute = AsyncMock(return_value=result_mock)
++
++        with patch("sgr.core.database.get_session", _fake_session_cm(session)):
++            client = TestClient(apikey_app)
++            response = client.get("/api/v1/api-keys/")
++
++        assert response.json()[0]["last_used_at"] is not None
++
++
++class TestDeleteAPIKey:
++    def test_delete_api_key_success(self, apikey_app: FastAPI) -> None:
++        session = MagicMock()
++        result_mock = MagicMock()
++        result_mock.rowcount = 1
++        session.execute = AsyncMock(return_value=result_mock)
++
++        with patch("sgr.core.database.get_session", _fake_session_cm(session)):
++            client = TestClient(apikey_app)
++            response = client.delete("/api/v1/api-keys/key-1")
++
++        assert response.status_code == 200
++        assert response.json()["deleted"] == "key-1"
++
++    def test_delete_api_key_not_found_returns_404(self, apikey_app: FastAPI) -> None:
++        session = MagicMock()
++        result_mock = MagicMock()
++        result_mock.rowcount = 0
++        session.execute = AsyncMock(return_value=result_mock)
++
++        with patch("sgr.core.database.get_session", _fake_session_cm(session)):
++            client = TestClient(apikey_app)
++            response = client.delete("/api/v1/api-keys/missing-key")
++
++        assert response.status_code == 404
++
++
++# ---------------------------------------------------------------------
++# Billing Router
++# ---------------------------------------------------------------------
++
++
++@pytest.fixture
++def billing_app(token_data: TokenData) -> FastAPI:
++    app = FastAPI()
++    app.include_router(billing_router, prefix="/api/v1")
++    app.dependency_overrides[require_auth] = lambda: token_data
++    return app
++
++
++class TestPerformanceReport:
++    def test_get_performance_report(self, billing_app: FastAPI) -> None:
++        fake_report = {
++            "user_id": "user-1",
++            "report_generated_at": "2026-01-01T00:00:00+00:00",
++            "summary": {},
++            "portfolio_history": [],
++            "fee_periods": [],
++        }
++
++        with patch(
++            "sgr.saas.routers._fee_engine.generate_performance_report",
++            return_value=fake_report,
++        ):
++            client = TestClient(billing_app)
++            response = client.get("/api/v1/billing/performance-report")
++
++        assert response.status_code == 200
++        assert response.json()["user_id"] == "user-1"
++
++
++class TestFeeSummary:
++    def test_get_fee_summary(self, billing_app: FastAPI) -> None:
++        from decimal import Decimal
++
++        hwm = MagicMock()
++        hwm.current_hwm = Decimal("10500.00")
++        hwm.cumulative_fees_paid = Decimal("25.00")
++        hwm.currency = "USDT"
++
++        with patch(
++            "sgr.saas.routers._fee_engine.get_hwm", AsyncMock(return_value=hwm)
++        ):
++            client = TestClient(billing_app)
++            response = client.get("/api/v1/billing/fees")
++
++        assert response.status_code == 200
++        body = response.json()
++        assert body["current_hwm_usdt"] == "10500.00"
++        assert body["currency"] == "USDT"
++
++
++class TestInvoices:
++    def test_get_invoices_returns_empty_list(self, billing_app: FastAPI) -> None:
++        client = TestClient(billing_app)
++        response = client.get("/api/v1/billing/invoices")
++
++        assert response.status_code == 200
++        assert response.json() == []
++
++
++# ---------------------------------------------------------------------
++# Auth-Ablehnung (require_auth NICHT überschrieben)
++# ---------------------------------------------------------------------
++
++
++class TestRequireAuthEnforced:
++    def test_protected_route_without_token_returns_401(self) -> None:
++        app = FastAPI()
++        app.include_router(billing_router, prefix="/api/v1")
++
++        client = TestClient(app)
++        response = client.get("/api/v1/billing/invoices")
++
++        assert response.status_code == 401
+-- 
+2.43.0
+

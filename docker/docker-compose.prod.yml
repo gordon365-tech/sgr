@@ -1,0 +1,416 @@
+version: "3.9"
+
+# Project SGR – Production-Grade Docker Stack
+# 
+# Services:
+# - API (REST + WebSocket)
+# - Worker (Trading Engine)
+# - PostgreSQL/TimescaleDB (Persistence)
+# - Redis (Event Bus + Cache)
+# - Prometheus (Metrics)
+# - Grafana (Dashboards)
+#
+# Network Topology:
+#   [ Public ]
+#       ↓
+#   [Ingress / Reverse Proxy]
+#       ↓
+#   [ Internal Network ]
+#       ├── api (port 8000)
+#       ├── worker
+#       ├── postgres (port 5432 internal only)
+#       ├── redis (port 6379 internal only)
+#       ├── prometheus (port 9090 internal, optional external)
+#       └── grafana (port 3001)
+#
+# Usage:
+#   docker compose -f docker/docker-compose.prod.yml up -d
+#   docker compose -f docker/docker-compose.prod.yml ps
+#   docker compose -f docker/docker-compose.prod.yml logs -f api
+
+networks:
+  sgr-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+services:
+
+  # =========================================================================
+  # PostgreSQL / TimescaleDB (Persistence Layer)
+  # =========================================================================
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: sgr-postgres
+    hostname: postgres
+    networks:
+      sgr-net:
+        ipv4_address: 172.28.1.10
+    
+    environment:
+      POSTGRES_USER: ${DB_USER:-sgr}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-change_me_in_production}
+      POSTGRES_DB: ${DB_NAME:-sgr}
+      TZ: UTC
+      
+      # TimescaleDB Tuning
+      # Für Production: Memory auf Hostoberflaeche anpassen
+      # shared_buffers = 25% des RAM, max_connections = 200+
+      POSTGRES_INIT_ARGS: >
+        -c shared_buffers=256MB
+        -c max_connections=200
+        -c effective_cache_size=1GB
+        -c maintenance_work_mem=64MB
+        -c work_mem=4MB
+        
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Init-Script nur beim ersten Start
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init.sql
+      
+    ports:
+      # Internal access nur von anderen Containers
+      # Falls lokales psql noetig: expose aber NICHT im default docker-compose
+      - "5432:5432"  # Remove in true production (use unix socket instead)
+      
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-sgr} -d ${DB_NAME:-sgr}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+      
+    restart: unless-stopped
+    
+    # Security
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+
+  # =========================================================================
+  # Redis (Event Bus + Session Cache)
+  # =========================================================================
+  redis:
+    image: redis:7.2-alpine
+    container_name: sgr-redis
+    hostname: redis
+    networks:
+      sgr-net:
+        ipv4_address: 172.28.1.11
+        
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --tcp-backlog 511
+      --timeout 0
+      --tcp-keepalive 300
+      --daemonize no
+      --loglevel notice
+      
+    volumes:
+      - redisdata:/data
+      
+    ports:
+      - "6379:6379"  # Remove in true production
+      
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+      
+    restart: unless-stopped
+    
+    # Security
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+      
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  # =========================================================================
+  # Prometheus (Metrics Collection)
+  # =========================================================================
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: sgr-prometheus
+    hostname: prometheus
+    networks:
+      sgr-net:
+        ipv4_address: 172.28.1.12
+        
+    ports:
+      - "9090:9090"  # Keep for monitoring, restrict via ingress
+      
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheusdata:/prometheus
+      
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+      - "--web.enable-lifecycle"  # Allow config reload via HTTP
+      
+    restart: unless-stopped
+    
+    # Security
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+      
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+  # =========================================================================
+  # Grafana (Dashboards)
+  # =========================================================================
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: sgr-grafana
+    hostname: grafana
+    networks:
+      sgr-net:
+        ipv4_address: 172.28.1.13
+        
+    ports:
+      - "3001:3000"
+      
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change_me}
+      GF_SECURITY_ADMIN_USER: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SECURITY_DISABLE_BRUTE_FORCE_LOGIN_PROTECTION: "false"
+      GF_SECURITY_LOGIN_ATTEMPTS_MAX_LIFETIME: 300
+      GF_SECURITY_LOGIN_MAX_ATTEMPTS: 5
+      GF_INSTALL_PLUGINS: ""
+      TZ: UTC
+      
+    volumes:
+      - grafanadata:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      
+    depends_on:
+      prometheus:
+        condition: service_healthy
+        
+    restart: unless-stopped
+    
+    # Security
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+      
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
+  # =========================================================================
+  # SGR API (FastAPI – REST + WebSocket)
+  # =========================================================================
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.prod
+    image: sgr-api:latest
+    container_name: sgr-api
+    hostname: api
+    networks:
+      sgr-net:
+        ipv4_address: 172.28.1.20
+        
+    ports:
+      - "8000:8000"
+      
+    # Environment
+    env_file:
+      - path: ../.env.prod
+        required: false
+      - path: ../.env
+        required: false
+        
+    environment:
+      # Override Compose-interne Service-Hostnamen
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER:-sgr}
+      DB_PASSWORD: ${DB_PASSWORD:-change_me_in_production}
+      DB_NAME: ${DB_NAME:-sgr}
+      
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      
+      ENVIRONMENT: production
+      TRADING_MODE: paper  # NEVER use 'live' in default config
+      
+      # Logging
+      LOG_LEVEL: info
+      
+      # API
+      API_HOST: 0.0.0.0
+      API_PORT: "8000"
+      API_WORKERS: "4"
+      
+      # Sentry (if configured)
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+        
+    # Health Checks
+    healthcheck:
+      # Liveness: Is process alive?
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/live"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+      
+    restart: unless-stopped
+    
+    # Security
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only_filesystem: false  # Needs write for temp files
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
+        reservations:
+          cpus: '2'
+          memory: 2G
+
+  # =========================================================================
+  # SGR Worker (Trading Engine – separater Container)
+  # =========================================================================
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    image: sgr-worker:latest
+    container_name: sgr-worker
+    hostname: worker
+    networks:
+      sgr-net:
+        ipv4_address: 172.28.1.21
+        
+    # NO ports exposed - internal only
+    
+    # Environment (identisch wie API, aber anderer CMD)
+    env_file:
+      - path: ../.env.prod
+        required: false
+      - path: ../.env
+        required: false
+        
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER:-sgr}
+      DB_PASSWORD: ${DB_PASSWORD:-change_me_in_production}
+      DB_NAME: ${DB_NAME:-sgr}
+      
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      
+      ENVIRONMENT: production
+      TRADING_MODE: paper
+      
+      LOG_LEVEL: info
+      
+      WORKER_ROLE: trading
+      
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+        
+    restart: unless-stopped
+    
+    # Security
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only_filesystem: false
+    
+    # Resource limits (Can be higher/lower than API)
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+
+# ============================================================================
+# Volumes
+# ============================================================================
+volumes:
+  pgdata:
+    driver: local
+  redisdata:
+    driver: local
+  prometheusdata:
+    driver: local
+  grafanadata:
+    driver: local

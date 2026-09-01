@@ -1,253 +1,564 @@
-# Project SGR – Deployment Guide
+## SGR Production Deployment Guide
 
-## Environments
+**Last Updated:** September 2024  
+**Status:** Production-Ready (Docker)
 
-### Development
+---
+
+### Table of Contents
+
+1. [Quick Start](#quick-start)
+2. [Architecture](#architecture)
+3. [Environment Configuration](#environment-configuration)
+4. [Local Development](#local-development)
+5. [Production Deployment](#production-deployment)
+6. [Kubernetes Deployment](#kubernetes-deployment)
+7. [Health Checks & Monitoring](#health-checks--monitoring)
+8. [Backup & Restore](#backup--restore)
+9. [Troubleshooting](#troubleshooting)
+10. [Crash Recovery](#crash-recovery)
+11. [Security](#security)
+
+---
+
+### Quick Start
+
+#### Docker Compose (Local/Dev)
+
 ```bash
-docker compose -f docker/docker-compose.yml up -d
-# Runs: API (hot reload), Frontend, Postgres, Redis, Prometheus, Grafana
+# Development with hot reload
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.dev.yml up -d
+
+# Production
+docker compose -f docker/docker-compose.prod.yml up -d
 ```
 
-**Access:**
-- API: http://localhost:8000
-- Frontend: http://localhost:3000
-- Docs: http://localhost:8000/docs
-- Grafana: http://localhost:3001 (admin/sgr_grafana_dev)
-- Prometheus: http://localhost:9090
+#### Access Services
 
-### Staging
-```bash
-# Build images
-docker build -f docker/Dockerfile -t sgr-api:staging .
-docker build -f frontend/Dockerfile -t sgr-frontend:staging ./frontend
-
-# Tag & push
-docker tag sgr-api:staging ghcr.io/yourorg/sgr-api:staging
-docker push ghcr.io/yourorg/sgr-api:staging
+```
+API:        http://localhost:8000
+Swagger:    http://localhost:8000/docs
+Grafana:    http://localhost:3001  (admin / sgr_grafana_dev)
+Prometheus: http://localhost:9090
 ```
 
-### Production (Kubernetes)
-```bash
-# 1. Set up cluster & prerequisites
-kubectl cluster-info
-helm repo add jetstack https://charts.jetstack.io
-helm install cert-manager jetstack/cert-manager -n cert-manager --create-namespace
+---
 
-# 2. Deploy SGR
+### Architecture
+
+#### Container Layout
+
+```
+┌─────────────────────────────────────────┐
+│           Load Balancer / Ingress        │
+│          (Reverse Proxy, optional)       │
+└────────┬──────────────┬──────────────────┘
+         │              │
+    ┌────▼───┐      ┌───▼────┐
+    │   API   │      │ Grafana│
+    │ :8000   │      │ :3001  │
+    └────┬───┘      └───┬────┘
+         │              │
+    ┌────▼──────────────▼────┐
+    │   SGR Internal Network  │
+    │   (172.28.0.0/16)       │
+    │                         │
+    │ ┌──────┐  ┌────────┐   │
+    │ │Worker│  │Prometh.│   │
+    │ └──┬───┘  └────────┘   │
+    │    │                    │
+    │ ┌──▼────────────────┐   │
+    │ │  PostgreSQL       │   │
+    │ │  Redis            │   │
+    │ └───────────────────┘   │
+    └────────────────────────┘
+```
+
+#### Separation of Concerns
+
+- **API Container**: REST + WebSocket (stateless, horizontally scalable)
+- **Worker Container**: Trading Engine + Orchestrator (state per instance, careful restart)
+- **PostgreSQL**: Single source of truth (shared, high availability in production)
+- **Redis**: Event Bus + Cache (shared, failover via sentine l optional)
+
+---
+
+### Environment Configuration
+
+#### Files
+
+```
+.env.example         - Template (commited to repo)
+.env                 - Local development (gitignored)
+.env.prod.example    - Production template (commited)
+.env.prod            - Production config (gitignored, secret)
+```
+
+#### Key Variables
+
+```bash
+# Database
+DB_HOST=postgres
+DB_USER=sgr
+DB_PASSWORD=STRONG_PASSWORD_HERE
+DB_NAME=sgr
+
+# Redis
+REDIS_HOST=redis
+REDIS_PORT=6379
+
+# Trading Mode (CRITICAL)
+TRADING_MODE=paper        # Default (always)
+# TRADING_MODE=live       # ONLY after full validation
+
+# Exchange Credentials (NEVER in default .env)
+PIONEX_LIVE_API_KEY=      # Keep empty
+PIONEX_LIVE_API_SECRET=   # Keep empty
+
+# Risk Limits
+RISK_MAX_PORTFOLIO_DRAWDOWN=0.15
+RISK_DAILY_LOSS_LIMIT=0.05
+RISK_MAX_SINGLE_POSITION_PCT=0.05
+```
+
+#### Secret Management
+
+**Development**: Use `.env` file (gitignored)
+
+**Production**: 
+
+- **Kubernetes**: Use Kubernetes Secrets
+  ```bash
+  kubectl create secret generic sgr-secrets \
+    --from-literal=DB_PASSWORD=xxx \
+    --from-literal=REDIS_PASSWORD=yyy
+  ```
+
+- **Docker Swarm**: Use Docker Secrets
+  ```bash
+  echo "password" | docker secret create db_password -
+  ```
+
+- **AWS**: Use Secrets Manager / Parameter Store
+  ```bash
+  aws secretsmanager create-secret \
+    --name sgr/prod/db-password \
+    --secret-string "xxx"
+  ```
+
+---
+
+### Local Development
+
+#### Setup
+
+```bash
+# 1. Clone repo
+git clone https://github.com/gordon365-tech/sgr.git
+cd sgr
+
+# 2. Copy .env
+cp .env.example .env
+
+# 3. Start stack
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.dev.yml up -d
+
+# 4. Verify
+docker compose ps
+curl http://localhost:8000/health
+```
+
+#### Hot Reload
+
+Source code changes are automatically reflected:
+
+```bash
+docker compose logs -f api    # Watch API logs
+# Edit sgr/api/main.py → saved → Uvicorn reloads automatically
+```
+
+#### Database Migrations
+
+```bash
+# Apply migrations inside container
+docker compose exec api alembic upgrade head
+
+# Create new migration
+docker compose exec api alembic revision --autogenerate -m "describe change"
+```
+
+---
+
+### Production Deployment
+
+#### Pre-Flight Checklist
+
+- [ ] `.env.prod` configured with real passwords/keys
+- [ ] TRADING_MODE=paper (confirmed!)
+- [ ] Database backups enabled
+- [ ] Monitoring alerts configured
+- [ ] Kill switch tested
+- [ ] Network security validated
+- [ ] No test credentials in secrets
+
+#### Deployment Steps
+
+```bash
+# 1. Build images
+docker compose -f docker/docker-compose.prod.yml build
+
+# 2. Test locally first
+docker compose -f docker/docker-compose.prod.yml up -d
+
+# 3. Run health checks
+curl -f http://localhost:8000/health/ready || exit 1
+curl -f http://localhost:8000/health/trading || exit 1
+
+# 4. Production deployment (via CI/CD or manual)
+docker compose -f docker/docker-compose.prod.yml down
+docker compose -f docker/docker-compose.prod.yml up -d
+
+# 5. Verify
+docker compose logs -f api
+```
+
+#### Rolling Updates
+
+```bash
+# Update API without interrupting worker
+docker compose -f docker/docker-compose.prod.yml up -d api
+
+# Update Worker (careful!)
+# Workers hold state - graceful shutdown is critical
+docker compose -f docker/docker-compose.prod.yml up -d worker
+```
+
+---
+
+### Kubernetes Deployment
+
+#### Prerequisites
+
+```bash
+# 1. EKS Cluster
+aws eks create-cluster --name sgr-prod ...
+
+# 2. ECR Registry
+aws ecr create-repository --repository-name sgr-api
+aws ecr create-repository --repository-name sgr-worker
+```
+
+#### Deploy
+
+```bash
+# 1. Create namespace
+kubectl create namespace sgr-prod
+
+# 2. Create secrets
+kubectl create secret generic sgr-secrets \
+  --from-literal=DB_PASSWORD=xxx \
+  --from-literal=REDIS_PASSWORD=yyy \
+  -n sgr-prod
+
+# 3. Apply manifests
 kubectl apply -f k8s/namespace.yaml
-kubectl apply -f k8s/configmap.yaml
+kubectl apply -f k8s/postgres-statefulset.yaml
+kubectl apply -f k8s/redis-statefulset.yaml
+kubectl apply -f k8s/api-deployment.yaml
+kubectl apply -f k8s/worker-deployment.yaml
+kubectl apply -f k8s/ingress.yaml
 
-# 3. Update secrets with real values
-kubectl edit secret sgr-secrets -n sgr-prod
-
-# 4. Deploy infrastructure
-kubectl apply -f k8s/postgres.yaml k8s/redis.yaml
-kubectl wait --for=condition=ready pod -l app=postgres -n sgr-prod --timeout=300s
-
-# 5. Run migrations
-kubectl run -it --rm migrate \
-  --image=ghcr.io/yourorg/sgr-api:main \
-  --restart=Never \
-  -n sgr-prod \
-  -- alembic upgrade head
-
-# 6. Deploy applications
-kubectl apply -f k8s/api-deployment.yaml k8s/frontend-deployment.yaml k8s/ingress.yaml
-
-# 7. Verify
+# 4. Verify
 kubectl get pods -n sgr-prod
-kubectl get ingress -n sgr-prod
+kubectl logs -f deployment/sgr-api -n sgr-prod
 ```
 
-## Pre-Production Checklist
+#### Helm (Alternative)
 
-### 1. Configuration
-- [ ] `.env` file with all real values
-- [ ] Database password changed from default
-- [ ] API secret key is 32+ random characters
-- [ ] Exchange API keys (if live trading) securely stored
-- [ ] Sentry DSN configured (error tracking)
-- [ ] Telegram bot token for alerts
+```bash
+# Using Helm Charts
+helm install sgr ./helm/sgr \
+  --namespace sgr-prod \
+  --create-namespace \
+  -f helm/sgr/values-prod.yaml \
+  --set-string postgres.password=$(openssl rand -base64 32)
+```
 
-### 2. Database
-- [ ] PostgreSQL replication configured (if HA)
-- [ ] Backup strategy implemented (daily dumps)
-- [ ] Archival script for audit logs >90 days old
-- [ ] Run migrations: `alembic upgrade head`
+---
 
-### 3. Monitoring
-- [ ] Prometheus scrape targets all responding
-- [ ] Grafana dashboards imported
-- [ ] AlertManager configured (Slack/email integration)
-- [ ] Sentry project linked & events flowing
+### Health Checks & Monitoring
 
-### 4. Security
-- [ ] SSL/TLS certificates installed (Let's Encrypt OK for prod)
-- [ ] Rate limiting enabled on sensitive endpoints
-- [ ] CORS origins restricted
-- [ ] API keys rotated (if existing system)
-- [ ] Network policies enforced (Kubernetes)
+#### Health Endpoints
 
-### 5. Testing
-- [ ] Full backtesting passed (Sharpe >0.8)
-- [ ] Paper trading for 2+ weeks at scale
-- [ ] Failover tested (pod deletion)
-- [ ] Graceful shutdown tested
-- [ ] Recovery after crash tested
+**Liveness** (Is process alive?)
+```bash
+GET /health/live
+→ 200 OK {status: "alive"}
+```
 
-### 6. Go-Live Gates
-- [ ] Risk limits reviewed by compliance
-- [ ] Max position size limits appropriate
-- [ ] Daily loss limit set
-- [ ] Portfolio heat limit enforced
-- [ ] Kill switch tested (manual override)
+**Readiness** (Can accept traffic?)
+```bash
+GET /health/ready
+→ 200 OK if db_connected && redis_connected
+→ 503 if not ready (remove from load balancer)
+```
 
-## Troubleshooting
+**Trading** (Is trading safe?)
+```bash
+GET /health/trading
+→ 200 OK if kill_switch_inactive && recovery_done && exchange_ok
+→ 503 if trading_disabled
+```
 
-### API won't start
+#### Prometheus Metrics
+
+Key metrics to monitor:
+
+```prometheus
+# Order metrics
+sgr_orders_submitted_total
+sgr_orders_filled_total
+sgr_orders_rejected_total
+sgr_orders_duplicate_blocked_total
+
+# Risk metrics
+sgr_kill_switch_active
+sgr_portfolio_drawdown
+sgr_risk_rejected_total
+
+# Reconciliation
+sgr_reconciliation_runs_total
+sgr_reconciliation_discrepancies_found
+
+# Performance
+sgr_execution_latency_seconds
+sgr_order_latency_seconds
+```
+
+#### Grafana Dashboards
+
+Pre-configured dashboards:
+
+- **Portfolio Overview**: Value, PnL, positions
+- **Risk Dashboard**: Drawdown, heat, limits
+- **Trading Activity**: Orders, fills, rejections
+- **Infrastructure**: CPU, memory, network
+
+Access: http://localhost:3001
+
+---
+
+### Backup & Restore
+
+#### PostgreSQL Backup
+
+```bash
+# Manual backup
+docker compose exec postgres pg_dump -U sgr sgr > backup.sql
+
+# Automated (via cronjob in k8s/postgres-backup-cronjob.yaml)
+kubectl apply -f k8s/postgres-backup-cronjob.yaml
+
+# Upload to S3
+aws s3 cp backup.sql s3://sgr-backups/$(date +%Y%m%d).sql
+```
+
+#### Restore
+
+```bash
+# Restore from backup
+docker compose exec -T postgres psql -U sgr sgr < backup.sql
+
+# Verify
+docker compose exec postgres psql -U sgr -d sgr -c "\dt"
+```
+
+---
+
+### Troubleshooting
+
+#### API Won't Start
+
 ```bash
 # Check logs
 docker compose logs api
 
-# Check database connection
-psql -h localhost -U sgr -d sgr -c "SELECT 1"
-
-# Check Redis
-redis-cli -h localhost ping
+# Common issues:
+# 1. Database not ready → wait for PostgreSQL healthcheck
+# 2. Redis not connected → check Redis logs
+# 3. Port already in use → change port or stop other service
 ```
 
-### High error rates
+#### High Memory
+
 ```bash
-# View recent errors
-curl http://localhost:8000/api/v1/system/health
-
-# Check circuit breaker status
-# (would need custom endpoint)
-
-# Check exchange connectivity
-curl http://localhost:8000/docs  # Try exchange endpoints
-```
-
-### Memory leak
-```bash
-# Monitor container memory
 docker stats sgr-api
-
-# Inside container
-pip list --outdated  # Check deps
+# If > 2GB: memory leak or large dataset
+# → Check market data cache size
+# → Review feature store retention policy
 ```
 
-### Database migrations fail
+#### Orders Not Executing
+
 ```bash
-# Check migration status
-alembic current
+# Check trading health
+curl http://localhost:8000/health/trading
 
-# View available migrations
-alembic history
+# Check logs
+docker compose logs worker
 
-# Downgrade last migration (if needed)
-alembic downgrade -1
-
-# Re-run
-alembic upgrade head
+# Possible issues:
+# - Kill switch is active → reset via API
+# - Risk limits breached → adjust config
+# - Exchange offline → check exchange status
 ```
 
-## Scaling
+#### Reconciliation Issues
 
-### Horizontal (More Replicas)
 ```bash
-# Kubernetes
-kubectl scale deployment sgr-api -n sgr-prod --replicas=5
+# Manual reconciliation
+curl -X POST http://localhost:8000/api/v1/reconciliation/reconcile
 
-# Docker Compose (manual – not designed for this)
-docker compose -f docker/docker-compose.yml up -d --scale api=3
+# Check discrepancies
+curl http://localhost:8000/api/v1/reconciliation/discrepancies
 ```
 
-### Vertical (Bigger Machines)
-- Increase resource requests/limits in Deployment manifest
-- Increase PostgreSQL `shared_buffers`, `work_mem`
-- Increase Redis `maxmemory`
+---
 
-## Rollback
+### Crash Recovery
 
-### Kubernetes
+#### Automatic Recovery (Built-in)
+
+On Container Restart:
+
+1. Database connection
+2. Position restoration from DB
+3. Open order recovery
+4. Strategy re-activation
+5. Risk state recalculation
+6. Ready for trading (if all checks pass)
+
+#### Manual Recovery
+
 ```bash
-# View rollout history
-kubectl rollout history deployment/sgr-api -n sgr-prod
+# If automatic recovery fails:
+# 1. Check database state
+docker compose exec postgres psql -U sgr -d sgr -c "SELECT * FROM positions;"
 
-# Rollback to previous version
-kubectl rollout undo deployment/sgr-api -n sgr-prod
+# 2. Check orders
+docker compose exec postgres psql -U sgr -d sgr -c "SELECT * FROM orders WHERE status='pending';"
 
-# Rollback to specific revision
-kubectl rollout undo deployment/sgr-api -n sgr-prod --to-revision=3
+# 3. Run reconciliation
+curl -X POST http://localhost:8000/api/v1/reconciliation/reconcile
+
+# 4. Reset kill switch if needed (CAREFUL!)
+curl -X POST http://localhost:8000/api/v1/system/kill-switch/reset
 ```
 
-### Docker Compose
+---
+
+### Security
+
+#### Network
+
+- PostgreSQL: NOT exposed (internal only)
+- Redis: NOT exposed (internal only)
+- API: Behind reverse proxy (TLS termination)
+- Metrics: Restricted access (firewall rule)
+
+#### Credentials
+
+- NO secrets in Docker images
+- NO secrets in git commits
+- Environment variables or Secret Store
+- Rotate credentials regularly
+
+#### Access Control
+
+- API authentication: JWT tokens
+- Rate limiting: Per-user, per-endpoint
+- Audit logging: All sensitive operations
+- Network policies: Deny-all, explicit allow
+
+#### Compliance
+
+- TLS/HTTPS: Required in production
+- Data encryption: At-rest (if sensitive) and in-transit
+- Log retention: 30 days minimum
+- Backup retention: 90 days minimum
+
+---
+
+### Monitoring & Alerting
+
+#### Key Alerts
+
+```yaml
+# High drawdown
+- alert: HighPortfolioDrawdown
+  expr: sgr_portfolio_drawdown > 0.10
+  for: 5m
+  
+# Kill switch activated
+- alert: KillSwitchActive
+  expr: sgr_kill_switch_active == 1
+  for: 1m
+
+# Reconciliation failures
+- alert: ReconciliationFailure
+  expr: rate(sgr_reconciliation_failures_total[5m]) > 0
+  
+# Duplicate orders detected
+- alert: DuplicateOrderDetected
+  expr: rate(sgr_orders_duplicate_blocked_total[5m]) > 0
+```
+
+#### Notifications
+
+- Slack: Critical alerts
+- Email: Daily summary
+- Telegram: Real-time trading alerts (optional)
+
+---
+
+### Performance Tuning
+
+#### Database
+
+```sql
+-- Connection pooling
+max_connections = 200
+
+-- Memory tuning
+shared_buffers = 25% of RAM
+effective_cache_size = 75% of RAM
+work_mem = (total_ram / max_connections) / 2
+```
+
+#### API (Uvicorn)
+
 ```bash
-# Pull previous image tag
-docker pull ghcr.io/yourorg/sgr-api:v1.2.3
+# Workers = 2-4 per CPU core
+--workers 4
 
-# Update compose file and restart
-docker compose -f docker/docker-compose.yml up -d
+# Disable access logs in production
+--no-access-log
 ```
 
-## Backup & Recovery
+#### Redis
 
-### Database Backup
 ```bash
-# Manual backup
-pg_dump -h postgres -U sgr sgr > backup_$(date +%Y%m%d).sql
-
-# Automated (daily via cron)
-0 2 * * * pg_dump -h postgres -U sgr sgr > /backups/sgr_$(date +\%Y\%m\%d).sql
-
-# Restore from backup
-psql -h postgres -U sgr sgr < backup_20240820.sql
+# Memory limit
+--maxmemory 512mb
+--maxmemory-policy allkeys-lru
 ```
 
-### Disaster Recovery
-1. Restore PostgreSQL from backup
-2. Restore Redis snapshot (if critical)
-3. Restart API container (reads from DB)
-4. Run recovery manager: `sgr.core.resilience.RecoveryManager.recover_after_crash()`
+---
 
-## Monitoring Dashboard
+### Support & Debugging
 
-### Key Metrics to Watch
-- **Portfolio Value:** Should grow (or be stable in paper trading)
-- **Sharpe Ratio:** Live should ≈ backtest (if degrading, investigate)
-- **Error Rate:** Should stay <1%
-- **API Latency:** P95 <500ms
-- **Position Count:** Monitor for accumulation
-- **Circuit Breaker Status:** Should stay CLOSED
+See [Troubleshooting](#troubleshooting) section above.
 
-### Alerting Rules
-- API down >2 min → Critical alert
-- Error rate >5% → Warning
-- Portfolio heat >70% → Warning
-- API latency P95 >1s → Warning
+For architecture decisions, see `docs/ADR.md`.
 
-## Maintenance
-
-### Weekly
-- [ ] Review audit logs for anomalies
-- [ ] Check backups completed successfully
-- [ ] Monitor disk usage (logs, database)
-
-### Monthly
-- [ ] Rotate API keys (if active)
-- [ ] Review security patches (dependencies)
-- [ ] Analyze performance trends
-
-### Quarterly
-- [ ] Full disaster recovery drill
-- [ ] Upgrade dependencies
-- [ ] Audit user/role permissions
-
-## Support
-
-### Getting Help
-- **Logs:** `docker compose logs -f <service>`
-- **Metrics:** Check Prometheus http://localhost:9090
-- **Errors:** Check Sentry dashboard
-- **Database:** `psql -h postgres -U sgr sgr`
+For API reference, see `docs/API.md`.

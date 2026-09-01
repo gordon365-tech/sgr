@@ -1,0 +1,276 @@
+From f95e116d944496ca2c1dff369c8393514d641d4a Mon Sep 17 00:00:00 2001
+From: "Claude (SGR dev session)" <claude@sgr-dev.local>
+Date: Sat, 29 Aug 2026 22:12:14 +0000
+Subject: [PATCH] fix(ml): VolatilityForecaster.fit() crashed on every real
+ GARCH fit + cover module (82% -> 100%)
+
+BUGFIX (production code change - genuine bug found during coverage work):
+
+sgr/ml/volatility_forecaster.py line 122 called
+res.conditional_volatility.iloc[-1], assuming a pandas.Series. With
+the installed arch version (8.0.0), arch_model().fit() returns
+conditional_volatility as a numpy.ndarray, which has no .iloc
+attribute. Every real GARCH(1,1) fit therefore crashed with
+AttributeError - this was never caught by the ImportError-only
+EWMA fallback, so in this environment VolatilityForecaster.fit()
+was never actually succeeding via the GARCH path. mypy already
+statically flagged this exact issue pre-fix ("Item ndarray... has
+no attribute iloc [union-attr]"), confirming it as a genuine,
+pre-existing bug rather than a newly introduced one.
+
+Fix: replaced conditional_vol.iloc[-1] with
+np.asarray(res.conditional_volatility)[-1], which works correctly
+for both pandas.Series and numpy.ndarray, since np.asarray() is a
+no-op on an already-ndarray input.
+
+Net effect on mypy sgr/ baseline: 118 -> 117 (one error resolved by
+the fix - the flagged union-attr error on this exact line no longer
+applies; all other pre-existing errors elsewhere are untouched).
+
+TEST COVERAGE (82% -> 100%):
+
+- Add tests/ml/test_volatility_forecaster.py: 12 tests covering
+  sgr/ml/volatility_forecaster.py's VolatilityForecaster.
+- fit()/predict() exercised via real GARCH(1,1) maximum-likelihood
+  fitting (arch + scipy are installed in this environment) on
+  synthetic-but-realistic returns with volatility clustering, rather
+  than mocking the arch library - this is what surfaced the bug
+  above.
+- Covers: too-few-returns ValueError, successful fit + metadata,
+  forced-stationarity branch (alpha+beta >= 1.0, via a minimal fake
+  arch result object), EWMA fallback when arch is missing
+  (sys.modules patch) and _fit_ewma() directly, predict() unfitted
+  fallback vs. fitted real forecast, confidence-level-driven interval
+  width, lower-bound floor at 0.0, and update()'s no-op-when-unfitted
+  vs. variance-adjustment-when-fitted paths.
+- Full suite verified green: 1248 passed, 9 skipped, 0 failed.
+  Coverage 93.82% -> 94.05%. ruff unchanged (22, pre-existing).
+  mypy sgr/ improved 118 -> 117 (see bugfix note above; not a new
+  regression baseline, a resolved pre-existing error).
+---
+ sgr/ml/volatility_forecaster.py        |  10 +-
+ tests/ml/test_volatility_forecaster.py | 191 +++++++++++++++++++++++++
+ 2 files changed, 199 insertions(+), 2 deletions(-)
+ create mode 100644 tests/ml/test_volatility_forecaster.py
+
+diff --git a/sgr/ml/volatility_forecaster.py b/sgr/ml/volatility_forecaster.py
+index 4ebe04d..d9bb03a 100644
+--- a/sgr/ml/volatility_forecaster.py
++++ b/sgr/ml/volatility_forecaster.py
+@@ -118,8 +118,14 @@ class VolatilityForecaster:
+             self._long_run_var = self._omega / denom if denom > 0 else self._omega
+ 
+             # Letzte bekannte Varianz und Residual
+-            conditional_vol = res.conditional_volatility
+-            self._last_variance = float(conditional_vol.iloc[-1]) ** 2 / 10000
++            # HINWEIS: res.conditional_volatility ist je nach installierter
++            # `arch`-Version entweder ein pandas.Series (mit .iloc) oder ein
++            # numpy.ndarray (kein .iloc). np.asarray(...)[-1] funktioniert
++            # für beide Typen zuverlässig. Bug gefunden bei arch==8.0.0,
++            # das ein ndarray zurückgibt -> .iloc[-1] crashte mit
++            # AttributeError bei JEDEM echten GARCH-Fit.
++            conditional_vol = np.asarray(res.conditional_volatility)
++            self._last_variance = float(conditional_vol[-1]) ** 2 / 10000
+             self._last_residual = float(returns[-1]) ** 2
+ 
+             self._fitted = True
+diff --git a/tests/ml/test_volatility_forecaster.py b/tests/ml/test_volatility_forecaster.py
+new file mode 100644
+index 0000000..e65f727
+--- /dev/null
++++ b/tests/ml/test_volatility_forecaster.py
+@@ -0,0 +1,191 @@
++"""
++Tests für sgr.ml.volatility_forecaster.VolatilityForecaster.
++
++Coverage-Ziel: 82% -> hoch.
++
++Teststrategie: Da `arch` und `scipy` in dieser Umgebung installiert
++sind, wird fit()/predict() über echte GARCH(1,1)-Schätzung getestet
++statt gemockt - ein echter Maximum-Likelihood-Fit auf synthetischen
++Returns deckt die tatsächliche `arch`-Integration ab. Der EWMA-
++Fallback-Pfad (kein `arch` installiert) wird gezielt über
++`sys.modules`-Patching der `arch`-Bibliothek getriggert.
++
++Hinweis Bugfix: Diese Tests deckten einen echten Produktionsfehler in
++fit() auf: res.conditional_volatility war in der installierten
++`arch`-Version (8.0.0) ein numpy.ndarray statt eines pandas.Series,
++wodurch `.iloc[-1]` mit AttributeError crashte - JEDER echte GARCH-Fit
++schlug fehl. Siehe Commit-Message für Details zum Fix
++(np.asarray(...)[-1] statt .iloc[-1]).
++"""
++
++from __future__ import annotations
++
++from unittest.mock import patch
++
++import numpy as np
++import pytest
++
++from sgr.ml.types import ModelStatus
++from sgr.ml.volatility_forecaster import VolatilityForecaster
++
++
++def _make_returns(n: int = 500, seed: int = 42) -> np.ndarray:
++    """Synthetische, aber realistische Log-Returns mit Volatility Clustering."""
++    rng = np.random.default_rng(seed)
++    returns = np.zeros(n)
++    vol = 0.01
++    for i in range(n):
++        vol = 0.9 * vol + 0.1 * abs(returns[i - 1]) if i > 0 else vol
++        returns[i] = rng.normal(0, vol)
++    return returns
++
++
++# ---------------------------------------------------------------------
++# Initial state
++# ---------------------------------------------------------------------
++
++
++class TestInitialState:
++    def test_not_fitted_initially(self) -> None:
++        forecaster = VolatilityForecaster()
++        assert forecaster.is_fitted is False
++        assert forecaster.metadata.status == ModelStatus.UNTRAINED
++
++
++# ---------------------------------------------------------------------
++# fit() - GARCH path
++# ---------------------------------------------------------------------
++
++
++class TestFitGarch:
++    def test_fit_raises_with_too_few_returns(self) -> None:
++        forecaster = VolatilityForecaster()
++        with pytest.raises(ValueError, match="at least 30 returns"):
++            forecaster.fit(np.array([0.01] * 10))
++
++    def test_fit_succeeds_and_sets_metadata(self) -> None:
++        forecaster = VolatilityForecaster()
++        params = forecaster.fit(_make_returns())
++
++        assert forecaster.is_fitted is True
++        assert forecaster.metadata.status == ModelStatus.PRODUCTION
++        assert forecaster.metadata.trained_at is not None
++        assert "omega" in params
++        assert "alpha" in params
++        assert "beta" in params
++        assert "persistence" in params
++
++    def test_fit_forces_stationarity_when_non_stationary(self) -> None:
++        forecaster = VolatilityForecaster()
++
++        class _FakeParams(dict):
++            def get(self, key, default=None):
++                return {"omega": 0.01, "alpha[1]": 0.7, "beta[1]": 0.6}.get(key, default)
++
++        fake_result = type(
++            "FakeResult",
++            (),
++            {
++                "params": _FakeParams(),
++                "conditional_volatility": np.array([1.0, 2.0]),
++            },
++        )()
++        fake_model = type("FakeModel", (), {"fit": lambda self, **kw: fake_result})()
++
++        with patch("arch.arch_model", return_value=fake_model):
++            params = forecaster.fit(_make_returns())
++
++        # alpha + beta = 1.3 >= 1.0 -> forced to the stationary constants.
++        assert params["alpha"] == 0.09
++        assert params["beta"] == 0.89
++
++    def test_fit_falls_back_to_ewma_when_arch_missing(self) -> None:
++        forecaster = VolatilityForecaster()
++        with patch.dict("sys.modules", {"arch": None}):
++            params = forecaster.fit(_make_returns())
++
++        assert forecaster.is_fitted is True
++        assert params.get("fallback") == "ewma"
++
++
++# ---------------------------------------------------------------------
++# _fit_ewma() - direct
++# ---------------------------------------------------------------------
++
++
++class TestFitEwma:
++    def test_fit_ewma_sets_stationary_params(self) -> None:
++        forecaster = VolatilityForecaster()
++        params = forecaster._fit_ewma(_make_returns())
++
++        assert forecaster.is_fitted is True
++        assert forecaster.metadata.status == ModelStatus.PRODUCTION
++        assert params["alpha"] + params["beta"] < 1.0
++
++
++# ---------------------------------------------------------------------
++# predict()
++# ---------------------------------------------------------------------
++
++
++class TestPredict:
++    def test_predict_unfitted_returns_fallback(self) -> None:
++        forecaster = VolatilityForecaster()
++        forecast = forecaster.predict("BTC/USDT", "1h", horizon_bars=5)
++
++        assert forecast.model_version == "fallback"
++        assert forecast.predicted_volatility_pct == 2.0
++
++    def test_predict_fitted_returns_real_forecast(self) -> None:
++        forecaster = VolatilityForecaster()
++        forecaster.fit(_make_returns())
++
++        forecast = forecaster.predict("BTC/USDT", "1h", horizon_bars=5)
++
++        assert forecast.model_version == VolatilityForecaster.VERSION
++        assert forecast.predicted_volatility_pct >= 0
++        assert forecast.lower_bound_pct >= 0
++        assert forecast.upper_bound_pct >= forecast.lower_bound_pct
++        assert forecast.garch_alpha == forecaster._alpha
++        assert forecast.garch_beta == forecaster._beta
++
++    def test_predict_respects_custom_confidence_level(self) -> None:
++        forecaster = VolatilityForecaster()
++        forecaster.fit(_make_returns())
++
++        narrow = forecaster.predict("BTC/USDT", "1h", horizon_bars=5, confidence_level=0.50)
++        wide = forecaster.predict("BTC/USDT", "1h", horizon_bars=5, confidence_level=0.99)
++
++        narrow_width = narrow.upper_bound_pct - narrow.lower_bound_pct
++        wide_width = wide.upper_bound_pct - wide.lower_bound_pct
++        assert wide_width >= narrow_width
++
++    def test_predict_lower_bound_never_negative(self) -> None:
++        forecaster = VolatilityForecaster()
++        forecaster.fit(_make_returns())
++
++        forecast = forecaster.predict("BTC/USDT", "1h", horizon_bars=1, confidence_level=0.999)
++
++        assert forecast.lower_bound_pct >= 0.0
++
++
++# ---------------------------------------------------------------------
++# update()
++# ---------------------------------------------------------------------
++
++
++class TestUpdate:
++    def test_update_noop_when_not_fitted(self) -> None:
++        forecaster = VolatilityForecaster()
++        forecaster.update(0.05)  # Should not raise.
++        assert forecaster.is_fitted is False
++
++    def test_update_adjusts_variance_when_fitted(self) -> None:
++        forecaster = VolatilityForecaster()
++        forecaster.fit(_make_returns())
++
++        variance_before = forecaster._last_variance
++        forecaster.update(0.10)
++
++        assert forecaster._last_residual == pytest.approx(0.01)
++        assert forecaster._last_variance != variance_before
+-- 
+2.43.0
+

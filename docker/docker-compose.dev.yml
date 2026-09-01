@@ -1,0 +1,59 @@
+version: "3.9"
+
+# SGR Development Overlay
+# Ergänzt die Base-Services mit Development-spezifischen Settings
+# 
+# Usage:
+#   docker compose -f docker/docker-compose.yml -f docker/docker-compose.dev.yml up -d
+#
+# Diese Datei ERSETZT Production-Settings mit Development-Werten:
+# - Hot Reload für Code
+# - Längere Timeouts
+# - Verbose Logging
+# - Debug-Modus wo sinnvoll
+
+services:
+
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dev  # Development build mit hot-reload
+      
+    environment:
+      ENVIRONMENT: development
+      LOG_LEVEL: debug
+      UVICORN_RELOAD: "true"
+      UVICORN_LOG_LEVEL: debug
+      
+    volumes:
+      - ..:/app  # Full source mount für hot-reload
+      
+    command: >
+      uvicorn sgr.api.main:app
+      --host 0.0.0.0
+      --port 8000
+      --reload
+      --reload-dir /app/sgr
+      --log-level debug
+
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+      
+    environment:
+      ENVIRONMENT: development
+      LOG_LEVEL: debug
+      
+    volumes:
+      - ..:/app
+      
+    command: >
+      python -u -m sgr.worker.main
+
+  # Optionally add local services for development
+  postgres:
+    environment:
+      POSTGRES_INIT_ARGS: >
+        -c log_min_duration_statement=100
+        -c log_statement=all

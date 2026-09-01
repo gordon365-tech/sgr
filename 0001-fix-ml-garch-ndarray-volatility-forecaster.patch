@@ -1,0 +1,114 @@
+From 7ada071bd9e7160f4fc8370e8643c9d6f25599b9 Mon Sep 17 00:00:00 2001
+From: SGR Dev <dev@sgr.local>
+Date: Sat, 29 Aug 2026 15:34:06 +0000
+Subject: [PATCH] fix(ml): handle ndarray return from arch
+ conditional_volatility
+
+res.conditional_volatility returns a numpy.ndarray in arch 8.0.0 instead
+of a pandas Series, causing .iloc[-1] to raise AttributeError on every
+real GARCH fit. This made the GARCH path in VolatilityForecaster.fit()
+unreachable in production whenever the arch package is installed and
+successfully fits, silently falling through to no forecast at all
+(no EWMA fallback, since this is a runtime error, not ImportError).
+
+Fix: use np.asarray(conditional_vol)[-1] instead of .iloc[-1]. This is
+a no-op for ndarray and correctly extracts the underlying values from
+a Series, so it works across arch versions.
+
+Adds regression tests covering both the ndarray (arch >= 8.0.0) and
+Series (older arch) return shapes.
+---
+ sgr/ml/volatility_forecaster.py               |  6 +-
+ .../test_volatility_forecaster_ndarray_fix.py | 62 +++++++++++++++++++
+ 2 files changed, 67 insertions(+), 1 deletion(-)
+ create mode 100644 tests/test_volatility_forecaster_ndarray_fix.py
+
+diff --git a/sgr/ml/volatility_forecaster.py b/sgr/ml/volatility_forecaster.py
+index 4ebe04d..553373f 100644
+--- a/sgr/ml/volatility_forecaster.py
++++ b/sgr/ml/volatility_forecaster.py
+@@ -118,8 +118,12 @@ class VolatilityForecaster:
+             self._long_run_var = self._omega / denom if denom > 0 else self._omega
+ 
+             # Letzte bekannte Varianz und Residual
++            # res.conditional_volatility ist je nach arch-Version ein
++            # numpy.ndarray oder eine pandas Series. np.asarray() ist
++            # fuer ein ndarray ein No-Op und extrahiert bei einer Series
++            # die zugrunde liegenden Werte, ohne .iloc vorauszusetzen.
+             conditional_vol = res.conditional_volatility
+-            self._last_variance = float(conditional_vol.iloc[-1]) ** 2 / 10000
++            self._last_variance = float(np.asarray(conditional_vol)[-1]) ** 2 / 10000
+             self._last_residual = float(returns[-1]) ** 2
+ 
+             self._fitted = True
+diff --git a/tests/test_volatility_forecaster_ndarray_fix.py b/tests/test_volatility_forecaster_ndarray_fix.py
+new file mode 100644
+index 0000000..ea48870
+--- /dev/null
++++ b/tests/test_volatility_forecaster_ndarray_fix.py
+@@ -0,0 +1,62 @@
++"""
++Regressionstest fuer den ndarray/Series Bug in VolatilityForecaster.fit().
++
++res.conditional_volatility kann je nach arch-Version ein numpy.ndarray
++(arch >= 8.0.0) oder eine pandas Series (aeltere Versionen) sein. Der alte
++Code rief bedingungslos .iloc[-1] auf, was bei einem ndarray mit
++AttributeError crasht. Dieser Test stellt sicher, dass fit() fuer beide
++Rueckgabetypen funktioniert.
++"""
++
++from unittest.mock import MagicMock, patch
++
++import numpy as np
++import pytest
++
++from sgr.ml.volatility_forecaster import VolatilityForecaster
++
++
++def _make_fake_arch_result(conditional_volatility):
++    fake_params = {"omega": 0.02, "alpha[1]": 0.09, "beta[1]": 0.85}
++    res = MagicMock()
++    res.params = fake_params
++    res.conditional_volatility = conditional_volatility
++    return res
++
++
++@pytest.fixture
++def returns():
++    rng = np.random.default_rng(42)
++    return rng.normal(0, 0.01, size=100)
++
++
++def test_fit_with_ndarray_conditional_volatility(returns):
++    """arch >= 8.0.0 gibt ein numpy.ndarray zurueck - darf nicht crashen."""
++    fake_res = _make_fake_arch_result(np.array([0.5, 0.6, 0.7, 0.8]))
++    fake_am = MagicMock()
++    fake_am.fit.return_value = fake_res
++
++    with patch("arch.arch_model", return_value=fake_am):
++        forecaster = VolatilityForecaster()
++        params = forecaster.fit(returns)
++
++    assert forecaster.is_fitted
++    assert forecaster._last_variance == pytest.approx(0.8**2 / 10000)
++    assert "omega" in params
++
++
++def test_fit_with_series_conditional_volatility(returns):
++    """Aeltere arch-Versionen geben eine pandas Series zurueck - muss weiterhin funktionieren."""
++    import pandas as pd
++
++    fake_res = _make_fake_arch_result(pd.Series([0.5, 0.6, 0.7, 0.8]))
++    fake_am = MagicMock()
++    fake_am.fit.return_value = fake_res
++
++    with patch("arch.arch_model", return_value=fake_am):
++        forecaster = VolatilityForecaster()
++        params = forecaster.fit(returns)
++
++    assert forecaster.is_fitted
++    assert forecaster._last_variance == pytest.approx(0.8**2 / 10000)
++    assert "omega" in params
+-- 
+2.43.0
+

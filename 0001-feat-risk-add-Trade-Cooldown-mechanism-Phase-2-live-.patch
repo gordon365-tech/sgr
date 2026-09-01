@@ -1,0 +1,397 @@
+From 1968ea4a8431d7566dcd7602e13bac3be0c09315 Mon Sep 17 00:00:00 2001
+From: "Claude (SGR dev session)" <claude@sgr-dev.local>
+Date: Sun, 30 Aug 2026 04:34:47 +0000
+Subject: [PATCH] feat(risk): add Trade Cooldown mechanism (Phase 2 - live
+ trading safety)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+GEFUNDENE LÜCKE: "Cooldown nach Trades" ist im Auftrag explizit als
+Pflicht-Sicherheitsmechanismus aufgeführt, existierte im Code aber
+komplett nicht - keine Konfiguration, kein Check. Ohne Cooldown kann
+eine Strategie theoretisch unmittelbar nach einem gefüllten Trade
+erneut auf demselben Symbol handeln, was Overtrading und
+Signal-Flackern begünstigt.
+
+NEU:
+
+- sgr/core/config.py: RiskLimitsConfig.trade_cooldown_seconds
+  (Default 300s = 5 Minuten, 0 deaktiviert den Mechanismus
+  vollständig für Backtesting/schnelle Strategien).
+
+- sgr/risk/engine.py:
+  - RiskEngine trackt _last_trade_at: dict[str, datetime], keyed
+    nach "symbol|strategy" - konsistent mit dem bestehenden Muster
+    für anderen In-Memory-Portfolio-State dieser Klasse
+    (_peak_portfolio_value, _daily_pnl_start).
+  - Neuer Check in _evaluate_internal(), direkt nach dem Kill-Switch-
+    Check (Schritt 1b): REJECTED mit "Cooldown active: Xs remaining"
+    wenn die Cooldown-Zeit für Symbol+Strategie noch nicht abgelaufen
+    ist. Bewusst KEIN Kill-Switch-Trigger - ein Cooldown ist normales
+    Handelsalltag-Verhalten, kein Notfall-Zustand.
+  - Neue public Methode record_trade(symbol_key, strategy_name): muss
+    vom Aufrufer nach einem TATSÄCHLICH ausgeführten Trade
+    (OrderStatus.FILLED) aufgerufen werden. Bewusst nicht automatisch
+    in evaluate()/build_order_request() integriert, da RiskEngine den
+    tatsächlichen Order-Ausgang nicht kennt (APPROVED != FILLED) - nur
+    der Orchestrator weiß das nach ExecutionEngine.execute().
+
+- sgr/orchestrator/engine.py: TradingOrchestrator._run_cycle_internal()
+  ruft risk_engine.record_trade(symbol_key, signal.strategy_name) auf,
+  aber NUR wenn order_result.status == OrderStatus.FILLED - kein
+  Cooldown-Start bei nicht gefüllten/stornierten Orders.
+
+- sgr/api/routers/risk.py: GET /limits zeigt trade_cooldown_seconds
+  jetzt unter "trading_behavior" an (war zuvor nirgends sichtbar).
+
+Design-Entscheidung: In-Memory statt DB-persistiert (wie
+_peak_portfolio_value/_daily_pnl_start bereits sind) - ein Neustart
+direkt nach einem Trade ist ein Edge Case, und ein zu kurzer statt zu
+langer Cooldown nach Neustart ist die sicherere Richtung als das
+System durch eine zusätzliche Persistenzschicht unnötig zu
+verkomplizieren.
+
+TESTS:
+
+- tests/unit/test_risk_engine.py: 7 neue Tests (TestTradeCooldown) -
+  kein Cooldown vor erstem Trade, REJECTED sofort nach Trade,
+  Cooldown ist pro Symbol+Strategie-Paar getrennt (andere Strategie
+  auf demselben Symbol nicht betroffen), Cooldown läuft nach
+  konfigurierter Dauer ab, trade_cooldown_seconds=0 deaktiviert den
+  Mechanismus, _cooldown_remaining_seconds() ohne vorherigen Trade,
+  record_trade() wirft nie.
+- tests/unit/test_orchestrator.py: bestehende Fixtures angepasst
+  (record_trade ist synchron wie build_order_request, AsyncMock
+  hätte einen ungeawaiteten Coroutine-Wert erzeugt), zwei neue
+  Assertions: record_trade() wird bei FILLED aufgerufen (mit
+  korrektem symbol_key/strategy_name), NICHT bei ORDER_NOT_FILLED.
+
+Full suite verified green: 1285 passed, 9 skipped, 0 failed.
+Coverage 94.12% -> 94.14% (risk/engine.py und orchestrator/engine.py
+beide 100%). ruff unchanged (22, pre-existing). mypy sgr/ unchanged
+(117, pre-existing).
+---
+ sgr/api/routers/risk.py         |   3 +
+ sgr/core/config.py              |   4 ++
+ sgr/orchestrator/engine.py      |   3 +
+ sgr/risk/engine.py              |  70 +++++++++++++++++++
+ tests/unit/test_orchestrator.py |  10 ++-
+ tests/unit/test_risk_engine.py  | 120 +++++++++++++++++++++++++++++++-
+ 6 files changed, 207 insertions(+), 3 deletions(-)
+
+diff --git a/sgr/api/routers/risk.py b/sgr/api/routers/risk.py
+index 2a3e855..20f6c70 100644
+--- a/sgr/api/routers/risk.py
++++ b/sgr/api/routers/risk.py
+@@ -99,6 +99,9 @@ async def get_limits(
+         "futures": {
+             "max_leverage": str(limits.max_leverage),
+         },
++        "trading_behavior": {
++            "trade_cooldown_seconds": limits.trade_cooldown_seconds,
++        },
+     }
+ 
+ 
+diff --git a/sgr/core/config.py b/sgr/core/config.py
+index 411e3e8..9dd2d67 100644
+--- a/sgr/core/config.py
++++ b/sgr/core/config.py
+@@ -98,6 +98,10 @@ class RiskLimitsConfig(BaseSettings):
+     min_hit_rate: float = Field(default=0.35)
+     strategy_evaluation_window_days: int = Field(default=30)
+ 
++    # Cooldown nach Trades (pro Symbol+Strategie), verhindert
++    # Overtrading/Signal-Flackern direkt nach einem ausgeführten Trade.
++    trade_cooldown_seconds: int = Field(default=300, ge=0, le=86400)
++
+ 
+ class ExchangeCredentials(BaseSettings):
+     """
+diff --git a/sgr/orchestrator/engine.py b/sgr/orchestrator/engine.py
+index 1ee5c62..21f33eb 100644
+--- a/sgr/orchestrator/engine.py
++++ b/sgr/orchestrator/engine.py
+@@ -236,6 +236,9 @@ class TradingOrchestrator:
+         #    NICHT über Event Bus, um Doppelverarbeitung/Race auszuschließen)
+         if order_result.status == OrderStatus.FILLED:
+             await self._portfolio_engine.on_order_filled(order_result)
++            # Cooldown-Tracking: erst jetzt ist sicher, dass ein Trade
++            # tatsächlich stattgefunden hat (APPROVED != FILLED).
++            self._risk_engine.record_trade(symbol_key, signal.strategy_name)
+             status = TradingCycleStatus.ORDER_FILLED
+         else:
+             status = TradingCycleStatus.ORDER_NOT_FILLED
+diff --git a/sgr/risk/engine.py b/sgr/risk/engine.py
+index 1678bd7..76d7ea2 100644
+--- a/sgr/risk/engine.py
++++ b/sgr/risk/engine.py
+@@ -98,6 +98,12 @@ class RiskEngine:
+         self._return_history: list[float] = []  # Rolling 30-day returns
+         self._initialized = False
+ 
++        # Cooldown-Tracking: letzter ausgeführter Trade pro "symbol|strategy"
++        # Key. In-Memory, wie der übrige Portfolio-State dieser Klasse -
++        # geht bei Neustart verloren (akzeptabler Trade-off, siehe
++        # record_trade()-Docstring für Details).
++        self._last_trade_at: dict[str, datetime] = {}
++
+     async def initialize(self) -> None:
+         """Initialisiert Engine mit aktuellem Portfolio-State."""
+         self._initialized = True
+@@ -177,6 +183,20 @@ class RiskEngine:
+                 portfolio_value,
+             )
+ 
++        # 1b. Cooldown Check (pro Symbol+Strategie, synchron, sofort).
++        # Verhindert Overtrading/Signal-Flackern direkt nach einem
++        # ausgeführten Trade. Getrennt vom Kill Switch: ein Cooldown ist
++        # eine normale, erwartete Ablehnung im Handelsalltag, kein
++        # Notfall-Zustand - daher kein Trigger des Kill Switch hier.
++        cooldown_remaining = self._cooldown_remaining_seconds(signal)
++        if cooldown_remaining > 0:
++            return self._reject(
++                signal.id,
++                f"Cooldown active: {cooldown_remaining:.0f}s remaining for "
++                f"{signal.symbol.ccxt_symbol}/{signal.strategy_name}",
++                portfolio_value,
++            )
++
+         # 2. Portfolio Metriken berechnen
+         metrics = self._compute_metrics(portfolio_value, open_positions)
+ 
+@@ -487,6 +507,56 @@ class RiskEngine:
+     # Helpers
+     # ------------------------------------------------------------------
+ 
++    def _cooldown_key(self, symbol_key: str, strategy_name: str) -> str:
++        return f"{symbol_key}|{strategy_name}"
++
++    def _cooldown_remaining_seconds(self, signal: Signal) -> float:
++        """
++        Gibt die verbleibende Cooldown-Zeit in Sekunden zurück (0.0 =
++        kein aktiver Cooldown). trade_cooldown_seconds == 0 deaktiviert
++        den Mechanismus vollständig (Default-Konfiguration erlaubt das
++        bewusst, z.B. für Backtesting/schnelle Strategien).
++        """
++        cooldown_seconds = self._limits.trade_cooldown_seconds
++        if cooldown_seconds <= 0:
++            return 0.0
++
++        key = self._cooldown_key(signal.symbol.ccxt_symbol, signal.strategy_name)
++        last_trade_at = self._last_trade_at.get(key)
++        if last_trade_at is None:
++            return 0.0
++
++        elapsed = (datetime.now(tz=UTC) - last_trade_at).total_seconds()
++        remaining = cooldown_seconds - elapsed
++        return max(0.0, remaining)
++
++    def record_trade(self, symbol_key: str, strategy_name: str) -> None:
++        """
++        Muss nach jedem tatsächlich ausgeführten Trade (OrderStatus.FILLED)
++        vom Aufrufer (TradingOrchestrator) aufgerufen werden, damit der
++        Cooldown für dieses Symbol+Strategie-Paar zu laufen beginnt.
++
++        Bewusst NICHT automatisch in evaluate()/build_order_request()
++        aufgerufen: RiskEngine kennt den tatsächlichen Order-Ausgang
++        nicht (APPROVED bedeutet nur "darf versucht werden", nicht
++        "wurde gefüllt") - nur der Orchestrator weiß nach
++        ExecutionEngine.execute(), ob wirklich ein Trade stattfand.
++
++        In-Memory, wie der übrige Portfolio-State dieser Klasse: geht
++        bei einem Neustart verloren. Akzeptabler Trade-off (wie bei
++        _peak_portfolio_value/_daily_pnl_start) - ein Neustart direkt
++        nach einem Trade ist ein Edge Case, und ein zu kurzer statt zu
++        langer Cooldown nach Neustart ist die sicherere Richtung als
++        das System unnötig zu verkomplizieren.
++        """
++        key = self._cooldown_key(symbol_key, strategy_name)
++        self._last_trade_at[key] = datetime.now(tz=UTC)
++        log.info(
++            "risk_engine.trade_recorded",
++            symbol_key=symbol_key,
++            strategy_name=strategy_name,
++        )
++
+     def _reject(
+         self,
+         signal_id: Any,
+diff --git a/tests/unit/test_orchestrator.py b/tests/unit/test_orchestrator.py
+index 58df212..6a275f8 100644
+--- a/tests/unit/test_orchestrator.py
++++ b/tests/unit/test_orchestrator.py
+@@ -153,9 +153,11 @@ class _Engines:
+     def __init__(self) -> None:
+         self.strategy_engine = AsyncMock()
+         self.risk_engine = AsyncMock()
+-        # build_order_request ist synchron im echten RiskEngine (kein I/O) -
+-        # AsyncMock würde hier einen ungeawaiteten Coroutine-Wert liefern.
++        # build_order_request und record_trade sind synchron im echten
++        # RiskEngine (kein I/O) - AsyncMock würde hier einen ungeawaiteten
++        # Coroutine-Wert liefern.
+         self.risk_engine.build_order_request = MagicMock()
++        self.risk_engine.record_trade = MagicMock()
+         self.execution_engine = AsyncMock()
+         self.portfolio_engine = AsyncMock()
+         self.portfolio_engine.positions = []
+@@ -248,6 +250,9 @@ async def test_happy_path_updates_portfolio_on_fill(
+     )
+     e.execution_engine.execute.assert_called_once_with(order_request)
+     e.portfolio_engine.on_order_filled.assert_called_once_with(order_result)
++    e.risk_engine.record_trade.assert_called_once_with(
++        "pionex:BTC/USDT", sample_signal.strategy_name
++    )
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -280,6 +285,7 @@ async def test_unfilled_order_does_not_update_portfolio(
+ 
+     assert result.status == TradingCycleStatus.ORDER_NOT_FILLED
+     e.portfolio_engine.on_order_filled.assert_not_called()
++    e.risk_engine.record_trade.assert_not_called()
+ 
+ 
+ # ---------------------------------------------------------------------------
+diff --git a/tests/unit/test_risk_engine.py b/tests/unit/test_risk_engine.py
+index 6a2e2b6..2894554 100644
+--- a/tests/unit/test_risk_engine.py
++++ b/tests/unit/test_risk_engine.py
+@@ -15,7 +15,7 @@ Teststrategie:
+ 
+ from __future__ import annotations
+ 
+-from datetime import UTC, datetime
++from datetime import UTC, datetime, timedelta
+ from decimal import Decimal
+ from typing import TYPE_CHECKING
+ 
+@@ -808,6 +808,124 @@ class TestLeverageGuard:
+         assert metrics.gross_leverage == 0.0
+ 
+ 
++# ---------------------------------------------------------------------------
++# Trade Cooldown (pro Symbol+Strategie)
++# ---------------------------------------------------------------------------
++
++
++class TestTradeCooldown:
++    """
++    trade_cooldown_seconds war im Auftrag explizit gefordert ("Cooldown
++    nach Trades") aber fehlte komplett - keine Konfiguration, kein Check.
++    Diese Tests decken den neu hinzugefügten Mechanismus ab.
++    """
++
++    async def test_no_cooldown_before_any_trade_recorded(
++        self, risk_engine: RiskEngine, sample_signal: Signal
++    ) -> None:
++        await risk_engine.initialize()
++
++        assessment = await risk_engine.evaluate(
++            signal=sample_signal,
++            open_positions=[],
++            portfolio_value=Decimal("10000"),
++            available_capital=Decimal("10000"),
++            current_price=Decimal("50000"),
++        )
++
++        assert assessment.decision != RiskDecision.REJECTED
++
++    async def test_signal_rejected_immediately_after_recorded_trade(
++        self, risk_engine: RiskEngine, sample_signal: Signal
++    ) -> None:
++        await risk_engine.initialize()
++        risk_engine.record_trade(sample_signal.symbol.ccxt_symbol, sample_signal.strategy_name)
++
++        assessment = await risk_engine.evaluate(
++            signal=sample_signal,
++            open_positions=[],
++            portfolio_value=Decimal("10000"),
++            available_capital=Decimal("10000"),
++            current_price=Decimal("50000"),
++        )
++
++        assert assessment.decision == RiskDecision.REJECTED
++        assert "cooldown" in (assessment.rejection_reason or "").lower()
++
++    async def test_cooldown_is_per_symbol_strategy_pair(
++        self, risk_engine: RiskEngine, sample_signal: Signal, btc_symbol: Symbol
++    ) -> None:
++        await risk_engine.initialize()
++        risk_engine.record_trade(sample_signal.symbol.ccxt_symbol, sample_signal.strategy_name)
++
++        # Different strategy on the same symbol - not affected by the cooldown.
++        other_strategy_signal = Signal(
++            timestamp=datetime.now(tz=UTC),
++            strategy_name="mean_reversion_v1",
++            symbol=btc_symbol,
++            direction=SignalDirection.LONG,
++            confidence=0.8,
++            regime=MarketRegime.RANGING,
++        )
++
++        assessment = await risk_engine.evaluate(
++            signal=other_strategy_signal,
++            open_positions=[],
++            portfolio_value=Decimal("10000"),
++            available_capital=Decimal("10000"),
++            current_price=Decimal("50000"),
++        )
++
++        assert assessment.decision != RiskDecision.REJECTED
++
++    async def test_cooldown_expires_after_configured_duration(
++        self, risk_engine: RiskEngine, sample_signal: Signal
++    ) -> None:
++        await risk_engine.initialize()
++        key = risk_engine._cooldown_key(
++            sample_signal.symbol.ccxt_symbol, sample_signal.strategy_name
++        )
++        # Simulate a trade recorded further in the past than the cooldown window.
++        risk_engine._last_trade_at[key] = datetime.now(tz=UTC) - timedelta(
++            seconds=risk_engine._limits.trade_cooldown_seconds + 1
++        )
++
++        assessment = await risk_engine.evaluate(
++            signal=sample_signal,
++            open_positions=[],
++            portfolio_value=Decimal("10000"),
++            available_capital=Decimal("10000"),
++            current_price=Decimal("50000"),
++        )
++
++        assert assessment.decision != RiskDecision.REJECTED
++
++    async def test_cooldown_disabled_when_zero(
++        self, risk_engine: RiskEngine, sample_signal: Signal
++    ) -> None:
++        await risk_engine.initialize()
++        risk_engine._limits.trade_cooldown_seconds = 0
++        risk_engine.record_trade(sample_signal.symbol.ccxt_symbol, sample_signal.strategy_name)
++
++        assessment = await risk_engine.evaluate(
++            signal=sample_signal,
++            open_positions=[],
++            portfolio_value=Decimal("10000"),
++            available_capital=Decimal("10000"),
++            current_price=Decimal("50000"),
++        )
++
++        assert assessment.decision != RiskDecision.REJECTED
++
++    def test_cooldown_remaining_seconds_zero_when_never_traded(
++        self, risk_engine: RiskEngine, sample_signal: Signal
++    ) -> None:
++        assert risk_engine._cooldown_remaining_seconds(sample_signal) == 0.0
++
++    def test_record_trade_does_not_raise(self, risk_engine: RiskEngine) -> None:
++        risk_engine.record_trade("BTC/USDT", "trend_v1")  # Should not raise.
++
++
+ # ---------------------------------------------------------------------------
+ # Risk Engine – Coverage-Lücken (deterministisch, kein Coverage-Theater)
+ # ---------------------------------------------------------------------------
+-- 
+2.43.0
+

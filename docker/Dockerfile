@@ -36,5 +36,8 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
+# CRITICAL: MarketDataEngine and TradingOrchestrator run in lifespan.
+# Multiple workers = multiple market subscriptions + duplicate trading cycles.
+# Until API and worker are physically separated: --workers 1 only.
 CMD ["uvicorn", "sgr.api.main:app", "--host", "0.0.0.0", "--port", "8000", \
-     "--workers", "2", "--no-access-log"]
+     "--workers", "1", "--no-access-log"]

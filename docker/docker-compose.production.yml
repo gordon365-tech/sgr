@@ -1,0 +1,271 @@
+version: "3.9"
+
+# Project SGR – Production Stack
+# Services: PostgreSQL, Redis, SGR API, Prometheus, Grafana
+# Passwords: MUST be provided via environment variables (secrets)
+# Internal networking: PostgreSQL + Redis NOT exposed externally
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL/TimescaleDB (Internal Only)
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: sgr-postgres-prod
+    environment:
+      POSTGRES_USER: ${DB_USER:-sgr}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}  # REQUIRED: Set via env var
+      POSTGRES_DB: ${DB_NAME:-sgr}
+      POSTGRES_INITDB_ARGS: "-c max_connections=200"
+    # Internal only - NO port exposure
+    volumes:
+      - pgdata_prod:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-sgr}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: always
+    networks:
+      - sgr-internal
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # Redis (Internal Only)
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7.2-alpine
+    container_name: sgr-redis-prod
+    command: >
+      redis-server
+      --maxmemory ${REDIS_MAXMEMORY:-1gb}
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+      --appendfsync everysec
+      --save 900 1
+      --save 300 10
+    # Internal only - NO port exposure
+    volumes:
+      - redisdata_prod:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: always
+    networks:
+      - sgr-internal
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # SGR API (Production)
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        - BUILDKIT_INLINE_CACHE=1
+    image: sgr-api:prod
+    container_name: sgr-api-prod
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      # Database
+      DB_HOST: postgres
+      DB_USER: ${DB_USER:-sgr}
+      DB_PASSWORD: ${DB_PASSWORD}  # REQUIRED
+      DB_NAME: ${DB_NAME:-sgr}
+      DB_PORT: 5432
+      
+      # Redis
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      
+      # Application
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      TRADING_MODE: ${TRADING_MODE:-paper}
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      
+      # Exchange credentials (only if trading LIVE)
+      PIONEX_LIVE_API_KEY: ${PIONEX_LIVE_API_KEY:-}
+      PIONEX_LIVE_SECRET: ${PIONEX_LIVE_SECRET:-}
+      
+      # Observability
+      PROMETHEUS_ENABLED: "true"
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      
+      # App
+      VERSION: ${VERSION:-0.1.0}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/live"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    restart: always
+    networks:
+      - sgr-internal
+      - sgr-public
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+        labels: "service=sgr-api"
+
+  # ---------------------------------------------------------------------------
+  # Prometheus (Metrics Collection)
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: sgr-prometheus-prod
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheusdata_prod:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-30d}"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+    restart: always
+    networks:
+      - sgr-internal
+      - sgr-public
+    depends_on:
+      - api
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # Grafana (Dashboards)
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: sgr-grafana-prod
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}  # REQUIRED
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_INSTALL_PLUGINS: "redis-datasource,graph-panel"
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+    volumes:
+      - grafanadata_prod:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    restart: always
+    networks:
+      - sgr-internal
+      - sgr-public
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # Frontend (if applicable)
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_API_URL=http://${API_DOMAIN:-localhost}:${API_PORT:-8000}
+    image: sgr-frontend:prod
+    container_name: sgr-frontend-prod
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    environment:
+      NEXT_PUBLIC_WS_URL: wss://${API_DOMAIN:-localhost}/ws
+      NODE_ENV: production
+    depends_on:
+      - api
+    restart: always
+    networks:
+      - sgr-public
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# ---------------------------------------------------------------------------
+# Networks
+# ---------------------------------------------------------------------------
+networks:
+  # Internal: PostgreSQL, Redis, API (no external access)
+  sgr-internal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+  # Public: API, Prometheus, Grafana, Frontend (external facing)
+  sgr-public:
+    driver: bridge
+
+# ---------------------------------------------------------------------------
+# Volumes
+# ---------------------------------------------------------------------------
+volumes:
+  pgdata_prod:
+    driver: local
+  redisdata_prod:
+    driver: local
+  prometheusdata_prod:
+    driver: local
+  grafanadata_prod:
+    driver: local

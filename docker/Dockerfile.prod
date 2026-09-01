@@ -1,0 +1,114 @@
+# Production Build für SGR API / Worker
+# Multi-stage Build: Builder -> Runtime
+# 
+# Features:
+# - Minimal runtime image
+# - Non-root user
+# - Health checks
+# - Proper signal handling
+# - No build tools in runtime
+# - Reproducible builds
+
+FROM python:3.11-slim as builder
+
+WORKDIR /build
+
+# Install build dependencies only in builder stage
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    gcc \
+    libpq-dev \
+    libffi-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install pip and build tools
+RUN pip install --no-cache-dir \
+    pip==24.0 \
+    hatchling \
+    wheel
+
+# Copy pyproject.toml for dependency resolution
+COPY pyproject.toml ./
+
+# Install dependencies with ML support for flexibility
+# Production kann via ENV var auf subsets beschraenkt werden
+RUN pip install --no-cache-dir \
+    --prefix=/install \
+    ".[ml]"
+
+# Install project itself
+COPY . .
+RUN pip install --no-cache-dir \
+    --prefix=/install \
+    -e .
+
+# ============================================================================
+# Runtime image (minimal)
+# ============================================================================
+
+FROM python:3.11-slim
+
+LABEL maintainer="SGR Team"
+LABEL version="0.1.0"
+LABEL description="SGR Trading System - Production Runtime"
+
+WORKDIR /app
+
+# Install only runtime dependencies (no build tools)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    libpq5 \
+    curl \
+    tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy Python dependencies from builder
+COPY --from=builder /install /usr/local
+
+# Copy application code from builder
+COPY --from=builder /build/sgr ./sgr
+COPY --from=builder /build/alembic ./alembic
+COPY --from=builder /build/alembic.ini ./alembic.ini
+
+# Create non-root user
+RUN useradd -m -u 1000 -s /sbin/nologin sgr && \
+    chown -R sgr:sgr /app
+
+# Switch to non-root user
+USER sgr
+
+# Expose API port
+EXPOSE 8000
+
+# ============================================================================
+# Signal Handling & Graceful Shutdown
+# ============================================================================
+# 
+# Tini wird als init process verwendet:
+# - Kümmert sich um Signalweiterleitung (SIGTERM -> Process)
+# - Reaps zombie processes korrekt
+# - Ermöglicht graceful shutdown von Uvicorn/Application
+#
+# PYTHONUNBUFFERED=1 stellt sicher, dass Logs sofort angezeigt werden
+# (wichtig für Docker logging)
+#
+# PYTHONDONTWRITEBYTECODE=1 verhindert .pyc Generierung (unnötig in Container)
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONHASHSEED=random
+
+# Health check - einfacher Liveness Probe
+# Production sollte zusätzlich Readiness/Trading Probes verwenden (via API Endpoints)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8000/health/live || exit 1
+
+# Tini als PID 1 zur korrekten Signalbehandlung
+ENTRYPOINT ["/usr/bin/tini", "--"]
+
+# CMD kann von docker run überschrieben werden (z.B. für Worker vs API)
+CMD ["uvicorn", "sgr.api.main:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8000", \
+     "--workers", "2", \
+     "--no-access-log"]

@@ -1,0 +1,610 @@
+From c368376f605f9d1301bb3758f44b17dd5967185d Mon Sep 17 00:00:00 2001
+From: "Claude (SGR dev session)" <claude@sgr-dev.local>
+Date: Mon, 31 Aug 2026 08:28:44 +0000
+Subject: [PATCH] feat(risk): add extended Startup Safety Checks (Phase 2 -
+ live trading safety, Baustein 5)
+
+- Add sgr/core/startup_checks.py: StartupSafetyChecker, run fail-fast
+  before any connection (DB, Redis, Exchange) is established. Distinct
+  from SGRConfig.validate_production_constraints() (secret/debug defaults
+  at config-load time) and the per-request confirm_live guard in
+  api/routers/trading.py (protects the manual trading-cycle endpoint) -
+  this protects the boot itself, unconditionally.
+  Checks:
+    - kill_switch_not_preactivated (all modes): kill switch for the
+      active trading mode must not already be triggered at boot.
+    - live_credentials_present (LIVE only): reuses the existing, already
+      tested ExchangeCredentials.get_credentials() validation, fails
+      early instead of at first exchange connect attempt.
+    - risk_limits_not_disabled (LIVE only): max_portfolio_drawdown and
+      daily_loss_limit must not sit at the permissive ceiling of their
+      allowed Pydantic range.
+    - max_leverage_sane (LIVE only): max_leverage must not exceed a sane
+      10x ceiling, which would make the Baustein-2 Leverage Guard
+      practically useless.
+    - max_order_notional_sane (LIVE only): max_order_notional (Baustein 4)
+      must not be disabled (None) in LIVE mode.
+  run() collects all check results (does not stop at first failure) so a
+  misconfiguration surfaces completely in a single StartupSafetyError.
+- Wire into sgr/api/main.py lifespan as new step 1a, immediately after
+  logging setup and before observability/DB/exchange init.
+- tests/api/test_main.py: patch StartupSafetyChecker.run_or_raise as a
+  no-op in _patch_lifespan_dependencies, since those tests use a
+  MagicMock config (not a real SGRConfig) and exist to cover lifespan
+  infrastructure wiring, not safety-check logic (which has its own
+  dedicated test file).
+- New tests/unit/test_startup_checks.py: 23 tests covering every check
+  individually plus run_or_raise() integration behavior (exception type,
+  multi-failure aggregation, PAPER mode skipping LIVE-only checks).
+- Full suite verified green: 1316 passed (was 1293), 9 skipped, 0 failed.
+  Coverage 94.15% -> 94.21%. sgr/core/startup_checks.py: 100%.
+  sgr/api/main.py: 100% (unchanged). ruff unchanged (22, pre-existing).
+  mypy unchanged in sgr/ (117, pre-existing) - the 24 errors mypy reports
+  when checking startup_checks.py in isolation are all pre-existing
+  findings in transitively imported modules (ccxt_base.py, event_bus.py,
+  var_calculator.py, etc.), none originate in startup_checks.py itself.
+---
+ sgr/api/main.py                   |  14 ++
+ sgr/core/startup_checks.py        | 262 ++++++++++++++++++++++++++++++
+ tests/api/test_main.py            |   7 +
+ tests/unit/test_startup_checks.py | 229 ++++++++++++++++++++++++++
+ 4 files changed, 512 insertions(+)
+ create mode 100644 sgr/core/startup_checks.py
+ create mode 100644 tests/unit/test_startup_checks.py
+
+diff --git a/sgr/api/main.py b/sgr/api/main.py
+index 4230759..387ce8c 100644
+--- a/sgr/api/main.py
++++ b/sgr/api/main.py
+@@ -5,6 +5,7 @@ Haupteinstiegspunkt der REST + WebSocket API.
+ 
+ Startup-Sequenz (via lifespan):
+     1. Config validieren
++    1a. Startup Safety Checks (fail-fast, siehe core/startup_checks.py)
+     2. Logging initialisieren
+     3. DB + Redis verbinden
+     4. Exchange Pool initialisieren
+@@ -97,6 +98,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+         trading_mode=config.trading_mode.value,
+     )
+ 
++    # 1a. Startup Safety Checks
++    # Laufen bewusst VOR jeder Verbindung (DB, Redis, Exchange) und VOR
++    # Observability-Setup. Fail-Fast: eine unsichere LIVE-Konfiguration
++    # (fehlende Credentials, deaktivierte Fat-Finger-Caps, zu lasche Hard
++    # Limits, bereits aktiver Kill Switch) darf den Server nicht mit
++    # scheinbar funktionierenden, aber ungeschützten Trading-Pfaden
++    # hochfahren lassen. Anders als Crash Recovery (Schritt 8d, fail-safe)
++    # ist dieser Schritt absichtlich fail-fast - siehe
++    # sgr/core/startup_checks.py Modul-Docstring.
++    from sgr.core.startup_checks import StartupSafetyChecker
++
++    StartupSafetyChecker(config).run_or_raise()
++
+     # 1b. Observability (OpenTelemetry Metrics + Auto-Instrumentation)
+     # Wurde zuvor nirgends aufgerufen (deferred finding: monitoring/
+     # observability.py war reiner Dead Code, 0% Coverage). Jetzt verdrahtet:
+diff --git a/sgr/core/startup_checks.py b/sgr/core/startup_checks.py
+new file mode 100644
+index 0000000..2cd1d07
+--- /dev/null
++++ b/sgr/core/startup_checks.py
+@@ -0,0 +1,262 @@
++"""
++SGR Startup Safety Checks
++=========================
++Fail-fast Prüfungen, die unmittelbar nach dem Logging-Setup laufen, bevor
++irgendeine Verbindung (DB, Redis, Exchange) aufgebaut wird.
++
++Ziel: Live Trading darf niemals durch eine unvollständige, inkonsistente
++oder versehentliche Konfiguration starten. Ein Fehler hier verhindert den
++kompletten Boot (raise StartupSafetyError), statt den Server mit einer
++unsicheren Konfiguration laufen zu lassen.
++
++Abgrenzung zu bestehenden Mechanismen:
++    - SGRConfig.validate_production_constraints() prüft bereits Secret-
++      Defaults und Debug-Flag bei PRODUCTION+LIVE (Pydantic-Validator,
++      läuft implizit beim Config-Load). Diese Checks hier laufen
++      zusätzlich, explizit im Lifespan, und decken andere Aspekte ab:
++      Exchange-Credentials-Vollständigkeit, Kill-Switch-Ausgangszustand,
++      Risk-Limit-Plausibilität. Kein Duplikat, keine Überschneidung.
++    - Der confirm_live-Schutz in api/routers/trading.py schützt den
++      manuellen Trading-Cycle-Endpoint pro Request. Diese Checks hier
++      schützen den Boot selbst - unabhängig davon, ob je ein Request
++      gestellt wird.
++
++Designentscheidung: Fail-Fast statt Fail-Safe
++    Anders als z.B. Crash Recovery (fail-safe: unvollständige Recovery
++    ist besser als kein Server) sind Startup Safety Checks bewusst
++    fail-fast: eine unsichere Live-Konfiguration darf den Server gar
++    nicht erst starten lassen. Ein nicht hochfahrender Server ist immer
++    sicherer als ein Server, der mit deaktivierten Schutzmechanismen
++    Live-Trades ausführt.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass, field
++from decimal import Decimal
++
++from sgr.core.config import SGRConfig
++from sgr.core.logging import get_logger
++from sgr.core.types import ExchangeID, TradingMode
++from sgr.risk.kill_switch import get_kill_switch
++
++log = get_logger(__name__)
++
++
++class StartupSafetyError(RuntimeError):
++    """
++    Wird geworfen, wenn eine kritische Startup-Bedingung verletzt ist.
++    Muss den Boot-Prozess stoppen - niemals abfangen und ignorieren.
++    """
++
++
++@dataclass
++class StartupCheckResult:
++    """Ergebnis eines einzelnen Checks (für Logging/Audit)."""
++
++    name: str
++    passed: bool
++    detail: str
++
++
++@dataclass
++class StartupSafetyReport:
++    """Gesamtergebnis aller Startup Safety Checks."""
++
++    trading_mode: TradingMode
++    checks: list[StartupCheckResult] = field(default_factory=list)
++
++    @property
++    def all_passed(self) -> bool:
++        return all(c.passed for c in self.checks)
++
++    @property
++    def failures(self) -> list[StartupCheckResult]:
++        return [c for c in self.checks if not c.passed]
++
++
++class StartupSafetyChecker:
++    """
++    Führt alle Startup Safety Checks gegen die geladene Config aus.
++
++    Usage:
++        checker = StartupSafetyChecker(config)
++        report = checker.run()
++        if not report.all_passed:
++            raise StartupSafetyError(...)  # wird von run_or_raise() erledigt
++    """
++
++    def __init__(self, config: SGRConfig) -> None:
++        self._config = config
++
++    def run(self) -> StartupSafetyReport:
++        """Führt alle Checks aus, unabhängig vom Ergebnis einzelner Checks
++        (damit ein vollständiger Report entsteht statt beim ersten Fehler
++        abzubrechen - besser für Debugging einer fehlgeschlagenen Config)."""
++        report = StartupSafetyReport(trading_mode=self._config.trading_mode)
++
++        report.checks.append(self._check_kill_switch_not_preactivated())
++
++        if self._config.trading_mode == TradingMode.LIVE:
++            report.checks.append(self._check_live_credentials_present())
++            report.checks.append(self._check_risk_limits_not_disabled())
++            report.checks.append(self._check_max_leverage_sane())
++            report.checks.append(self._check_max_order_notional_sane())
++
++        return report
++
++    def run_or_raise(self) -> StartupSafetyReport:
++        """Führt run() aus und wirft StartupSafetyError bei Fehlern.
++        Loggt jeden einzelnen Check (Audit-Trail für Boot-Entscheidungen)."""
++        report = self.run()
++
++        for check in report.checks:
++            log_fn = log.info if check.passed else log.error
++            log_fn(
++                "sgr.startup_check",
++                name=check.name,
++                passed=check.passed,
++                detail=check.detail,
++                trading_mode=report.trading_mode.value,
++            )
++
++        if not report.all_passed:
++            reasons = "; ".join(f"{c.name}: {c.detail}" for c in report.failures)
++            raise StartupSafetyError(
++                f"Startup safety checks failed ({len(report.failures)} of "
++                f"{len(report.checks)}): {reasons}"
++            )
++
++        log.info(
++            "sgr.startup_checks_passed",
++            count=len(report.checks),
++            trading_mode=report.trading_mode.value,
++        )
++        return report
++
++    # ------------------------------------------------------------------
++    # Individual checks
++    # ------------------------------------------------------------------
++
++    def _check_kill_switch_not_preactivated(self) -> StartupCheckResult:
++        """
++        Der Kill Switch für den aktiven Trading Mode darf beim Boot nicht
++        bereits ausgelöst sein. Das wäre nur bei einem In-Memory-State aus
++        einem vorherigen Import in derselben Prozesslaufzeit möglich (z.B.
++        Test-Leck oder Reimport) - aber genau deshalb explizit geprüft:
++        ein stiller, unbemerkter "getriggerter" Zustand beim Start wäre
++        verwirrend und würde jeden Trade sofort ablehnen, ohne dass der
++        Betreiber merkt warum.
++        """
++        kill_switch = get_kill_switch(self._config.trading_mode)
++        if kill_switch.is_active:
++            return StartupCheckResult(
++                name="kill_switch_not_preactivated",
++                passed=False,
++                detail=(
++                    f"Kill switch for {self._config.trading_mode.value} is "
++                    "already active at startup - refusing to boot with a "
++                    "silently disabled trading path"
++                ),
++            )
++        return StartupCheckResult(
++            name="kill_switch_not_preactivated",
++            passed=True,
++            detail="Kill switch inactive",
++        )
++
++    def _check_live_credentials_present(self) -> StartupCheckResult:
++        """
++        LIVE Mode: Pionex-Live-Credentials müssen vollständig konfiguriert
++        sein. Nutzt die bestehende, bereits getestete
++        ExchangeCredentials.get_credentials()-Validierung wieder, statt sie
++        zu duplizieren - schlägt hier früh und explizit fehl statt erst
++        beim ersten Exchange-Connect-Versuch mitten im Boot.
++        """
++        try:
++            self._config.credentials.get_credentials(
++                ExchangeID.PIONEX.value, TradingMode.LIVE
++            )
++        except ValueError as e:
++            return StartupCheckResult(
++                name="live_credentials_present",
++                passed=False,
++                detail=str(e),
++            )
++        return StartupCheckResult(
++            name="live_credentials_present",
++            passed=True,
++            detail="Pionex live credentials configured",
++        )
++
++    def _check_risk_limits_not_disabled(self) -> StartupCheckResult:
++        """
++        LIVE Mode: die wichtigsten Hard Limits dürfen nicht auf einen Wert
++        stehen, der sie faktisch wirkungslos macht. RiskLimitsConfig
++        erzwingt bereits sinnvolle Wertebereiche per Pydantic Field(ge=,
++        le=), diese Prüfung schützt zusätzlich davor, dass jemand die
++        Limits absichtlich oder versehentlich an den oberen Rand des
++        erlaubten Bereichs setzt und damit Live Trading faktisch
++        ungebremst laufen lässt.
++        """
++        limits = self._config.risk_limits
++        problems: list[str] = []
++
++        if limits.max_portfolio_drawdown >= 0.50:
++            problems.append(
++                f"max_portfolio_drawdown={limits.max_portfolio_drawdown:.0%} too permissive"
++            )
++        if limits.daily_loss_limit >= 0.20:
++            problems.append(f"daily_loss_limit={limits.daily_loss_limit:.0%} too permissive")
++
++        if problems:
++            return StartupCheckResult(
++                name="risk_limits_not_disabled",
++                passed=False,
++                detail="; ".join(problems),
++            )
++        return StartupCheckResult(
++            name="risk_limits_not_disabled",
++            passed=True,
++            detail="Hard limits within sane bounds",
++        )
++
++    def _check_max_leverage_sane(self) -> StartupCheckResult:
++        """LIVE Mode: max_leverage darf keinen absurd hohen Wert haben, der
++        den in Baustein 2 hinzugefügten Leverage Guard faktisch nutzlos
++        macht."""
++        max_leverage = self._config.risk_limits.max_leverage
++        if max_leverage > Decimal("10"):
++            return StartupCheckResult(
++                name="max_leverage_sane",
++                passed=False,
++                detail=f"max_leverage={max_leverage} exceeds sane ceiling of 10x for live trading",
++            )
++        return StartupCheckResult(
++            name="max_leverage_sane",
++            passed=True,
++            detail=f"max_leverage={max_leverage} within sane bounds",
++        )
++
++    def _check_max_order_notional_sane(self) -> StartupCheckResult:
++        """
++        LIVE Mode: max_order_notional (Baustein 4) sollte in LIVE nicht
++        deaktiviert (None) sein - ein fehlender absoluter Order-Size-Cap
++        wäre in Live Trading ein direkter Fat-Finger-Schutz weniger, ohne
++        dass der Betreiber es beim Start bemerken würde.
++        """
++        max_order_notional = self._config.risk_limits.max_order_notional
++        if max_order_notional is None:
++            return StartupCheckResult(
++                name="max_order_notional_sane",
++                passed=False,
++                detail=(
++                    "max_order_notional is disabled (None) in LIVE mode - "
++                    "no absolute per-order fat-finger protection configured"
++                ),
++            )
++        return StartupCheckResult(
++            name="max_order_notional_sane",
++            passed=True,
++            detail=f"max_order_notional={max_order_notional} configured",
++        )
+diff --git a/tests/api/test_main.py b/tests/api/test_main.py
+index 8bb26bd..b0cd812 100644
+--- a/tests/api/test_main.py
++++ b/tests/api/test_main.py
+@@ -217,6 +217,13 @@ def _patch_lifespan_dependencies(paper_mode: bool = True, has_adapters: bool = T
+         ),
+         patch("sgr.core.resilience.RecoveryManager", return_value=recovery_manager),
+         patch("sgr.market_data.engine.MarketDataEngine", return_value=md_engine),
++        # StartupSafetyChecker erwartet ein echtes SGRConfig-Objekt (reale
++        # Decimal/float-Vergleiche), nicht den hier verwendeten MagicMock.
++        # Diese Tests decken die Lifespan-Infrastruktur-Verdrahtung ab, nicht
++        # die Safety-Check-Logik selbst (siehe dediziert
++        # tests/unit/test_startup_checks.py) - daher hier bewusst als
++        # No-Op gepatcht.
++        patch("sgr.core.startup_checks.StartupSafetyChecker.run_or_raise", return_value=None),
+     ]
+ 
+     return patchers, mocks
+diff --git a/tests/unit/test_startup_checks.py b/tests/unit/test_startup_checks.py
+new file mode 100644
+index 0000000..486195a
+--- /dev/null
++++ b/tests/unit/test_startup_checks.py
+@@ -0,0 +1,229 @@
++"""
++Tests für sgr.core.startup_checks.StartupSafetyChecker.
++
++Baustein 5 (Phase 2 - Live Trading Safety Mechanisms): erweiterte Startup
++Safety Checks. Vorher lief keinerlei explizite Fail-Fast-Prüfung vor dem
++Boot - eine unsichere LIVE-Konfiguration (fehlende Credentials, deaktivierte
++Fat-Finger-Caps, zu lasche Hard Limits, bereits aktiver Kill Switch) hätte
++den Server scheinbar erfolgreich hochfahren lassen.
++
++Teststrategie: jeder Check einzeln (unit-level über StartupSafetyChecker
++direkt), plus Integration über run_or_raise() (Gesamtverhalten inkl.
++Exception-Typ und Report-Struktur).
++"""
++
++from __future__ import annotations
++
++from decimal import Decimal
++
++import pytest
++from pydantic import SecretStr
++
++from sgr.core.config import ExchangeCredentials, RiskLimitsConfig, SGRConfig
++from sgr.core.startup_checks import StartupSafetyChecker, StartupSafetyError
++from sgr.core.types import TradingMode
++from sgr.risk.kill_switch import get_kill_switch
++
++
++def _live_config(**risk_overrides: object) -> SGRConfig:
++    """Baut eine LIVE-Config mit vollständigen Credentials und optional
++    überschriebenen Risk Limits."""
++    return SGRConfig(
++        trading_mode=TradingMode.LIVE,
++        risk_limits=RiskLimitsConfig(**risk_overrides),  # type: ignore[arg-type]
++        credentials=ExchangeCredentials(
++            pionex_live_api_key=SecretStr("real_key"),
++            pionex_live_secret=SecretStr("real_secret"),
++        ),
++    )
++
++
++@pytest.fixture(autouse=True)
++def _reset_kill_switches() -> None:
++    """Kill Switches sind Prozess-weite Singletons (get_kill_switch).
++    Zustand vor und nach jedem Test zurücksetzen, damit Tests sich nicht
++    gegenseitig beeinflussen (analog zum StrategyRegistry-Isolationsmuster,
++    das in einer früheren Session als Bug dokumentiert wurde)."""
++    for mode in (TradingMode.PAPER, TradingMode.LIVE):
++        ks = get_kill_switch(mode)
++        ks._state.is_active = False
++    yield
++    for mode in (TradingMode.PAPER, TradingMode.LIVE):
++        ks = get_kill_switch(mode)
++        ks._state.is_active = False
++
++
++class TestKillSwitchNotPreactivated:
++    def test_passes_when_inactive(self) -> None:
++        config = SGRConfig(trading_mode=TradingMode.PAPER)
++        result = StartupSafetyChecker(config)._check_kill_switch_not_preactivated()
++        assert result.passed is True
++
++    def test_fails_when_already_active(self) -> None:
++        config = SGRConfig(trading_mode=TradingMode.PAPER)
++        get_kill_switch(TradingMode.PAPER)._state.is_active = True
++
++        result = StartupSafetyChecker(config)._check_kill_switch_not_preactivated()
++        assert result.passed is False
++        assert "already active" in result.detail
++
++    def test_checked_regardless_of_trading_mode(self) -> None:
++        """Dieser Check läuft auch in PAPER Mode - ein bereits aktiver Kill
++        Switch beim Boot ist immer verwirrend, unabhängig vom Modus."""
++        config = SGRConfig(trading_mode=TradingMode.PAPER)
++        report = StartupSafetyChecker(config).run()
++        names = [c.name for c in report.checks]
++        assert "kill_switch_not_preactivated" in names
++
++
++class TestLiveCredentialsPresent:
++    def test_passes_with_full_credentials(self) -> None:
++        config = _live_config()
++        result = StartupSafetyChecker(config)._check_live_credentials_present()
++        assert result.passed is True
++
++    def test_fails_without_credentials(self) -> None:
++        config = SGRConfig(
++            trading_mode=TradingMode.LIVE,
++            credentials=ExchangeCredentials(),
++        )
++        result = StartupSafetyChecker(config)._check_live_credentials_present()
++        assert result.passed is False
++        assert "not configured" in result.detail.lower()
++
++    def test_not_run_in_paper_mode(self) -> None:
++        """PAPER Mode benötigt keine Live-Credentials - dieser Check darf
++        dort gar nicht erst ausgeführt werden."""
++        config = SGRConfig(
++            trading_mode=TradingMode.PAPER,
++            credentials=ExchangeCredentials(),
++        )
++        report = StartupSafetyChecker(config).run()
++        names = [c.name for c in report.checks]
++        assert "live_credentials_present" not in names
++
++
++class TestRiskLimitsNotDisabled:
++    def test_passes_with_default_limits(self) -> None:
++        config = _live_config()
++        result = StartupSafetyChecker(config)._check_risk_limits_not_disabled()
++        assert result.passed is True
++
++    def test_fails_when_drawdown_at_ceiling(self) -> None:
++        config = _live_config(max_portfolio_drawdown=0.50)
++        result = StartupSafetyChecker(config)._check_risk_limits_not_disabled()
++        assert result.passed is False
++        assert "max_portfolio_drawdown" in result.detail
++
++    def test_fails_when_daily_loss_limit_at_ceiling(self) -> None:
++        config = _live_config(daily_loss_limit=0.20)
++        result = StartupSafetyChecker(config)._check_risk_limits_not_disabled()
++        assert result.passed is False
++        assert "daily_loss_limit" in result.detail
++
++    def test_reports_multiple_problems_together(self) -> None:
++        config = _live_config(max_portfolio_drawdown=0.50, daily_loss_limit=0.20)
++        result = StartupSafetyChecker(config)._check_risk_limits_not_disabled()
++        assert result.passed is False
++        assert "max_portfolio_drawdown" in result.detail
++        assert "daily_loss_limit" in result.detail
++
++
++class TestMaxLeverageSane:
++    def test_passes_within_bounds(self) -> None:
++        config = _live_config(max_leverage=Decimal("3.0"))
++        result = StartupSafetyChecker(config)._check_max_leverage_sane()
++        assert result.passed is True
++
++    def test_fails_above_ceiling(self) -> None:
++        config = _live_config(max_leverage=Decimal("20.0"))
++        result = StartupSafetyChecker(config)._check_max_leverage_sane()
++        assert result.passed is False
++        assert "max_leverage" in result.detail
++
++    def test_boundary_exactly_ten_passes(self) -> None:
++        """max_leverage == 10 ist noch erlaubt (Grenze ist > 10, nicht >=)."""
++        config = _live_config(max_leverage=Decimal("10.0"))
++        result = StartupSafetyChecker(config)._check_max_leverage_sane()
++        assert result.passed is True
++
++
++class TestMaxOrderNotionalSane:
++    def test_passes_when_configured(self) -> None:
++        config = _live_config(max_order_notional=Decimal("10000"))
++        result = StartupSafetyChecker(config)._check_max_order_notional_sane()
++        assert result.passed is True
++
++    def test_fails_when_disabled(self) -> None:
++        config = _live_config(max_order_notional=None)
++        result = StartupSafetyChecker(config)._check_max_order_notional_sane()
++        assert result.passed is False
++        assert "disabled" in result.detail.lower()
++
++    def test_not_run_in_paper_mode(self) -> None:
++        config = SGRConfig(
++            trading_mode=TradingMode.PAPER,
++            risk_limits=RiskLimitsConfig(max_order_notional=None),
++        )
++        report = StartupSafetyChecker(config).run()
++        names = [c.name for c in report.checks]
++        assert "max_order_notional_sane" not in names
++
++
++class TestRunOrRaise:
++    def test_paper_mode_all_pass_by_default(self) -> None:
++        config = SGRConfig(trading_mode=TradingMode.PAPER)
++        report = StartupSafetyChecker(config).run_or_raise()
++        assert report.all_passed is True
++
++    def test_live_mode_all_pass_with_sane_config(self) -> None:
++        config = _live_config()
++        report = StartupSafetyChecker(config).run_or_raise()
++        assert report.all_passed is True
++        # Alle vier LIVE-spezifischen Checks + der generelle Kill-Switch-Check.
++        assert len(report.checks) == 5
++
++    def test_live_mode_missing_credentials_raises(self) -> None:
++        config = SGRConfig(
++            trading_mode=TradingMode.LIVE,
++            credentials=ExchangeCredentials(),
++        )
++        with pytest.raises(StartupSafetyError, match="live_credentials_present"):
++            StartupSafetyChecker(config).run_or_raise()
++
++    def test_live_mode_disabled_order_cap_raises(self) -> None:
++        config = _live_config(max_order_notional=None)
++        with pytest.raises(StartupSafetyError, match="max_order_notional_sane"):
++            StartupSafetyChecker(config).run_or_raise()
++
++    def test_live_mode_preactivated_kill_switch_raises(self) -> None:
++        get_kill_switch(TradingMode.LIVE)._state.is_active = True
++        config = _live_config()
++        with pytest.raises(StartupSafetyError, match="kill_switch_not_preactivated"):
++            StartupSafetyChecker(config).run_or_raise()
++
++    def test_multiple_failures_all_reported_in_single_exception(self) -> None:
++        """run() bricht nicht beim ersten Fehler ab - alle Probleme sollen
++        in einer einzigen Fehlermeldung sichtbar sein (besseres Debugging
++        einer fehlgeschlagenen Config als mehrere Boot-Versuche)."""
++        config = SGRConfig(
++            trading_mode=TradingMode.LIVE,
++            credentials=ExchangeCredentials(),
++            risk_limits=RiskLimitsConfig(max_order_notional=None),
++        )
++        with pytest.raises(StartupSafetyError) as exc_info:
++            StartupSafetyChecker(config).run_or_raise()
++
++        message = str(exc_info.value)
++        assert "live_credentials_present" in message
++        assert "max_order_notional_sane" in message
++
++    def test_report_failures_property(self) -> None:
++        config = SGRConfig(
++            trading_mode=TradingMode.LIVE,
++            credentials=ExchangeCredentials(),
++        )
++        report = StartupSafetyChecker(config).run()
++        assert report.all_passed is False
++        failure_names = [c.name for c in report.failures]
++        assert "live_credentials_present" in failure_names
+-- 
+2.43.0
+

@@ -199,6 +199,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     registry.inject_repository(repos.strategies)
     await registry.sync_registrations_to_db()
 
+    # Aktiviere alle validierten Strategien für das Paper Trading.
+    # Default: Strategien starten deaktiviert, müssen explizit aktiviert werden.
+    # Hier aktivieren wir nur die, die bereits validiert sind (is_validated=True
+    # nach erfolgreichem Backtest). Weitere Strategien können durch Management-APIs
+    # später aktiviert werden.
+    for entry in registry.get_all().values():
+        if entry.is_validated:
+            await registry.activate(entry.strategy.name)
+            log.info(
+                "sgr.api.strategy_activated",
+                name=entry.strategy.name,
+                version=entry.strategy.version,
+            )
+
     strategy_engine = StrategyEngine(config.trading_mode, feature_store)
     await strategy_engine.start()
     app.state.strategy_engine = strategy_engine
@@ -376,6 +390,7 @@ def create_app() -> FastAPI:
         websocket,
     )
     from sgr.saas.routers import apikey_router, auth_router, billing_router
+    from prometheus_client import CollectorRegistry, generate_latest, REGISTRY
 
     app.include_router(health.router, tags=["health"])
     app.include_router(market.router, prefix="/api/v1/market", tags=["market"])
@@ -394,6 +409,12 @@ def create_app() -> FastAPI:
     app.include_router(auth_router, prefix="/api/v1")
     app.include_router(apikey_router, prefix="/api/v1")
     app.include_router(billing_router, prefix="/api/v1")
+
+    # Prometheus Metrics Endpoint
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics() -> Any:
+        """Prometheus metrics endpoint."""
+        return Response(generate_latest(REGISTRY), media_type="text/plain; charset=utf-8")
 
     return app
 

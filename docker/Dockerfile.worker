@@ -1,0 +1,23 @@
+# SGR Trading Worker - separater Container für async Trading Jobs
+# 
+# Dieser Container läuft den Trading Worker (nicht die API)
+# Wird als TradingWorker.Dockerfile gebaut, shared denselben Base wie API
+# Kann unabhängig von der API skaliert, restartet oder deployed werden
+
+FROM sgr-api:latest as app-base
+
+# Override CMD für Worker-Modus
+# Der Worker lädt dieselbe Application aber startet mit einem
+# alternativen Entry Point (z.B. sgr.worker.main:run_trading_worker)
+# oder mit einem speziellen Signal Handler für Trading Lifecycle
+
+COPY --chown=sgr:sgr sgr/worker/main.py /app/sgr/worker/
+COPY --chown=sgr:sgr sgr/worker/signal_handler.py /app/sgr/worker/
+
+# Worker kann spezifische Ressourcen-Limits definieren
+# (wird in docker-compose.yml / Kubernetes definiert, nicht hier)
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+
+# Worker läuft mit spezialisiertem Entry Point
+CMD ["python", "-m", "sgr.worker.main"]

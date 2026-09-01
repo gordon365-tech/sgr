@@ -1,0 +1,231 @@
+From bef8cf90aa7a7f12321414b4c6b3dd9765803f6a Mon Sep 17 00:00:00 2001
+From: "Claude (SGR dev session)" <claude@sgr-dev.local>
+Date: Sat, 29 Aug 2026 23:27:39 +0000
+Subject: [PATCH] feat(risk): add Leverage Guard hard limit (Phase 2 - live
+ trading safety)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+GEFUNDENE LÜCKE: RiskLimitsConfig.max_leverage war konfiguriert
+(config.py, saas/types.py) und wurde in API-Responses angezeigt
+(routers/system.py, routers/risk.py), aber NIRGENDS tatsächlich
+geprüft - weder im RiskEngine noch im PositionSizer. Das bedeutet:
+das System hatte keinen funktionierenden Leverage-Schutz trotz
+konfiguriertem Limit.
+
+FIX:
+
+- sgr/core/types.py: RiskMetrics erhält ein neues Feld
+   (Summe |Notional| aller offenen
+  Positionen / Portfolio Value). Additiv mit Default-Wert, bricht
+  keine bestehenden Konsumenten.
+- sgr/risk/engine.py:
+  - _compute_metrics() berechnet gross_leverage aus dem bereits
+    vorhandenen total_notional (wiederverwendet für portfolio_heat,
+    keine Duplikation).
+  - _empty_metrics() setzt gross_leverage explizit auf 0.0
+    (Fail-Safe-Pfad).
+  - _run_all_checks() führt einen neuen HARD-Limit-Check
+    "max_leverage" durch, der bei Überschreitung wie die bestehenden
+    Hard Limits (max_drawdown, daily_loss, max_positions) den Kill
+    Switch auslöst und das Signal REJECTED zurückgibt - konsistent
+    mit dem etablierten Muster, keine Architekturabweichung.
+
+Design-Entscheidung: Der Guard prüft den aktuellen Portfolio-State
+(post-hoc auf bestehende Positionen), nicht eine hypothetische
+Post-Trade-Leverage nach dem neuen Signal - identisch zum Verhalten
+der bestehenden Hard Limits (max_drawdown/daily_loss/max_positions
+prüfen ebenfalls den aktuellen State, nicht den Zustand nach dem
+Trade). Ein pre-trade Leverage-Cap im PositionSizer wäre eine
+größere Architekturänderung und ist nicht Teil dieses fokussierten
+Fixes.
+
+TESTS:
+
+- tests/unit/test_risk_engine.py: 3 neue Tests (TestLeverageGuard)
+  - Leverage innerhalb Limit -> kein Breach, korrekte Berechnung
+  - Leverage über Limit -> REJECTED + Kill Switch ausgelöst
+  - _empty_metrics() setzt gross_leverage korrekt auf 0.0
+
+Full suite verified green: 1251 passed, 9 skipped, 0 failed.
+Coverage unchanged (94.05% - new lines fully covered by new tests).
+ruff unchanged (22, pre-existing). mypy sgr/ unchanged (117,
+pre-existing).
+---
+ sgr/core/types.py              |  1 +
+ sgr/risk/engine.py             | 20 ++++++++
+ tests/unit/test_risk_engine.py | 93 ++++++++++++++++++++++++++++++++++
+ 3 files changed, 114 insertions(+)
+
+diff --git a/sgr/core/types.py b/sgr/core/types.py
+index 186b991..6fcb8f5 100644
+--- a/sgr/core/types.py
++++ b/sgr/core/types.py
+@@ -334,6 +334,7 @@ class RiskMetrics(BaseModel):
+     portfolio_heat: float  # 0.0–1.0 (sum of risk units / max)
+     active_positions: int
+     correlation_exposure: float
++    gross_leverage: float = 0.0  # Summe |Notional| aller Positionen / Portfolio Value
+ 
+ 
+ class RiskAssessment(BaseModel):
+diff --git a/sgr/risk/engine.py b/sgr/risk/engine.py
+index 87305cf..1678bd7 100644
+--- a/sgr/risk/engine.py
++++ b/sgr/risk/engine.py
+@@ -321,6 +321,13 @@ class RiskEngine:
+         total_notional = sum(p.notional_value for p in positions)
+         heat = float(total_notional / portfolio_value) if portfolio_value > 0 else 0.0
+ 
++        # Gross Leverage: Summe |Notional| aller Positionen / Portfolio Value.
++        # Notional ist bereits das mit Hebel gehandelte Exposure (quantity *
++        # current_price), daher approximiert total_notional / portfolio_value
++        # den tatsächlichen Portfolio-weiten Leverage-Faktor unabhängig
++        # davon, wie die einzelne Position selbst leveraged wurde.
++        gross_leverage = float(total_notional / portfolio_value) if portfolio_value > 0 else 0.0
++
+         # Korrelations-Exposure (vereinfacht: Anzahl Positionen × Durchschnitts-Korrelation)
+         # Vollständige Implementierung: Korrelationsmatrix aus Market Data Engine
+         corr_exposure = min(len(positions) * 0.1, 1.0)  # Approximation
+@@ -336,6 +343,7 @@ class RiskEngine:
+             portfolio_heat=heat,
+             active_positions=len(positions),
+             correlation_exposure=corr_exposure,
++            gross_leverage=gross_leverage,
+         )
+ 
+     def update_returns(self, daily_return: float) -> None:
+@@ -391,6 +399,17 @@ class RiskEngine:
+             )
+         )
+ 
++        # Max Leverage (Gross Exposure / Portfolio Value)
++        checks.append(
++            self._check_threshold(
++                name="max_leverage",
++                limit_type=LimitType.HARD,
++                current=metrics.gross_leverage,
++                limit=float(self._limits.max_leverage),
++                message_template="Gross leverage {current:.2f}x exceeds hard limit {limit:.2f}x",
++            )
++        )
++
+         # --- SOFT LIMITS ---
+ 
+         # VaR 95%
+@@ -504,6 +523,7 @@ class RiskEngine:
+             portfolio_heat=0.0,
+             active_positions=0,
+             correlation_exposure=0.0,
++            gross_leverage=0.0,
+         )
+ 
+     def build_order_request(
+diff --git a/tests/unit/test_risk_engine.py b/tests/unit/test_risk_engine.py
+index a6bdc2d..6a2e2b6 100644
+--- a/tests/unit/test_risk_engine.py
++++ b/tests/unit/test_risk_engine.py
+@@ -715,6 +715,99 @@ class TestRiskEngineLimits:
+         )
+ 
+ 
++# ---------------------------------------------------------------------------
++# Leverage Guard (max_leverage Hard Limit)
++# ---------------------------------------------------------------------------
++
++
++class TestLeverageGuard:
++    """
++    max_leverage war konfiguriert (RiskLimitsConfig.max_leverage) aber wurde
++    nirgends geprüft - gefundene Sicherheitslücke, siehe Commit-Message für
++    Details. Diese Tests decken den neu hinzugefügten Hard-Limit-Check ab.
++    """
++
++    async def test_gross_leverage_within_limit_is_approved(
++        self,
++        risk_engine: RiskEngine,
++        sample_signal: Signal,
++        btc_symbol: Symbol,
++    ) -> None:
++        """Portfolio 100k, Position-Notional 51k -> Leverage ~0.51x, unter
++        Default-Limit 3.0x -> kein Leverage-Breach."""
++        await risk_engine.initialize()
++
++        modest_position = Position(
++            symbol=btc_symbol,
++            side=PositionSide.LONG,
++            quantity=Decimal("1.0"),
++            entry_price=Decimal("50000"),
++            current_price=Decimal("51000"),
++            opened_at=datetime.now(tz=UTC),
++            strategy_name="trend_v1",
++            trading_mode=TradingMode.PAPER,
++        )
++
++        assessment = await risk_engine.evaluate(
++            signal=sample_signal,
++            open_positions=[modest_position],
++            portfolio_value=Decimal("100000"),
++            available_capital=Decimal("40000"),
++            current_price=Decimal("50000"),
++        )
++
++        assert assessment.decision != RiskDecision.REJECTED
++        assert assessment.risk_metrics_snapshot.gross_leverage == pytest.approx(0.51)
++
++    async def test_gross_leverage_over_limit_triggers_kill_switch(
++        self,
++        risk_engine: RiskEngine,
++        sample_signal: Signal,
++        btc_symbol: Symbol,
++    ) -> None:
++        """Portfolio 100k, Position-Notional 400k -> Leverage 4.0x, über
++        Default-Limit 3.0x -> REJECTED + Kill Switch ausgelöst."""
++        await risk_engine.initialize()
++
++        leveraged_position = Position(
++            symbol=btc_symbol,
++            side=PositionSide.LONG,
++            quantity=Decimal("8.0"),
++            entry_price=Decimal("50000"),
++            current_price=Decimal("50000"),
++            opened_at=datetime.now(tz=UTC),
++            strategy_name="trend_v1",
++            trading_mode=TradingMode.PAPER,
++        )
++
++        assessment = await risk_engine.evaluate(
++            signal=sample_signal,
++            open_positions=[leveraged_position],
++            portfolio_value=Decimal("100000"),
++            available_capital=Decimal("10000"),
++            current_price=Decimal("50000"),
++        )
++
++        import asyncio
++
++        await asyncio.sleep(0.01)  # Kill Switch Task Zeit geben
++
++        assert assessment.decision == RiskDecision.REJECTED
++        assert "leverage" in (assessment.rejection_reason or "").lower()
++        assert risk_engine._kill_switch.is_active is True
++
++        # Cleanup
++        await risk_engine._kill_switch.reset("cleanup")
++
++    async def test_gross_leverage_included_in_empty_metrics(
++        self, risk_engine: RiskEngine
++    ) -> None:
++        """_empty_metrics() (Fail-Safe-Pfad) setzt gross_leverage explizit
++        auf 0.0 statt es implizit vom Pydantic-Default abhängen zu lassen."""
++        metrics = risk_engine._empty_metrics(Decimal("50000"))
++        assert metrics.gross_leverage == 0.0
++
++
+ # ---------------------------------------------------------------------------
+ # Risk Engine – Coverage-Lücken (deterministisch, kein Coverage-Theater)
+ # ---------------------------------------------------------------------------
+-- 
+2.43.0
+

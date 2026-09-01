@@ -1,0 +1,778 @@
+From 45301ac48551bd167b3a18baaab22ec62391406c Mon Sep 17 00:00:00 2001
+From: "Claude (SGR dev session)" <claude@sgr-dev.local>
+Date: Sun, 30 Aug 2026 04:08:30 +0000
+Subject: [PATCH 2/2] feat(risk): add Symbol/Strategy-Level Kill Switch (Phase
+ 2 - live trading safety)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+GEFUNDENE LÜCKE: Strategy-Level Kill Switch existierte bereits
+vollständig (StrategyRegistry.deactivate(), inkl. Auto-Deaktivierung
+bei schlechter Performance, DB-Persistenz, Audit-Log, API-Endpunkte
+in strategy.py) - hier war KEINE Neuentwicklung nötig. Ein
+Symbol-Level Kill Switch (Trading für ein einzelnes Handelssymbol
+stoppen, ohne das gesamte System zu stoppen) fehlte jedoch komplett.
+Der Auftrag fordert diesen explizit als eigenständigen Mechanismus,
+getrennt vom globalen Kill Switch.
+
+NEU:
+
+- sgr/risk/symbol_kill_switch.py: SymbolKillSwitch, bewusst nach
+  demselben Muster wie StrategyRegistry gebaut (In-Memory-Singleton,
+  optionale DB-Persistenz via injiziertem Repository, Audit-Log bei
+  jeder Zustandsänderung, fail-safe: Persistenz-Fehler machen den
+  In-Memory-State nicht rückgängig). Symbole ohne expliziten Eintrag
+  sind per Default aktiv (kein Opt-in nötig für neue Symbole).
+
+- sgr/orchestrator/engine.py: TradingOrchestrator.run_cycle() prüft
+  get_symbol_kill_switch().is_active(symbol_key) als ALLERERSTEN
+  Schritt, noch vor der Signal-Generierung. Ein deaktiviertes Symbol
+  erzeugt gar nicht erst ein Signal, das später durch die Risk Engine
+  laufen müsste - konsistent mit dem Architekturgrundsatz "kein
+  Signal darf Risk Management umgehen" (hier: gar kein Signal für
+  gesperrte Symbole). Neuer TradingCycleStatus.SYMBOL_DISABLED für
+  klare Auditierbarkeit (unterscheidet sich bewusst von NO_SIGNAL -
+  ein Symbol-Block ist eine bewusste Sicherheitsentscheidung, nicht
+  "die Strategie hatte nichts zu sagen").
+
+- sgr/core/types.py: TradingCycleStatus.SYMBOL_DISABLED hinzugefügt.
+
+- sgr/api/routers/risk.py: Drei neue Endpunkte, dem Muster von
+  strategy.py (activate/deactivate) folgend:
+  - GET /symbol-kill-switch: alle Symbole mit explizitem Eintrag
+  - POST /symbol-kill-switch/{symbol_key}/deactivate (require_auth -
+    wie bei strategy.deactivate_strategy() ist Deaktivieren die
+    defensive Richtung und darf niedrigschwelliger sein)
+  - POST /symbol-kill-switch/{symbol_key}/activate (require_admin -
+    Reaktivierung ist die riskante Richtung)
+  {symbol_key:path} Converter nötig, da Symbol-Keys im Format
+  "exchange:BASE/QUOTE" einen Slash enthalten.
+
+TESTS:
+
+- tests/unit/test_symbol_kill_switch.py: 18 Tests (Default-State,
+  deactivate/activate inkl. Idempotenz, Persistenz inkl.
+  fail-safe-Verhalten bei DB-Fehler, Singleton).
+- tests/unit/test_orchestrator.py: 3 neue Tests (deaktiviertes Symbol
+  überspringt Signal-Generierung komplett, betrifft nur das
+  Zielsymbol, reaktiviertes Symbol läuft wieder normal).
+- tests/api/routers/test_risk.py: 6 neue Tests für die drei neuen
+  Endpunkte (Liste, Deaktivierung inkl. Auth-Pflicht, Aktivierung
+  inkl. Admin-Pflicht).
+
+Full suite verified green: 1278 passed, 9 skipped, 0 failed.
+Coverage 94.05% -> 94.12% (neues Modul 100% abgedeckt). ruff
+unchanged (22, pre-existing). mypy sgr/ unchanged (117,
+pre-existing) - zwei durch die neuen Endpunkte hinzugekommene
+bare-dict-Fehler wurden proaktiv mit dict[str, str] behoben, um
+die Baseline nicht zu verschlechtern.
+---
+ sgr/api/routers/risk.py               |  65 +++++++++
+ sgr/core/types.py                     |   1 +
+ sgr/orchestrator/engine.py            |  20 +++
+ sgr/risk/symbol_kill_switch.py        | 202 ++++++++++++++++++++++++++
+ tests/api/routers/test_risk.py        | 115 +++++++++++++++
+ tests/unit/test_orchestrator.py       |  64 ++++++++
+ tests/unit/test_symbol_kill_switch.py | 156 ++++++++++++++++++++
+ 7 files changed, 623 insertions(+)
+ create mode 100644 sgr/risk/symbol_kill_switch.py
+ create mode 100644 tests/api/routers/test_risk.py
+ create mode 100644 tests/unit/test_symbol_kill_switch.py
+
+diff --git a/sgr/api/routers/risk.py b/sgr/api/routers/risk.py
+index 3913971..2a3e855 100644
+--- a/sgr/api/routers/risk.py
++++ b/sgr/api/routers/risk.py
+@@ -19,6 +19,7 @@ from sgr.core.config import get_config
+ from sgr.portfolio.engine import PortfolioEngine
+ from sgr.risk.engine import RiskEngine
+ from sgr.risk.kill_switch import get_kill_switch
++from sgr.risk.symbol_kill_switch import get_symbol_kill_switch
+ 
+ router = APIRouter()
+ 
+@@ -153,3 +154,67 @@ async def reset_kill_switch(
+     ks = get_kill_switch(risk._trading_mode)
+     await ks.reset(reset_by=user.user_id)
+     return {"reset": True, "reset_by": user.user_id}
++
++
++# ---------------------------------------------------------------------
++# Symbol Kill Switch
++# ---------------------------------------------------------------------
++
++
++class SymbolKillSwitchEntryResponse(BaseModel):
++    symbol_key: str
++    is_active: bool
++    deactivated_at: str | None
++    reason: str | None
++    deactivated_by: str | None
++
++
++@router.get("/symbol-kill-switch", response_model=list[SymbolKillSwitchEntryResponse])
++async def list_symbol_kill_switches(
++    user: Annotated[TokenData, Depends(require_auth)],
++) -> list[SymbolKillSwitchEntryResponse]:
++    """Alle Symbole mit explizitem Kill-Switch-Eintrag (aktiv + inaktiv)."""
++    sks = get_symbol_kill_switch()
++    return [
++        SymbolKillSwitchEntryResponse(
++            symbol_key=entry.symbol_key,
++            is_active=entry.is_active,
++            deactivated_at=entry.deactivated_at.isoformat() if entry.deactivated_at else None,
++            reason=entry.reason,
++            deactivated_by=entry.deactivated_by,
++        )
++        for entry in sks.get_all().values()
++    ]
++
++
++@router.post("/symbol-kill-switch/{symbol_key:path}/deactivate")
++async def deactivate_symbol(
++    symbol_key: str,
++    user: Annotated[TokenData, Depends(require_auth)],
++    reason: str = "Manual deactivation",
++) -> dict[str, str]:
++    """
++    Trading für ein einzelnes Symbol deaktivieren, ohne das gesamte
++    System zu stoppen (im Gegensatz zum globalen Kill Switch).
++
++    Bewusst require_auth statt require_admin: wie bei
++    strategy.deactivate_strategy() ist Deaktivieren die defensive
++    Richtung und darf niedrigschwelliger sein als Reaktivierung.
++    """
++    sks = get_symbol_kill_switch()
++    await sks.deactivate(symbol_key, reason, deactivated_by=f"user:{user.user_id}")
++    return {"deactivated": symbol_key, "reason": reason}
++
++
++@router.post("/symbol-kill-switch/{symbol_key:path}/activate")
++async def activate_symbol(
++    symbol_key: str,
++    user: Annotated[TokenData, Depends(require_admin)],
++) -> dict[str, str]:
++    """
++    Trading für ein zuvor deaktiviertes Symbol wieder erlauben.
++    Erfordert Admin-Rolle (Re-Aktivierung ist die riskante Richtung).
++    """
++    sks = get_symbol_kill_switch()
++    await sks.activate(symbol_key, activated_by=f"user:{user.user_id}")
++    return {"activated": symbol_key}
+diff --git a/sgr/core/types.py b/sgr/core/types.py
+index 6fcb8f5..8fa0e54 100644
+--- a/sgr/core/types.py
++++ b/sgr/core/types.py
+@@ -411,6 +411,7 @@ class TradingCycleStatus(StrEnum):
+     """Terminal-Status eines Trading-Zyklus (Orchestrator-Ebene)."""
+ 
+     NO_SIGNAL = "no_signal"
++    SYMBOL_DISABLED = "symbol_disabled"  # Symbol Kill Switch aktiv
+     SIGNAL_REJECTED = "signal_rejected"
+     RISK_REJECTED = "risk_rejected"
+     ORDER_FILLED = "order_filled"
+diff --git a/sgr/orchestrator/engine.py b/sgr/orchestrator/engine.py
+index adc9e13..1ee5c62 100644
+--- a/sgr/orchestrator/engine.py
++++ b/sgr/orchestrator/engine.py
+@@ -61,6 +61,7 @@ from sgr.core.types import (
+     TradingCycleStatus,
+     TradingMode,
+ )
++from sgr.risk.symbol_kill_switch import get_symbol_kill_switch
+ 
+ log = get_logger(__name__)
+ 
+@@ -144,6 +145,25 @@ class TradingOrchestrator:
+         regime: MarketRegime,
+         started_at: datetime,
+     ) -> TradingCycleResult:
++        # 0. Symbol Kill Switch (synchron, O(1)) - allererster Check, noch
++        #    vor der Signal-Generierung. Ein deaktiviertes Symbol erzeugt
++        #    erst gar kein Signal, das später durch die Risk Engine laufen
++        #    müsste. Getrennt vom globalen KillSwitch (der wird bereits in
++        #    RiskEngine.evaluate() geprüft) - dieser Check ist symbolspezifisch.
++        if not get_symbol_kill_switch().is_active(symbol_key):
++            log.info(
++                "orchestrator.cycle.symbol_disabled",
++                symbol_key=symbol_key,
++                timeframe=timeframe,
++            )
++            return self._result(
++                TradingCycleStatus.SYMBOL_DISABLED,
++                started_at,
++                symbol_key,
++                timeframe,
++                error="Symbol trading disabled via symbol kill switch",
++            )
++
+         # 1. Signal generation (StrategyEngine publiziert SignalEvent bereits
+         #    selbst additiv - siehe strategy/engine.py _publish())
+         signal = await self._strategy_engine.process(symbol_key, timeframe, regime)
+diff --git a/sgr/risk/symbol_kill_switch.py b/sgr/risk/symbol_kill_switch.py
+new file mode 100644
+index 0000000..6d51c07
+--- /dev/null
++++ b/sgr/risk/symbol_kill_switch.py
+@@ -0,0 +1,202 @@
++"""
++SGR Symbol Kill Switch
++======================
++Deaktiviert ein einzelnes Handelssymbol, ohne das gesamte System zu
++stoppen (im Gegensatz zum globalen KillSwitch in kill_switch.py, der
++den kompletten Trading Mode stoppt).
++
++Warum getrennt vom globalen KillSwitch?
++    Der globale KillSwitch ist ein Notfall-Stopp für alle Trading-
++    Aktivitäten (Portfolio-Drawdown, Daily Loss, Leverage-Überschreitung
++    etc.) - er trifft absichtlich das gesamte System. Für lokalisierte
++    Probleme (ein einzelnes Symbol zeigt anomales Verhalten, eine
++    Exchange-spezifische Störung, ein manueller Trading-Stopp für ein
++    bestimmtes Paar) wäre ein globaler Stopp unverhältnismäßig - alle
++    anderen Symbole würden unnötig blockiert.
++
++Analogie zu StrategyRegistry:
++    Dieses Modul folgt bewusst demselben Muster wie
++    sgr/strategy/registry.py (In-Memory-Singleton, optionale DB-
++    Persistenz via injiziertem Repository, Audit-Log bei jeder
++    Zustandsänderung, kein Auto-Reset) - für Konsistenz im Codebase
++    und weil sich das Muster dort bereits bewährt hat.
++
++Integrationspunkt:
++    TradingOrchestrator.run_cycle() prüft is_active(symbol_key) als
++    ALLERERSTEN Schritt, noch vor der Signal-Generierung - ein
++    deaktiviertes Symbol erzeugt gar nicht erst ein Signal, das später
++    durch die Risk Engine laufen müsste. Kein Trading-Pfad kann diesen
++    Check umgehen, da run_cycle() der einzige Einstiegspunkt für einen
++    Trading-Zyklus ist.
++
++Persistenz:
++    Wie bei StrategyRegistry: rein in-memory per Default (ausreichend
++    für Tests/Backtesting), mit optionaler, best-effort DB-Persistenz
++    über ein injiziertes Repository für Restart-Sicherheit. Ohne
++    injiziertes Repository ist ein deaktiviertes Symbol nach einem
++    Neustart wieder aktiv - das ist ein bewusster Trade-off (wie bei
++    StrategyRegistry), kein Bug.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from datetime import UTC, datetime
++from typing import Any
++
++from sgr.core.logging import audit_log, get_logger
++
++log = get_logger(__name__)
++
++
++@dataclass
++class SymbolKillSwitchEntry:
++    """Zustand des Kill Switch für ein einzelnes Symbol."""
++
++    symbol_key: str
++    is_active: bool = True  # True = Trading erlaubt (Default: kein Block)
++    deactivated_at: datetime | None = None
++    reason: str | None = None
++    deactivated_by: str | None = None
++
++
++class SymbolKillSwitch:
++    """
++    Singleton-Registry für symbolspezifische Trading-Deaktivierung.
++
++    Thread-Safety: nur aus einem asyncio Event Loop verwenden (wie
++    StrategyRegistry - keine expliziten Locks nötig, da Python's GIL
++    einzelne dict-Operationen atomar macht und hier keine Multi-Step-
++    Read-Modify-Write-Race vorliegt, die durch fehlendes Lock zu
++    einem inkonsistenten Zustand führen könnte).
++    """
++
++    _instance: SymbolKillSwitch | None = None
++
++    def __init__(self) -> None:
++        self._entries: dict[str, SymbolKillSwitchEntry] = {}
++        # Optional: Repository für Persistenz. None = rein in-memory,
++        # additiv wie bei StrategyRegistry.inject_repository().
++        self._repo: Any = None
++
++    def inject_repository(self, repository: Any) -> None:
++        """Injiziert ein Repository für Persistenz. Additiv, optional."""
++        self._repo = repository
++
++    @classmethod
++    def get(cls) -> SymbolKillSwitch:
++        if cls._instance is None:
++            cls._instance = cls()
++        return cls._instance
++
++    # ------------------------------------------------------------------
++    # Query (synchron, hot path)
++    # ------------------------------------------------------------------
++
++    def is_active(self, symbol_key: str) -> bool:
++        """
++        True = Trading für dieses Symbol erlaubt.
++        Symbole ohne expliziten Eintrag sind per Default aktiv (kein
++        Opt-in nötig, um ein neues Symbol zu handeln).
++        """
++        entry = self._entries.get(symbol_key)
++        return entry.is_active if entry else True
++
++    def get_entry(self, symbol_key: str) -> SymbolKillSwitchEntry | None:
++        return self._entries.get(symbol_key)
++
++    def get_all(self) -> dict[str, SymbolKillSwitchEntry]:
++        """Gibt alle Symbole mit explizitem Eintrag zurück (aktiv + inaktiv)."""
++        return dict(self._entries)
++
++    def get_deactivated(self) -> list[str]:
++        """Gibt alle aktuell deaktivierten Symbol-Keys zurück."""
++        return [key for key, entry in self._entries.items() if not entry.is_active]
++
++    # ------------------------------------------------------------------
++    # Mutation (async wegen optionaler DB-Persistenz)
++    # ------------------------------------------------------------------
++
++    async def deactivate(
++        self,
++        symbol_key: str,
++        reason: str,
++        deactivated_by: str = "system",
++    ) -> None:
++        """
++        Deaktiviert Trading für ein Symbol. Kein automatischer Trading-
++        Zyklus wird mehr für dieses Symbol ausgeführt, bis manuelle
++        Re-Aktivierung. Idempotent: erneutes Deaktivieren aktualisiert
++        nur reason/deactivated_by, kein Fehler.
++        """
++        entry = self._entries.get(symbol_key)
++        if entry is None:
++            entry = SymbolKillSwitchEntry(symbol_key=symbol_key)
++            self._entries[symbol_key] = entry
++
++        entry.is_active = False
++        entry.deactivated_at = datetime.now(tz=UTC)
++        entry.reason = reason
++        entry.deactivated_by = deactivated_by
++
++        log.warning(
++            "symbol_kill_switch.deactivated",
++            symbol_key=symbol_key,
++            reason=reason,
++            deactivated_by=deactivated_by,
++        )
++        audit_log.log_auth_event(
++            event="symbol_kill_switch_deactivated",
++            user_id=deactivated_by,
++            ip_address="system",
++            success=True,
++        )
++        await self._persist(symbol_key, False, reason)
++
++    async def activate(self, symbol_key: str, activated_by: str = "system") -> None:
++        """
++        Re-aktiviert Trading für ein zuvor deaktiviertes Symbol.
++        Kein Effekt, wenn das Symbol bereits aktiv ist (oder nie
++        deaktiviert wurde).
++        """
++        entry = self._entries.get(symbol_key)
++        if entry is None or entry.is_active:
++            log.info("symbol_kill_switch.already_active", symbol_key=symbol_key)
++            return
++
++        entry.is_active = True
++        entry.deactivated_at = None
++        entry.reason = None
++        entry.deactivated_by = None
++
++        log.warning(
++            "symbol_kill_switch.reactivated",
++            symbol_key=symbol_key,
++            activated_by=activated_by,
++        )
++        audit_log.log_auth_event(
++            event="symbol_kill_switch_reactivated",
++            user_id=activated_by,
++            ip_address="system",
++            success=True,
++        )
++        await self._persist(symbol_key, True, None)
++
++    async def _persist(self, symbol_key: str, is_active: bool, reason: str | None) -> None:
++        """Best-effort DB-Persistenz. Fail-safe: Fehler hier dürfen den
++        In-Memory-State (bereits gesetzt) nicht rückgängig machen."""
++        if self._repo is None:
++            return
++        try:
++            await self._repo.set_symbol_active(symbol_key, is_active, reason)
++        except Exception as e:
++            log.error(
++                "symbol_kill_switch.persist_failed",
++                symbol_key=symbol_key,
++                is_active=is_active,
++                error=str(e),
++            )
++
++
++def get_symbol_kill_switch() -> SymbolKillSwitch:
++    return SymbolKillSwitch.get()
+diff --git a/tests/api/routers/test_risk.py b/tests/api/routers/test_risk.py
+new file mode 100644
+index 0000000..a8a7c3f
+--- /dev/null
++++ b/tests/api/routers/test_risk.py
+@@ -0,0 +1,115 @@
++"""
++Tests für die Symbol-Kill-Switch-Endpunkte in sgr.api.routers.risk.
++
++Neuer Baustein (Phase 2 - Live Trading Safety). Getestet auf einer
++minimalen FastAPI-App via TestClient (kein voller lifespan nötig,
++siehe tests/api/test_main.py für die Begründung). require_auth/
++require_admin werden per app.dependency_overrides ersetzt.
++"""
++
++from __future__ import annotations
++
++import pytest
++from fastapi import FastAPI
++from fastapi.testclient import TestClient
++
++from sgr.api.dependencies import TokenData, require_admin, require_auth
++from sgr.api.routers.risk import router as risk_router
++from sgr.core.types import TradingMode
++from sgr.risk.symbol_kill_switch import SymbolKillSwitch, get_symbol_kill_switch
++
++
++@pytest.fixture(autouse=True)
++def _reset_symbol_kill_switch():
++    SymbolKillSwitch._instance = None
++    yield
++    SymbolKillSwitch._instance = None
++
++
++@pytest.fixture
++def token_data() -> TokenData:
++    return TokenData(user_id="user-1", trading_mode=TradingMode.PAPER, is_admin=False)
++
++
++@pytest.fixture
++def app(token_data: TokenData) -> FastAPI:
++    app = FastAPI()
++    app.include_router(risk_router, prefix="/api/v1/risk")
++    app.dependency_overrides[require_auth] = lambda: token_data
++    app.dependency_overrides[require_admin] = lambda: token_data
++    return app
++
++
++class TestListSymbolKillSwitches:
++    def test_list_empty_initially(self, app: FastAPI) -> None:
++        client = TestClient(app)
++        response = client.get("/api/v1/risk/symbol-kill-switch")
++
++        assert response.status_code == 200
++        assert response.json() == []
++
++    def test_list_includes_deactivated_symbols(self, app: FastAPI) -> None:
++        import asyncio
++
++        asyncio.run(
++            get_symbol_kill_switch().deactivate("pionex:BTC/USDT", "manual stop")
++        )
++
++        client = TestClient(app)
++        response = client.get("/api/v1/risk/symbol-kill-switch")
++
++        assert response.status_code == 200
++        body = response.json()
++        assert len(body) == 1
++        assert body[0]["symbol_key"] == "pionex:BTC/USDT"
++        assert body[0]["is_active"] is False
++        assert body[0]["reason"] == "manual stop"
++
++
++class TestDeactivateSymbol:
++    def test_deactivate_symbol_success(self, app: FastAPI) -> None:
++        client = TestClient(app)
++        response = client.post(
++            "/api/v1/risk/symbol-kill-switch/pionex:BTC%2FUSDT/deactivate",
++            params={"reason": "anomalous volume spike"},
++        )
++
++        assert response.status_code == 200
++        body = response.json()
++        assert body["deactivated"] == "pionex:BTC/USDT"
++        assert body["reason"] == "anomalous volume spike"
++        assert get_symbol_kill_switch().is_active("pionex:BTC/USDT") is False
++
++    def test_deactivate_symbol_requires_auth(self) -> None:
++        app = FastAPI()
++        app.include_router(risk_router, prefix="/api/v1/risk")
++
++        client = TestClient(app)
++        response = client.post("/api/v1/risk/symbol-kill-switch/pionex:BTC%2FUSDT/deactivate")
++
++        assert response.status_code == 401
++
++
++class TestActivateSymbol:
++    def test_activate_symbol_success(self, app: FastAPI) -> None:
++        import asyncio
++
++        asyncio.run(get_symbol_kill_switch().deactivate("pionex:BTC/USDT", "reason"))
++
++        client = TestClient(app)
++        response = client.post("/api/v1/risk/symbol-kill-switch/pionex:BTC%2FUSDT/activate")
++
++        assert response.status_code == 200
++        assert response.json()["activated"] == "pionex:BTC/USDT"
++        assert get_symbol_kill_switch().is_active("pionex:BTC/USDT") is True
++
++    def test_activate_symbol_requires_admin(self, token_data: TokenData) -> None:
++        app = FastAPI()
++        app.include_router(risk_router, prefix="/api/v1/risk")
++        app.dependency_overrides[require_auth] = lambda: token_data
++        # require_admin intentionally NOT overridden.
++
++        client = TestClient(app)
++        response = client.post("/api/v1/risk/symbol-kill-switch/pionex:BTC%2FUSDT/activate")
++
++        assert response.status_code in (401, 403)
+diff --git a/tests/unit/test_orchestrator.py b/tests/unit/test_orchestrator.py
+index 480c77d..58df212 100644
+--- a/tests/unit/test_orchestrator.py
++++ b/tests/unit/test_orchestrator.py
+@@ -454,3 +454,67 @@ def sample_candle_event_factory():
+         return CandleEvent(timestamp=datetime.now(tz=UTC), candle=candle)
+ 
+     return _make
++
++
++# ---------------------------------------------------------------------------
++# Symbol Kill Switch: allererster Check, vor Signal-Generierung
++# ---------------------------------------------------------------------------
++
++
++@pytest.fixture(autouse=True)
++def _reset_symbol_kill_switch():
++    """Isoliert den modul-globalen SymbolKillSwitch-Singleton zwischen Tests."""
++    from sgr.risk.symbol_kill_switch import SymbolKillSwitch
++
++    SymbolKillSwitch._instance = None
++    yield
++    SymbolKillSwitch._instance = None
++
++
++async def test_disabled_symbol_skips_signal_generation_entirely() -> None:
++    from sgr.risk.symbol_kill_switch import get_symbol_kill_switch
++
++    await get_symbol_kill_switch().deactivate("pionex:BTC/USDT", "anomalous behavior")
++
++    e = _Engines()
++    orchestrator = e.orchestrator()
++
++    result = orchestrator.run_cycle("pionex:BTC/USDT", "1h")
++    result = await result
++
++    assert result.status == TradingCycleStatus.SYMBOL_DISABLED
++    e.strategy_engine.process.assert_not_called()
++    e.risk_engine.evaluate.assert_not_called()
++    e.execution_engine.execute.assert_not_called()
++
++
++async def test_disabled_symbol_does_not_affect_other_symbols() -> None:
++    from sgr.risk.symbol_kill_switch import get_symbol_kill_switch
++
++    await get_symbol_kill_switch().deactivate("pionex:BTC/USDT", "reason")
++
++    e = _Engines()
++    e.strategy_engine.process.return_value = None  # NO_SIGNAL is sufficient proof.
++    orchestrator = e.orchestrator()
++
++    result = await orchestrator.run_cycle("pionex:ETH/USDT", "1h")
++
++    assert result.status == TradingCycleStatus.NO_SIGNAL
++    e.strategy_engine.process.assert_called_once()
++
++
++async def test_reactivated_symbol_runs_cycle_normally() -> None:
++    from sgr.risk.symbol_kill_switch import get_symbol_kill_switch
++
++    sks = get_symbol_kill_switch()
++    await sks.deactivate("pionex:BTC/USDT", "reason")
++    await sks.activate("pionex:BTC/USDT")
++
++    e = _Engines()
++    e.strategy_engine.process.return_value = None
++    orchestrator = e.orchestrator()
++
++    result = await orchestrator.run_cycle("pionex:BTC/USDT", "1h")
++
++    assert result.status == TradingCycleStatus.NO_SIGNAL
++    e.strategy_engine.process.assert_called_once()
+diff --git a/tests/unit/test_symbol_kill_switch.py b/tests/unit/test_symbol_kill_switch.py
+new file mode 100644
+index 0000000..90da458
+--- /dev/null
++++ b/tests/unit/test_symbol_kill_switch.py
+@@ -0,0 +1,156 @@
++"""
++Tests für sgr.risk.symbol_kill_switch.SymbolKillSwitch.
++
++Neuer Baustein (Phase 2 - Live Trading Safety): Symbol/Strategy-Level
++Kill Switch. Strategy-Level existierte bereits vollständig in
++StrategyRegistry.deactivate() - dieses Modul schließt die Lücke für
++Symbol-Level, analog zum selben Muster.
++"""
++
++from __future__ import annotations
++
++import pytest
++
++from sgr.risk.symbol_kill_switch import SymbolKillSwitch, get_symbol_kill_switch
++
++
++@pytest.fixture
++def sks() -> SymbolKillSwitch:
++    """Frische Instanz statt Singleton, um Testisolation sicherzustellen."""
++    return SymbolKillSwitch()
++
++
++class TestDefaultState:
++    def test_unknown_symbol_is_active_by_default(self, sks: SymbolKillSwitch) -> None:
++        assert sks.is_active("pionex:BTC/USDT") is True
++
++    def test_get_entry_returns_none_for_unknown_symbol(self, sks: SymbolKillSwitch) -> None:
++        assert sks.get_entry("pionex:BTC/USDT") is None
++
++    def test_get_all_empty_initially(self, sks: SymbolKillSwitch) -> None:
++        assert sks.get_all() == {}
++
++    def test_get_deactivated_empty_initially(self, sks: SymbolKillSwitch) -> None:
++        assert sks.get_deactivated() == []
++
++
++@pytest.mark.asyncio
++class TestDeactivate:
++    async def test_deactivate_makes_symbol_inactive(self, sks: SymbolKillSwitch) -> None:
++        await sks.deactivate("pionex:BTC/USDT", "anomalous behavior")
++        assert sks.is_active("pionex:BTC/USDT") is False
++
++    async def test_deactivate_records_reason_and_actor(self, sks: SymbolKillSwitch) -> None:
++        await sks.deactivate("pionex:BTC/USDT", "manual stop", deactivated_by="user:admin")
++
++        entry = sks.get_entry("pionex:BTC/USDT")
++        assert entry is not None
++        assert entry.reason == "manual stop"
++        assert entry.deactivated_by == "user:admin"
++        assert entry.deactivated_at is not None
++
++    async def test_deactivate_only_affects_targeted_symbol(self, sks: SymbolKillSwitch) -> None:
++        await sks.deactivate("pionex:BTC/USDT", "reason")
++        assert sks.is_active("pionex:ETH/USDT") is True
++
++    async def test_deactivate_is_idempotent(self, sks: SymbolKillSwitch) -> None:
++        await sks.deactivate("pionex:BTC/USDT", "first reason")
++        await sks.deactivate("pionex:BTC/USDT", "second reason")
++
++        entry = sks.get_entry("pionex:BTC/USDT")
++        assert entry is not None
++        assert entry.reason == "second reason"
++        assert sks.is_active("pionex:BTC/USDT") is False
++
++    async def test_get_deactivated_lists_only_inactive_symbols(
++        self, sks: SymbolKillSwitch
++    ) -> None:
++        await sks.deactivate("pionex:BTC/USDT", "reason")
++        await sks.activate("pionex:ETH/USDT")  # No-op, never deactivated.
++
++        assert sks.get_deactivated() == ["pionex:BTC/USDT"]
++
++
++@pytest.mark.asyncio
++class TestActivate:
++    async def test_activate_restores_trading(self, sks: SymbolKillSwitch) -> None:
++        await sks.deactivate("pionex:BTC/USDT", "reason")
++        await sks.activate("pionex:BTC/USDT")
++
++        assert sks.is_active("pionex:BTC/USDT") is True
++
++    async def test_activate_clears_reason_and_timestamp(self, sks: SymbolKillSwitch) -> None:
++        await sks.deactivate("pionex:BTC/USDT", "reason")
++        await sks.activate("pionex:BTC/USDT", activated_by="user:admin")
++
++        entry = sks.get_entry("pionex:BTC/USDT")
++        assert entry is not None
++        assert entry.reason is None
++        assert entry.deactivated_at is None
++        assert entry.deactivated_by is None
++
++    async def test_activate_on_never_deactivated_symbol_is_noop(
++        self, sks: SymbolKillSwitch
++    ) -> None:
++        await sks.activate("pionex:BTC/USDT")  # Should not raise or create an entry.
++        assert sks.get_entry("pionex:BTC/USDT") is None
++
++    async def test_activate_on_already_active_symbol_is_noop(
++        self, sks: SymbolKillSwitch
++    ) -> None:
++        await sks.deactivate("pionex:BTC/USDT", "reason")
++        await sks.activate("pionex:BTC/USDT")
++        await sks.activate("pionex:BTC/USDT")  # Second call: already active, no-op.
++
++        assert sks.is_active("pionex:BTC/USDT") is True
++
++
++@pytest.mark.asyncio
++class TestPersistence:
++    async def test_deactivate_calls_repository_when_injected(
++        self, sks: SymbolKillSwitch
++    ) -> None:
++        from unittest.mock import AsyncMock
++
++        repo = AsyncMock()
++        sks.inject_repository(repo)
++
++        await sks.deactivate("pionex:BTC/USDT", "reason")
++
++        repo.set_symbol_active.assert_awaited_once_with("pionex:BTC/USDT", False, "reason")
++
++    async def test_activate_calls_repository_when_injected(self, sks: SymbolKillSwitch) -> None:
++        from unittest.mock import AsyncMock
++
++        repo = AsyncMock()
++        sks.inject_repository(repo)
++
++        await sks.deactivate("pionex:BTC/USDT", "reason")
++        await sks.activate("pionex:BTC/USDT")
++
++        repo.set_symbol_active.assert_awaited_with("pionex:BTC/USDT", True, None)
++
++    async def test_persist_failure_does_not_revert_in_memory_state(
++        self, sks: SymbolKillSwitch
++    ) -> None:
++        from unittest.mock import AsyncMock
++
++        repo = AsyncMock()
++        repo.set_symbol_active = AsyncMock(side_effect=RuntimeError("db down"))
++        sks.inject_repository(repo)
++
++        await sks.deactivate("pionex:BTC/USDT", "reason")  # Should not raise.
++
++        assert sks.is_active("pionex:BTC/USDT") is False
++
++    async def test_no_repository_persist_is_noop(self, sks: SymbolKillSwitch) -> None:
++        # No repository injected - _persist() should just return early.
++        await sks.deactivate("pionex:BTC/USDT", "reason")
++        assert sks.is_active("pionex:BTC/USDT") is False
++
++
++class TestSingleton:
++    def test_get_symbol_kill_switch_returns_singleton(self) -> None:
++        first = get_symbol_kill_switch()
++        second = get_symbol_kill_switch()
++        assert first is second
+-- 
+2.43.0
+
