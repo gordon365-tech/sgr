@@ -41,6 +41,7 @@ from sgr.core.types import (
 )
 from sgr.exchanges.base import ExchangeError
 from sgr.execution.engine import ExecutionEngine
+from sgr.execution.preflight import PreflightCheckResult, PreflightResult, PreflightValidator
 
 if TYPE_CHECKING:
     import pytest_mock
@@ -517,3 +518,118 @@ class TestOrderPersistence:
         result = await eng.execute(order)
 
         assert result.status == OrderStatus.FILLED
+
+
+# ---------------------------------------------------------------------------
+# Preflight Validation Integration (Baustein 6 - Live Trading Safety)
+# ---------------------------------------------------------------------------
+#
+# Die eigentliche Check-Logik ist vollständig und isoliert in
+# tests/unit/test_preflight.py abgedeckt. Hier wird nur die END-TO-END-
+# VERDRAHTUNG in ExecutionEngine.execute() getestet: läuft Preflight nach
+# dem Kill-Switch-Check und vor dem Exchange-Call, blockiert ein negatives
+# Ergebnis wirklich die Order, und bleibt der bestehende PAPER-Pfad
+# unverändert (kein Preflight-Override -> echter PreflightValidator, der
+# in PAPER die meisten Checks überspringt).
+
+
+@pytest.fixture
+def live_engine(mock_pool: tuple[MagicMock, AsyncMock]) -> ExecutionEngine:
+    """LIVE-Mode-Engine mit gefaktem Kill Switch (analog zur PAPER-
+    engine-Fixture). _preflight bleibt hier absichtlich der echte
+    PreflightValidator - einzelne Tests ersetzen ihn gezielt per
+    Dependency-Injection, wo ein bestimmtes Preflight-Ergebnis
+    erzwungen werden soll."""
+    pool, _adapter = mock_pool
+    eng = ExecutionEngine(pool, TradingMode.LIVE)
+    fake_kill_switch = MagicMock()
+    fake_kill_switch.is_active = False
+    eng._kill_switch = fake_kill_switch
+    return eng
+
+
+class TestPreflightIntegration:
+    async def test_preflight_rejection_blocks_before_exchange_call(
+        self, live_engine: ExecutionEngine, mock_pool: tuple[MagicMock, AsyncMock]
+    ) -> None:
+        """Preflight._preflight per DI durch ein Test-Double ersetzt, das
+        eligible=False liefert - analog zum Kill-Switch-Testmuster dieser
+        Datei. Order darf die Exchange nicht erreichen."""
+        _pool, adapter = mock_pool
+        fake_preflight = AsyncMock()
+        fake_preflight.validate = AsyncMock(
+            return_value=PreflightResult(
+                order_id="test-order",
+                trading_mode=TradingMode.LIVE,
+                checks=[
+                    PreflightCheckResult(
+                        name="balance_and_available_capital",
+                        passed=False,
+                        detail="Insufficient free balance",
+                    )
+                ],
+            )
+        )
+        live_engine._preflight = fake_preflight  # type: ignore[assignment]
+        order = _make_order_request(trading_mode=TradingMode.LIVE)
+
+        result = await live_engine.execute(order)
+
+        assert result.status == OrderStatus.REJECTED
+        assert "Preflight validation failed" in result.raw_response["rejection_reason"]
+        assert "balance_and_available_capital" in result.raw_response["rejection_reason"]
+        adapter.place_order.assert_not_awaited()
+
+    async def test_preflight_approval_allows_exchange_call(
+        self,
+        live_engine: ExecutionEngine,
+        mock_pool: tuple[MagicMock, AsyncMock],
+        mocker: pytest_mock.MockerFixture,
+    ) -> None:
+        _pool, adapter = mock_pool
+        order = _make_order_request(
+            order_type=OrderType.MARKET, trading_mode=TradingMode.LIVE
+        )
+        filled = _make_order_result(order, status=OrderStatus.FILLED)
+        adapter.place_order = AsyncMock(return_value=filled)
+        mocker.patch("sgr.execution.engine.get_event_bus")
+
+        fake_preflight = AsyncMock()
+        fake_preflight.validate = AsyncMock(
+            return_value=PreflightResult(
+                order_id=str(order.id), trading_mode=TradingMode.LIVE, checks=[]
+            )
+        )
+        live_engine._preflight = fake_preflight  # type: ignore[assignment]
+
+        result = await live_engine.execute(order)
+
+        assert result.status == OrderStatus.FILLED
+        adapter.place_order.assert_awaited_once()
+
+    async def test_preflight_runs_after_kill_switch_check(
+        self, live_engine: ExecutionEngine, mock_pool: tuple[MagicMock, AsyncMock]
+    ) -> None:
+        """Aktiver Kill Switch blockt bereits VOR Preflight - Preflight
+        wird gar nicht erst aufgerufen (keine unnötigen Exchange-Calls
+        für eine Order, die ohnehin schon abgelehnt ist)."""
+        _pool, adapter = mock_pool
+        live_engine._kill_switch.is_active = True  # type: ignore[misc]
+        fake_preflight = AsyncMock()
+        live_engine._preflight = fake_preflight  # type: ignore[assignment]
+        order = _make_order_request(trading_mode=TradingMode.LIVE)
+
+        result = await live_engine.execute(order)
+
+        assert result.status == OrderStatus.REJECTED
+        fake_preflight.validate.assert_not_awaited()
+        adapter.place_order.assert_not_awaited()
+
+    async def test_paper_mode_uses_real_preflight_validator_by_default(
+        self, engine: ExecutionEngine, mock_pool: tuple[MagicMock, AsyncMock]
+    ) -> None:
+        """Regressionsschutz: die bestehende PAPER-Engine-Fixture (siehe
+        oben) injiziert keinen Preflight-Fake - das ist beabsichtigt.
+        Der echte PreflightValidator muss in PAPER weiterhin ohne echte
+        Exchange-Calls durchlaufen (siehe test_preflight.py::TestPaperMode)."""
+        assert isinstance(engine._preflight, PreflightValidator)

@@ -5,6 +5,7 @@ Verarbeitet OrderRequests von der Risk Engine bis zum bestätigten Fill.
 
 Verantwortlichkeiten:
     1. OrderRequest entgegennehmen (von Risk Engine)
+    1b. Preflight Validation (Baustein 6, siehe execution/preflight.py)
     2. Order an Exchange übermitteln
     3. Fill-Monitoring bis Completion
     4. OrderResult an Portfolio Engine weiterleiten
@@ -47,6 +48,7 @@ from sgr.core.types import (
 )
 from sgr.exchanges.base import ExchangeError
 from sgr.exchanges.factory import ExchangePool
+from sgr.execution.preflight import PreflightValidator
 from sgr.risk.kill_switch import get_kill_switch
 
 log = get_logger(__name__)
@@ -79,6 +81,12 @@ class ExecutionEngine:
         # analog zu PortfolioEngine._position_repo. Ohne Injektion
         # verhaelt sich die Engine exakt wie vor diesem Feature.
         self._order_repo = order_repository
+        # Baustein 6: letzte deterministische Prüfung, ob eine bereits
+        # von der Risk Engine genehmigte Order gerade jetzt technisch
+        # sicher sendbar ist. Siehe sgr/execution/preflight.py
+        # Modul-Docstring für die vollständige Architekturbegründung und
+        # Abgrenzung zu RiskEngine/StartupSafetyChecker/confirm_live.
+        self._preflight = PreflightValidator(pool, trading_mode)
 
     async def execute(self, order: OrderRequest) -> OrderResult:
         """
@@ -100,6 +108,23 @@ class ExecutionEngine:
                 order_id=str(order.id),
             )
             return self._rejected_result(order, "Kill switch active")
+
+        # Preflight Validation (Baustein 6): letzte technische Prüfung
+        # unmittelbar vor dem Exchange-Call. Sendet selbst keine Order.
+        # LIVE ist fail-closed: nur bei result.eligible wird überhaupt
+        # versucht zu senden. PAPER überspringt die meisten Checks
+        # (siehe preflight.py Modul-Docstring), schlägt aber bei
+        # strukturell ungültigen Orders (z.B. quantity <= 0) trotzdem fehl.
+        preflight_result = await self._preflight.validate(order)
+        if not preflight_result.eligible:
+            log.warning(
+                "execution_engine.blocked_by_preflight",
+                order_id=str(order.id),
+                reason=preflight_result.rejection_summary,
+            )
+            return self._rejected_result(
+                order, f"Preflight validation failed: {preflight_result.rejection_summary}"
+            )
 
         try:
             return await self._execute_internal(order)
