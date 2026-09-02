@@ -48,6 +48,7 @@ from sgr.core.types import (
 )
 from sgr.exchanges.base import ExchangeError
 from sgr.exchanges.factory import ExchangePool
+from sgr.execution.order_safety import SafeOrderExecutor
 from sgr.execution.preflight import PreflightValidator
 from sgr.risk.kill_switch import get_kill_switch
 
@@ -87,6 +88,12 @@ class ExecutionEngine:
         # Modul-Docstring für die vollständige Architekturbegründung und
         # Abgrenzung zu RiskEngine/StartupSafetyChecker/confirm_live.
         self._preflight = PreflightValidator(pool, trading_mode)
+        # Baustein 7: In-Process Duplicate Order Protection + Shutdown
+        # Safety Middleware. Siehe sgr/execution/order_safety.py
+        # Modul-Docstring fuer die vollstaendige Architekturbegruendung
+        # (Idempotency-Key = order.id, Unknown-State-Handling bei
+        # Submit-Fehlern, Abgrenzung zur Exchange-seitigen clientOrderId).
+        self._safety = SafeOrderExecutor()
 
     async def execute(self, order: OrderRequest) -> OrderResult:
         """
@@ -136,6 +143,11 @@ class ExecutionEngine:
                 exc_info=True,
             )
             return self._rejected_result(order, f"Execution error: {e}")
+        finally:
+            # Order ist terminiert (FILLED/CANCELLED/REJECTED/Fehler) -
+            # Duplicate-Guard-Tracking freigeben (Baustein 7). Symmetrisch
+            # zum Placeholder-Eintrag, den execute_safely() setzt.
+            self._safety.release(order)
 
     async def _execute_internal(self, order: OrderRequest) -> OrderResult:
         adapter = self._pool.get(order.symbol.exchange, self._trading_mode)
@@ -152,8 +164,25 @@ class ExecutionEngine:
             strategy=str(order.metadata.get("strategy", "unknown")),
         )
 
-        # Submit Order
-        result = await adapter.place_order(order)
+        # Submit Order (Baustein 7: via SafeOrderExecutor - blockt
+        # In-Process-Duplikate derselben order.id und behandelt
+        # Submit-Fehler als expliziten Unknown-State statt automatischem
+        # Retry, siehe order_safety.py Modul-Docstring).
+        result = await self._safety.execute_safely(order, adapter.place_order)
+
+        # Duplicate- oder Unknown-State-Result: kein echter Exchange-
+        # Kontakt (Duplicate) bzw. unklarer Ausgang (Unknown) - in beiden
+        # Faellen sofort zurueckgeben, kein Fill-Monitoring/Persist fuer
+        # eine Order, die entweder nicht submittet wurde oder deren
+        # tatsaechlicher Status ungeklaert ist.
+        if result.raw_response.get("duplicate") or result.raw_response.get("unknown"):
+            log.warning(
+                "execution_engine.safety_blocked_or_unknown",
+                order_id=str(order.id),
+                duplicate=result.raw_response.get("duplicate", False),
+                unknown=result.raw_response.get("unknown", False),
+            )
+            return result
 
         log.info(
             "execution_engine.order_submitted",
@@ -285,6 +314,11 @@ class ExecutionEngine:
                     error=str(e),
                 )
                 continue
+            finally:
+                # Tracking bei jedem Poll aktuell halten (Baustein 7),
+                # damit shutdown() jederzeit den zuletzt bekannten
+                # Order-Status/-ID sieht.
+                self._safety.update_inflight(order, current)
 
             if current.status in (OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED):
                 if current.status != OrderStatus.FILLED:
@@ -372,6 +406,66 @@ class ExecutionEngine:
             log.error("execution_engine.publish_fill_failed", error=str(e))
 
         await self._persist_order_status(str(result.request_id), result)
+
+    async def shutdown(self) -> None:
+        """
+        Shutdown Safety (Baustein 7): best-effort Cancel aller Orders, die
+        gerade im Fill-Monitoring aktiv sind, bevor die Exchange-Verbindung
+        geschlossen wird. Muss VOR dem Schliessen der Exchange-Adapter in
+        api/main.py lifespan aufgerufen werden.
+
+        Best-effort: ein Fehler bei einem einzelnen Cancel darf die
+        anderen nicht verhindern und darf den Shutdown-Prozess nicht
+        blockieren (fail-safe, analog zu allen anderen Persistenz-/
+        Cleanup-Pfaden in dieser Engine).
+        """
+        inflight = list(self._safety.all_inflight().items())
+        if not inflight:
+            log.info("execution_engine.shutdown_no_inflight_orders")
+            return
+
+        log.warning(
+            "execution_engine.shutdown_cancelling_inflight_orders",
+            count=len(inflight),
+            order_ids=[oid for oid, _ in inflight],
+        )
+
+        for order_id, result in inflight:
+            if result.status in (
+                OrderStatus.FILLED,
+                OrderStatus.CANCELLED,
+                OrderStatus.REJECTED,
+            ):
+                continue
+            if not result.exchange_order_id:
+                # execute_safely()-Placeholder: place_order() ist noch
+                # nicht zurueckgekehrt, es existiert noch keine
+                # Exchange-seitige Order, die gecancelt werden koennte.
+                log.warning(
+                    "execution_engine.shutdown_skips_unsubmitted_order",
+                    order_id=order_id,
+                )
+                continue
+            try:
+                adapter = self._pool.get(result.symbol.exchange, self._trading_mode)
+                await adapter.cancel_order(
+                    result.exchange_order_id,
+                    result.symbol.ccxt_symbol,
+                )
+                log.info(
+                    "execution_engine.shutdown_order_cancelled",
+                    order_id=order_id,
+                    exchange_order_id=result.exchange_order_id,
+                )
+            except Exception as e:
+                log.error(
+                    "execution_engine.shutdown_cancel_failed",
+                    order_id=order_id,
+                    exchange_order_id=result.exchange_order_id,
+                    error=str(e),
+                )
+
+        self._safety.clear()
 
     def _rejected_result(self, order: OrderRequest, reason: str) -> OrderResult:
         """Erstellt REJECTED OrderResult ohne Exchange-Kontakt."""

@@ -303,6 +303,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await strategy_engine.stop()
     if md_engine.is_running:
         await md_engine.stop()
+    # Baustein 7 (Shutdown Safety): noch offene/im Fill-Monitoring
+    # befindliche Orders best-effort cancelln, BEVOR die
+    # Exchange-Verbindungen geschlossen werden - danach waere kein
+    # Cancel mehr moeglich.
+    await execution_engine.shutdown()
     await pool.close_all()
     await feature_store.close()
     await bus.close()

@@ -543,8 +543,85 @@ class TestOrderManagement:
         result = await adapter.place_order(req)
         assert result.exchange_order_id == "12345"
         _, kwargs = adapter._ccxt.create_order.call_args
-        assert kwargs["params"] == {"reduceOnly": True}
+        assert kwargs["params"] == {
+            "clientOrderId": str(req.id),
+            "reduceOnly": True,
+        }
         assert kwargs["price"] == 65000.0
+
+    async def test_place_order_always_sends_client_order_id(self, adapter, monkeypatch):
+        """Baustein 7: order.id wird immer als clientOrderId gesendet
+        (Idempotency-Grundlage fuer Retries)."""
+        install_fake_ccxt(monkeypatch)
+        await adapter.connect()
+        req = make_order_request(order_type=OrderType.MARKET)
+
+        result = await adapter.place_order(req)
+
+        assert result.exchange_order_id == "12345"
+        _, kwargs = adapter._ccxt.create_order.call_args
+        assert kwargs["params"]["clientOrderId"] == str(req.id)
+
+    async def test_place_order_skips_dedup_lookup_when_fetch_order_unsupported(
+        self, adapter, monkeypatch
+    ):
+        """Adapter ohne fetchOrder-Support (has={}): kein Dedup-Lookup,
+        Order wird direkt erstellt - backward-kompatibles Default-Verhalten."""
+        fake = FakeCCXTExchange()
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+        req = make_order_request(order_type=OrderType.MARKET)
+
+        await adapter.place_order(req)
+
+        fake.fetch_order.assert_not_awaited()
+        fake.create_order.assert_awaited_once()
+
+    async def test_place_order_dedup_returns_existing_order_when_found(
+        self, adapter, monkeypatch
+    ):
+        """Wenn fetchOrder eine bereits existierende Order unter der
+        clientOrderId findet (z.B. nach einem Retry-Szenario), wird KEINE
+        neue Order erstellt - verhindert echte Doppel-Orders."""
+        fake = FakeCCXTExchange()
+        fake.has["fetchOrder"] = True
+        fake.fetch_order = AsyncMock(
+            return_value={
+                "id": "EXISTING-999",
+                "status": "closed",
+                "amount": "1",
+                "filled": "1",
+                "timestamp": 1_700_000_000_000,
+                "side": "buy",
+            }
+        )
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+        req = make_order_request(order_type=OrderType.MARKET)
+
+        result = await adapter.place_order(req)
+
+        assert result.exchange_order_id == "EXISTING-999"
+        fake.fetch_order.assert_awaited_once()
+        fake.create_order.assert_not_awaited()
+
+    async def test_place_order_dedup_lookup_failure_falls_through_to_create(
+        self, adapter, monkeypatch
+    ):
+        """Wenn fetchOrder unterstuetzt wird, aber selbst fehlschlaegt
+        (z.B. Order noch nicht auffindbar, Netzwerkfehler): der Lookup
+        darf die Submission niemals blockieren, es wird normal erstellt."""
+        fake = FakeCCXTExchange()
+        fake.has["fetchOrder"] = True
+        fake.fetch_order = AsyncMock(side_effect=RuntimeError("not found"))
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+        req = make_order_request(order_type=OrderType.MARKET)
+
+        result = await adapter.place_order(req)
+
+        assert result.exchange_order_id == "12345"
+        fake.create_order.assert_awaited_once()
 
     async def test_place_order_maps_error(self, adapter, monkeypatch):
         fake = FakeCCXTExchange()

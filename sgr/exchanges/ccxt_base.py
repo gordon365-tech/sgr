@@ -451,9 +451,31 @@ class CCXTBaseAdapter:
             order_type = self._map_order_type(order.order_type)
             quantity = float(order.quantity)
 
-            params: dict[str, Any] = {}
+            # Idempotency (Baustein 7): order.id ist eine stabile UUID und
+            # wird als clientOrderId gesendet. place_order wird bei
+            # transienten Fehlern bis zu 1x retryt (max_attempts=2); ohne
+            # clientOrderId wuerde ein Retry nach einem Timeout, bei dem die
+            # Exchange die erste Order bereits angenommen hatte, zu einer
+            # echten Doppel-Order fuehren. Vor jeder Neuerstellung pruefen
+            # wir daher zuerst per fetchOrder, ob unter dieser
+            # clientOrderId schon eine Order existiert. Siehe auch
+            # sgr/execution/order_safety.py Modul-Docstring Punkt 3
+            # (Exchange als Quelle der Wahrheit fuer Crash-Resistenz).
+            client_order_id = str(order.id)
+            params: dict[str, Any] = {"clientOrderId": client_order_id}
             if order.reduce_only:
                 params["reduceOnly"] = True
+
+            existing = await self._find_existing_order_by_client_id(
+                client_order_id, symbol
+            )
+            if existing is not None:
+                log.info(
+                    "exchange.duplicate_order_detected_via_client_id",
+                    order_id=client_order_id,
+                    exchange_order_id=existing.get("id"),
+                )
+                return self._parse_order_result(existing, order)
 
             raw = await self._ccxt.create_order(
                 symbol=symbol,
@@ -470,6 +492,31 @@ class CCXTBaseAdapter:
             raise
         except Exception as e:
             raise self._map_error(e) from e
+
+    async def _find_existing_order_by_client_id(
+        self, client_order_id: str, symbol: str
+    ) -> dict[str, Any] | None:
+        """
+        Prueft best-effort, ob unter dieser clientOrderId bereits eine Order
+        auf der Exchange existiert (Duplicate-Order-Schutz bei Retries).
+
+        Nur aktiv, wenn der Adapter fetchOrder unterstuetzt (self._ccxt.has).
+        Jeder Fehler (nicht gefunden, nicht unterstuetzt, Netzwerkfehler)
+        wird als "keine existierende Order gefunden" behandelt - dieser
+        Check darf eine Order-Submission niemals blockieren, nur ein
+        Duplikat vermeiden.
+        """
+        if not self._ccxt.has.get("fetchOrder"):
+            return None
+        try:
+            existing = await self._ccxt.fetch_order(
+                client_order_id, symbol, params={"clientOrderId": client_order_id}
+            )
+        except Exception:
+            return None
+        if not existing:
+            return None
+        return existing
 
     async def _simulate_order(self, order: OrderRequest) -> OrderResult:
         """

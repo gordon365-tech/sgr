@@ -164,6 +164,7 @@ def _patch_lifespan_dependencies(paper_mode: bool = True, has_adapters: bool = T
     strategy_engine.stop = AsyncMock()
 
     execution_engine = MagicMock()
+    execution_engine.shutdown = AsyncMock()
 
     orchestrator = MagicMock()
 

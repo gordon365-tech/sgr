@@ -1,232 +1,179 @@
 """
-SGR Order Safety & Idempotency
-===============================
+SGR Order Safety & Idempotency (Baustein 7)
+=============================================
 
-Implementiert umfassende Order-Sicherheit gegen Duplikate und Unknown States.
+Verhindert echte Doppel-Orders bei Retries und blockiert doppelte
+Submissions derselben order.id, die aus dem Prozess selbst kommen
+(z.B. Orchestrator-Retry-Logik, Event-Replay).
 
 Architektur:
 
-1. IDEMPOTENCY KEY
-   Eindeutige ID für jeden Order-Request (z.B. Signal ID + Exchange)
-   Exchange speichert: idempotency_key → exchange_order_id
-   Wiederholung mit gleichem Key → Exchange gibt alte Order zurück (kein Duplicate)
+1. IDEMPOTENCY KEY = order.id
+   order.id ist eine stabile UUID pro OrderRequest und bleibt bei einem
+   Retry derselben Order identisch. Bewusst NICHT signal_id/symbol/side,
+   da das faelschlich unterschiedliche, legitime Orders blockieren wuerde
+   (z.B. zwei verschiedene Signale, gleiches Symbol/Seite kurz
+   hintereinander - Cooldown/Kill-Switch regeln Trading-Frequenz bereits
+   an anderer Stelle, siehe Baustein 3/2). Idempotency-Schutz betrifft
+   ausschliesslich Netzwerk-Retries DERSELBEN OrderRequest.
 
-2. DUPLICATE DETECTION  
-   Vor jedem Order-Submit:
-   - Prüfe: Exist bereits Order mit gleichem idempotency_key?
-   - JA → Return cached result (Order wurde bereits gesendet)
-   - NEIN → Submit neu
+2. IN-PROCESS DUPLICATE DETECTION
+   Vor jedem Order-Submit: ist order.id bereits als in-flight bekannt
+   (dieser Prozess, seit dessen Start)? Falls ja: Submission wird sofort
+   blockiert, ohne die Exchange zu kontaktieren.
 
-3. UNKNOWN STATE HANDLING
-   Wenn Order-Status nach Submit unklar:
-   UNKNOWN → Exchange lookup → Reconciliation → Decision
-   NICHT blind neu submitten
+3. EXCHANGE-SEITIGE IDEMPOTENCY (persistent, prozessuebergreifend)
+   Die eigentliche Crash-/Neustart-resistente Wahrheit liegt NICHT hier,
+   sondern bei der Exchange selbst: sgr/exchanges/ccxt_base.py::place_order
+   sendet order.id als clientOrderId und prueft bei einem Retry per
+   fetchOrder, ob die Exchange die Order bereits akzeptiert hat, bevor
+   eine neue erzeugt wird. Das ist robuster als ein zusaetzliches
+   DB-Feld, das synchron zur Exchange gehalten werden muesste - die
+   Exchange ist hier die Quelle der Wahrheit, kein SGR-Duplikat davon.
 
-4. IN-FLIGHT TRACKING
-   Aktive Orders im Memory + DB
-   Nach Crash: Restore aus DB, reconcile mit Exchange
+4. UNKNOWN STATE HANDLING
+   Wenn der Submit-Call selbst fehlschlaegt (Netzwerkfehler, Timeout),
+   ist der tatsaechliche Order-Status unklar: die Exchange koennte die
+   Order trotzdem angenommen haben. SafeOrderExecutor gibt in diesem
+   Fall KEINEN automatischen Retry, sondern ein REJECTED-Result mit
+   raw_response["unknown"]=True als expliziten Marker fuer Reconciliation
+   - kein blindes Neu-Submitten.
 
 Fail-Safe Rule:
-Bei Unsicherheit → STOP und zur Reconciliation
-Niemals automatisch erneut submitten
+Bei Unsicherheit -> STOP und zur Reconciliation, niemals automatisch
+erneut submitten.
 """
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from decimal import Decimal
-from enum import StrEnum
-from typing import Any
-
-from pydantic import BaseModel, Field
 
 from sgr.core.logging import get_logger
 from sgr.core.types import OrderRequest, OrderResult, OrderStatus
 
 log = get_logger(__name__)
 
-
-class IdempotencyKey(BaseModel):
-    """
-    Eindeutige Idempotency Key für Order-Sicherheit.
-    
-    Struktur: {signal_id}#{exchange}#{symbol}#{side}
-    Beispiel: "sig-abc123#pionex#BTC/USDT#BUY"
-    """
-
-    signal_id: str
-    exchange: str
-    symbol: str
-    side: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
-
-    def to_string(self) -> str:
-        """Serialisiert zu String für Exchange API."""
-        return f"{self.signal_id}#{self.exchange}#{self.symbol}#{self.side}"
-
-    @classmethod
-    def from_order_request(cls, order: OrderRequest) -> IdempotencyKey:
-        """Erzeugt Key aus OrderRequest."""
-        return cls(
-            signal_id=str(order.signal_id),
-            exchange=order.symbol.exchange.value,
-            symbol=order.symbol.ccxt_symbol,
-            side=order.side.value,
-        )
-
-
-class DuplicateOrderBlockedEvent(BaseModel):
-    """Event wenn Duplicate Order blockiert wird."""
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    idempotency_key: str
-    exchange_order_id: str  # Die bereits existierende Order
-    reason: str
-
-
-class OrderSubmissionState(StrEnum):
-    """Möglich Zustände einer Order nach dem Submit."""
-
-    SUBMITTED = "submitted"  # Erfolgreich akzeptiert, noch nicht gefüllt
-    FILLED = "filled"  # Komplett gefüllt
-    PARTIAL_FILL = "partial_fill"  # Teilweise gefüllt
-    REJECTED = "rejected"  # Exchange hat abgelehnt
-    CANCELLED = "cancelled"  # War offen, wurde gecancelt
-    UNKNOWN = "unknown"  # Zustand unbekannt (Netzwerkfehler, etc.)
-    DUPLICATE_BLOCKED = "duplicate_blocked"  # War bereits submitted
+ExchangeSubmitFn = Callable[[OrderRequest], Awaitable[OrderResult]]
 
 
 class SafeOrderExecutor:
     """
-    Sichere Order-Execution mit Duplicate Detection und Unknown State Handling.
-    
-    WICHTIG: Diese Klasse wird VOR dem tatsächlichen Exchange-Call
-    in ExecutionEngine.execute() eingeschaltet (quasi Middleware).
+    Sichere Order-Execution mit In-Process Duplicate Detection und
+    Unknown-State-Handling bei Submit-Fehlern.
+
+    Wird als Middleware VOR dem tatsaechlichen Exchange-Call in
+    ExecutionEngine._execute_internal() eingeschaltet.
+
+    In-Memory only: der Tracking-State ist bewusst nicht persistent -
+    Crash-/Neustart-Resistenz liefert die Exchange-seitige clientOrderId
+    in ccxt_base.py::place_order, nicht dieses Modul (siehe Modul-
+    Docstring, Punkt 3).
     """
 
-    def __init__(self, order_repository: Any) -> None:
-        """
-        Args:
-            order_repository: Repository für Order-Persistenz
-        """
-        self._order_repo = order_repository
-        self._in_flight_orders: dict[str, OrderResult] = {}  # In-memory cache
+    def __init__(self) -> None:
+        self._in_flight: dict[str, OrderResult] = {}
 
     async def execute_safely(
         self,
-        order_request: OrderRequest,
-        exchange_submit_fn: Any,  # async callable(order_request) -> OrderResult
+        order: OrderRequest,
+        exchange_submit_fn: ExchangeSubmitFn,
     ) -> OrderResult:
         """
-        Führt Order aus mit Duplicate-Detection und Unknown State Handling.
-        
-        Sequence:
-        1. Idempotency Key berechnen
-        2. Duplicate Check (DB + Memory)
-        3. Falls Duplicate: Return cached result
-        4. Falls neu: Submit zu Exchange
-        5. Fehler bei Submit? → Unknown State Handling
-        6. Erfolgreich? → Speichern + Cache
-        
+        Fuehrt eine Order aus mit In-Process Duplicate-Detection.
+
         Args:
-            order_request: Der Order
-            exchange_submit_fn: Async function (request) -> OrderResult
-            
+            order: Der OrderRequest.
+            exchange_submit_fn: async callable(order) -> OrderResult,
+                typischerweise adapter.place_order.
+
         Returns:
-            OrderResult (entweder neu oder aus Cache)
+            OrderResult - entweder das echte Submit-Ergebnis, ein
+            REJECTED-Result mit raw_response["duplicate"]=True, oder ein
+            REJECTED-Result mit raw_response["unknown"]=True bei
+            Submit-Fehler.
         """
+        order_key = str(order.id)
 
-        idempotency_key = IdempotencyKey.from_order_request(order_request)
-        key_str = idempotency_key.to_string()
-
-        log.info(
-            "safe_executor.checking_duplicate",
-            idempotency_key=key_str,
-            order_id=str(order_request.id),
-        )
-
-        # 1. Check in-memory cache (schnell, nur diese Process Instance)
-        if key_str in self._in_flight_orders:
-            cached = self._in_flight_orders[key_str]
+        if order_key in self._in_flight:
+            cached = self._in_flight[order_key]
             log.warning(
-                "safe_executor.duplicate_blocked_from_memory",
-                idempotency_key=key_str,
+                "safe_executor.duplicate_blocked",
+                order_id=order_key,
                 exchange_order_id=cached.exchange_order_id,
             )
-            return self._make_duplicate_result(
-                cached,
-                reason="Blocked by in-memory duplicate cache"
-            )
+            return self._make_duplicate_result(cached)
 
-        # 2. Check Datenbank (Crash-Recovery: Orders persist über Neustarts)
-        if self._order_repo:
-            existing = await self._order_repo.find_by_idempotency_key(key_str)
-            if existing:
-                log.warning(
-                    "safe_executor.duplicate_blocked_from_db",
-                    idempotency_key=key_str,
-                    existing_order_id=existing.get("id"),
-                )
-                # Reconstruct OrderResult von DB
-                cached_result = self._order_result_from_db_record(existing)
-                self._in_flight_orders[key_str] = cached_result
-                return self._make_duplicate_result(
-                    cached_result,
-                    reason="Blocked by database duplicate record"
-                )
-
-        # 3. Neu: Submit zu Exchange
-        log.info(
-            "safe_executor.submitting_order",
-            idempotency_key=key_str,
-            order_id=str(order_request.id),
+        # Placeholder VOR dem Exchange-Call setzen (nicht erst danach) -
+        # sonst greift der Duplicate-Check nicht waehrend ein erster
+        # Aufruf noch auf die Exchange-Antwort wartet (die eigentliche
+        # Race, die dieser Schutz verhindern soll).
+        placeholder = OrderResult(
+            request_id=order.id,
+            exchange_order_id="",
+            symbol=order.symbol,
+            status=OrderStatus.PENDING,
+            filled_quantity=Decimal("0"),
+            trading_mode=order.trading_mode,
+            submitted_at=datetime.now(tz=UTC),
+            raw_response={},
         )
+        self._in_flight[order_key] = placeholder
 
         try:
-            result = await exchange_submit_fn(order_request, idempotency_key=key_str)
+            result = await exchange_submit_fn(order)
         except Exception as e:
             log.error(
                 "safe_executor.submit_error",
-                idempotency_key=key_str,
+                order_id=order_key,
                 error=str(e),
                 exc_info=True,
             )
-            # Unknown State: Netzwerkfehler, Timeout, etc.
-            # Return UNKNOWN state statt REJECTED
-            return self._make_unknown_result(order_request, str(e))
+            unknown_result = self._make_unknown_result(order, str(e))
+            self._in_flight.pop(order_key, None)
+            return unknown_result
 
-        # 4. Success: Cache + Speichern
-        self._in_flight_orders[key_str] = result
-
-        if self._order_repo:
-            await self._order_repo.create(
-                {
-                    "id": str(order_request.id),
-                    "idempotency_key": key_str,
-                    "exchange_order_id": result.exchange_order_id,
-                    "symbol": str(order_request.symbol),
-                    "side": order_request.side.value,
-                    "quantity": order_request.quantity,
-                    "status": result.status.value,
-                    "submitted_at": result.submitted_at,
-                }
-            )
-
-        log.info(
-            "safe_executor.order_submitted_success",
-            idempotency_key=key_str,
-            exchange_order_id=result.exchange_order_id,
-            status=result.status.value,
-        )
-
+        self._in_flight[order_key] = result
         return result
 
-    def _make_duplicate_result(self, original: OrderResult, reason: str) -> OrderResult:
-        """Erstellt DUPLICATE_BLOCKED Result aus Original."""
+    def release(self, order: OrderRequest) -> None:
+        """
+        Gibt das In-Process-Tracking fuer eine Order frei, sobald sie
+        terminiert ist (FILLED/CANCELLED/REJECTED). Muss vom Aufrufer
+        (ExecutionEngine) explizit aufgerufen werden, sobald der
+        Order-Lifecycle abgeschlossen ist - Symmetrie zu execute_safely().
+        """
+        self._in_flight.pop(str(order.id), None)
+
+    def get_inflight(self, order: OrderRequest) -> OrderResult | None:
+        """Gibt das aktuellste bekannte In-Flight-Result zurueck, falls
+        vorhanden (z.B. fuer Shutdown-Safety-Cancel-Zwecke)."""
+        return self._in_flight.get(str(order.id))
+
+    def update_inflight(self, order: OrderRequest, result: OrderResult) -> None:
+        """Aktualisiert das getrackte Result waehrend des Fill-Monitorings
+        (z.B. nach jedem Poll), damit shutdown() immer den zuletzt
+        bekannten Status/exchange_order_id sieht."""
+        if str(order.id) in self._in_flight:
+            self._in_flight[str(order.id)] = result
+
+    def all_inflight(self) -> dict[str, OrderResult]:
+        """Alle aktuell getrackten In-Flight-Orders (fuer Shutdown)."""
+        return dict(self._in_flight)
+
+    def clear(self) -> None:
+        """Verwirft das gesamte In-Flight-Tracking (nach Shutdown-Cleanup)."""
+        self._in_flight.clear()
+
+    def _make_duplicate_result(self, original: OrderResult) -> OrderResult:
+        """Erstellt ein REJECTED-Result mit Duplicate-Markierung aus dem
+        Original-Ergebnis (kein neuer OrderStatus-Wert noetig)."""
         return OrderResult(
             request_id=original.request_id,
             exchange_order_id=original.exchange_order_id,
             symbol=original.symbol,
-            status=OrderStatus.REJECTED,  # Duplicate = nicht ausgeführt
+            status=OrderStatus.REJECTED,
             filled_quantity=Decimal("0"),
             fees=Decimal("0"),
             submitted_at=original.submitted_at,
@@ -234,56 +181,30 @@ class SafeOrderExecutor:
             raw_response={
                 "duplicate": True,
                 "original_exchange_order_id": original.exchange_order_id,
-                "reason": reason,
+                "rejection_reason": "Duplicate order submission blocked",
             },
         )
 
-    def _make_unknown_result(
-        self,
-        order_request: OrderRequest,
-        error: str,
-    ) -> OrderResult:
-        """Erstellt UNKNOWN Result bei Submit-Fehler."""
+    def _make_unknown_result(self, order: OrderRequest, error: str) -> OrderResult:
+        """Erstellt ein REJECTED-Result mit Unknown-State-Markierung bei
+        Submit-Fehler (kein neuer OrderStatus-Wert noetig - REJECTED plus
+        raw_response["unknown"]=True signalisiert eindeutig: dies ist
+        KEINE bestaetigte Ablehnung durch die Exchange, sondern ein
+        unklarer Zustand, der Reconciliation braucht, bevor erneut
+        submittet werden darf)."""
         return OrderResult(
-            request_id=order_request.id,
-            exchange_order_id=f"UNKNOWN-{order_request.id}",
-            symbol=order_request.symbol,
-            status=OrderStatus.UNKNOWN,  # Custom Status für Reconciliation
+            request_id=order.id,
+            exchange_order_id="",
+            symbol=order.symbol,
+            status=OrderStatus.REJECTED,
             filled_quantity=Decimal("0"),
             fees=Decimal("0"),
-            submitted_at=datetime.now(UTC),
-            trading_mode=order_request.trading_mode,
+            submitted_at=datetime.now(tz=UTC),
+            trading_mode=order.trading_mode,
             raw_response={
                 "unknown": True,
                 "error": error,
+                "rejection_reason": f"Execution error: {error}",
                 "action_required": "Reconciliation needed to determine actual status",
             },
         )
-
-    def _order_result_from_db_record(self, record: dict[str, Any]) -> OrderResult:
-        """Reconstructs OrderResult von DB Record."""
-        # Simplified - würde volle Rekonstruktion durchführen
-        from sgr.core.types import ExchangeID, Symbol
-
-        return OrderResult(
-            request_id=record.get("id"),
-            exchange_order_id=record.get("exchange_order_id"),
-            symbol=Symbol.parse_obj({"base": "BTC", "quote": "USDT", "exchange": ExchangeID.PIONEX}),
-            status=OrderStatus[record.get("status", "REJECTED").upper()],
-            filled_quantity=Decimal(str(record.get("filled_quantity", 0))),
-            fees=Decimal(str(record.get("fees", 0))),
-            submitted_at=record.get("submitted_at"),
-            trading_mode=record.get("trading_mode"),
-        )
-
-
-# === Custom OrderStatus für Unknown Submissions ===
-
-# Extension zu sgr/core/types.py OrderStatus:
-# OrderStatus sollte um UNKNOWN erweitert werden
-"""
-class OrderStatus(StrEnum):
-    ...
-    UNKNOWN = "unknown"  # NEW - Order status uncertain, needs reconciliation
-    DUPLICATE = "duplicate"  # NEW - Duplicate blocked
-"""

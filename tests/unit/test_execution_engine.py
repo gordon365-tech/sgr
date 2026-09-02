@@ -22,6 +22,7 @@ test_risk_engine.py::TestKillSwitch vollstaendig abgedeckt.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -327,7 +328,9 @@ class TestFailSafeExceptionHandling:
     async def test_unexpected_exception_returns_rejected_not_crash(
         self, engine: ExecutionEngine, mock_pool: tuple[MagicMock, AsyncMock]
     ) -> None:
-        """Jede unerwartete Exception -> REJECTED Result, kein uncontrolled Crash."""
+        """Ein Fehler beim Submit selbst -> REJECTED Result (via
+        SafeOrderExecutor Unknown-State-Handling, siehe
+        TestSafeOrderExecutorIntegration), kein uncontrolled Crash."""
         _pool, adapter = mock_pool
         adapter.place_order = AsyncMock(side_effect=RuntimeError("exchange down"))
         order = _make_order_request()
@@ -336,6 +339,32 @@ class TestFailSafeExceptionHandling:
 
         assert result.status == OrderStatus.REJECTED
         assert "Execution error" in result.raw_response["rejection_reason"]
+
+    async def test_unexpected_exception_outside_place_order_returns_rejected(
+        self,
+        engine: ExecutionEngine,
+        mock_pool: tuple[MagicMock, AsyncMock],
+        mocker: pytest_mock.MockerFixture,
+    ) -> None:
+        """Ein unerwarteter Fehler AUSSERHALB von place_order (z.B. im
+        Fill-Monitoring nach erfolgreichem Submit) wird vom aeusseren
+        try/except in execute() abgefangen -> REJECTED, kein Crash. Anders
+        als ein place_order()-Fehler (siehe SafeOrderExecutor
+        Unknown-State) ist das ein 'echter' unerwarteter Fehler im
+        Engine-Code selbst."""
+        _pool, adapter = mock_pool
+        order = _make_order_request(order_type=OrderType.LIMIT)
+        submitted = _make_order_result(order, status=OrderStatus.SUBMITTED)
+        adapter.place_order = AsyncMock(return_value=submitted)
+        mocker.patch("asyncio.sleep", new=AsyncMock())
+        adapter.get_order = AsyncMock(side_effect=RuntimeError("unexpected bug"))
+
+        result = await engine.execute(order)
+
+        assert result.status == OrderStatus.REJECTED
+        assert "Execution error" in result.raw_response["rejection_reason"]
+        # Duplicate-Guard-Tracking muss trotz Crash freigegeben sein (finally).
+        assert engine._safety.get_inflight(order) is None
 
     async def test_rejected_result_has_zero_fill(
         self, engine: ExecutionEngine, mock_pool: tuple[MagicMock, AsyncMock]
@@ -633,3 +662,197 @@ class TestPreflightIntegration:
         Der echte PreflightValidator muss in PAPER weiterhin ohne echte
         Exchange-Calls durchlaufen (siehe test_preflight.py::TestPaperMode)."""
         assert isinstance(engine._preflight, PreflightValidator)
+
+
+class TestSafeOrderExecutorIntegration:
+    """
+    Baustein 7: End-to-End-Verhalten von ExecutionEngine mit der echten
+    SafeOrderExecutor-Middleware (sgr/execution/order_safety.py). Die
+    Middleware selbst ist isoliert in tests/execution/test_order_safety.py
+    getestet - hier nur die Verdrahtung/Integration.
+    """
+
+    async def test_second_concurrent_execute_for_same_order_id_is_rejected(
+        self, engine: ExecutionEngine, mock_pool: tuple[MagicMock, AsyncMock]
+    ) -> None:
+        """Zwei gleichzeitige execute()-Aufrufe fuer dieselbe order.id:
+        nur der erste erreicht die Exchange, der zweite wird sofort
+        REJECTED, ohne auf den ersten zu warten."""
+        _pool, adapter = mock_pool
+        order = _make_order_request()
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_place_order(_order: OrderRequest) -> OrderResult:
+            entered.set()
+            await release.wait()
+            return _make_order_result(_order, status=OrderStatus.FILLED)
+
+        adapter.place_order = AsyncMock(side_effect=slow_place_order)
+
+        first_task = asyncio.create_task(engine.execute(order))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+
+        second_result = await engine.execute(order)
+
+        assert second_result.status == OrderStatus.REJECTED
+        assert second_result.raw_response.get("duplicate") is True
+
+        release.set()
+        first_result = await asyncio.wait_for(first_task, timeout=5)
+        assert first_result.status == OrderStatus.FILLED
+
+    async def test_inflight_tracking_released_after_completion(
+        self, engine: ExecutionEngine, mock_pool: tuple[MagicMock, AsyncMock]
+    ) -> None:
+        """Nach Abschluss von execute() (FILLED) ist die order.id nicht
+        mehr im SafeOrderExecutor-Tracking - ein spaeterer, unabhaengiger
+        Aufruf mit derselben ID ist NICHT blockiert."""
+        _pool, adapter = mock_pool
+        order = _make_order_request()
+        adapter.place_order = AsyncMock(
+            return_value=_make_order_result(order, status=OrderStatus.FILLED)
+        )
+
+        result = await engine.execute(order)
+
+        assert result.status == OrderStatus.FILLED
+        assert engine._safety.get_inflight(order) is None
+
+    async def test_inflight_tracking_released_on_kill_switch_rejection(
+        self, engine: ExecutionEngine, mock_pool: tuple[MagicMock, AsyncMock]
+    ) -> None:
+        """Bei REJECTED durch Kill Switch (kein Exchange-Kontakt) darf kein
+        Eintrag im SafeOrderExecutor-Tracking zurueckbleiben - execute_safely()
+        wird in diesem Pfad gar nicht erst aufgerufen, also gibt es nichts
+        freizugeben, aber release() muss das fehlerfrei tolerieren."""
+        engine._kill_switch.is_active = True  # type: ignore[misc]
+        order = _make_order_request()
+
+        result = await engine.execute(order)
+
+        assert result.status == OrderStatus.REJECTED
+        assert engine._safety.get_inflight(order) is None
+
+    async def test_submit_error_returns_rejected_unknown_state(
+        self, engine: ExecutionEngine, mock_pool: tuple[MagicMock, AsyncMock]
+    ) -> None:
+        """Ein Fehler beim Submit selbst (z.B. Netzwerkfehler) fuehrt zu
+        einem REJECTED-Result mit explizitem Unknown-Marker statt einer
+        unbehandelten Exception oder einem blinden Retry."""
+        _pool, adapter = mock_pool
+        order = _make_order_request()
+        adapter.place_order = AsyncMock(side_effect=RuntimeError("connection reset"))
+
+        result = await engine.execute(order)
+
+        assert result.status == OrderStatus.REJECTED
+        assert result.raw_response.get("unknown") is True
+
+
+class TestShutdownSafety:
+    """
+    Baustein 7: best-effort Cancel aller Orders, die sich beim Shutdown
+    noch im Fill-Monitoring befinden, bevor Exchange-Verbindungen
+    geschlossen werden.
+    """
+
+    async def test_shutdown_with_no_inflight_orders_is_a_noop(
+        self, engine: ExecutionEngine, mock_pool: tuple[MagicMock, AsyncMock]
+    ) -> None:
+        _pool, adapter = mock_pool
+
+        await engine.shutdown()
+
+        adapter.cancel_order.assert_not_awaited()
+
+    async def test_shutdown_cancels_tracked_inflight_order(
+        self, engine: ExecutionEngine, mock_pool: tuple[MagicMock, AsyncMock]
+    ) -> None:
+        """Order, die noch im Fill-Monitoring haengt (status=SUBMITTED),
+        wird bei shutdown() gecancelt."""
+        pool, adapter = mock_pool
+        order = _make_order_request()
+        inflight_result = _make_order_result(
+            order, status=OrderStatus.SUBMITTED, exchange_order_id="EX-INFLIGHT"
+        )
+        engine._safety._in_flight[str(order.id)] = inflight_result
+        pool.get = MagicMock(return_value=adapter)
+
+        await engine.shutdown()
+
+        adapter.cancel_order.assert_awaited_once_with(
+            "EX-INFLIGHT", order.symbol.ccxt_symbol
+        )
+        assert engine._safety.all_inflight() == {}
+
+    async def test_shutdown_skips_already_terminal_orders(
+        self, engine: ExecutionEngine, mock_pool: tuple[MagicMock, AsyncMock]
+    ) -> None:
+        """Eine Order, die bereits FILLED/CANCELLED/REJECTED ist (Race
+        zwischen release() und shutdown()), wird nicht nochmal gecancelt."""
+        _pool, adapter = mock_pool
+        order = _make_order_request()
+        filled_result = _make_order_result(order, status=OrderStatus.FILLED)
+        engine._safety._in_flight[str(order.id)] = filled_result
+
+        await engine.shutdown()
+
+        adapter.cancel_order.assert_not_awaited()
+
+    async def test_shutdown_skips_placeholder_order_without_exchange_id(
+        self, engine: ExecutionEngine, mock_pool: tuple[MagicMock, AsyncMock]
+    ) -> None:
+        """Order noch im Placeholder-Zustand (place_order() noch nicht
+        zurueckgekehrt, keine exchange_order_id bekannt): shutdown() darf
+        keinen Cancel versuchen, da es kein gueltiges Ziel gibt."""
+        _pool, adapter = mock_pool
+        order = _make_order_request()
+        placeholder_result = _make_order_result(
+            order, status=OrderStatus.PENDING, exchange_order_id=""
+        )
+        engine._safety._in_flight[str(order.id)] = placeholder_result
+
+        await engine.shutdown()
+
+        adapter.cancel_order.assert_not_awaited()
+        assert engine._safety.all_inflight() == {}
+
+    async def test_shutdown_cancel_failure_does_not_raise(
+        self, engine: ExecutionEngine, mock_pool: tuple[MagicMock, AsyncMock]
+    ) -> None:
+        """Best-effort: ein fehlschlagender Cancel darf shutdown() nicht
+        zum Absturz bringen (fail-safe Cleanup-Pfad)."""
+        _pool, adapter = mock_pool
+        order = _make_order_request()
+        inflight_result = _make_order_result(
+            order, status=OrderStatus.SUBMITTED, exchange_order_id="EX-INFLIGHT"
+        )
+        engine._safety._in_flight[str(order.id)] = inflight_result
+        adapter.cancel_order = AsyncMock(side_effect=RuntimeError("network down"))
+
+        await engine.shutdown()
+
+        assert engine._safety.all_inflight() == {}
+
+    async def test_shutdown_cancels_multiple_inflight_orders_independently(
+        self, engine: ExecutionEngine, mock_pool: tuple[MagicMock, AsyncMock]
+    ) -> None:
+        """Ein fehlschlagender Cancel fuer eine Order darf den Cancel
+        einer anderen Order nicht verhindern."""
+        _pool, adapter = mock_pool
+        order_a = _make_order_request()
+        order_b = _make_order_request()
+        engine._safety._in_flight[str(order_a.id)] = _make_order_result(
+            order_a, status=OrderStatus.SUBMITTED, exchange_order_id="EX-A"
+        )
+        engine._safety._in_flight[str(order_b.id)] = _make_order_result(
+            order_b, status=OrderStatus.SUBMITTED, exchange_order_id="EX-B"
+        )
+        adapter.cancel_order = AsyncMock(side_effect=[RuntimeError("fails for A"), None])
+
+        await engine.shutdown()
+
+        assert adapter.cancel_order.await_count == 2
+        assert engine._safety.all_inflight() == {}
