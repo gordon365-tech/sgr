@@ -10,13 +10,11 @@ Testziele:
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 from sgr.api.main import create_app
-from sgr.core.types import TradingMode
 
 
 class TestHealthLive:

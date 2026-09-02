@@ -37,10 +37,6 @@ Metrics Categories:
 
 from __future__ import annotations
 
-from datetime import datetime, UTC
-from decimal import Decimal
-from typing import Any
-
 from prometheus_client import Counter, Gauge, Histogram, Info
 
 from sgr.core.logging import get_logger
@@ -200,7 +196,7 @@ reconciliation_failures_total = Counter(
 reconciliation_discrepancies_found = Counter(
     "sgr_reconciliation_discrepancies_found",
     "Discrepancies found during reconciliation",
-    ["trading_mode", "type"],  # type: order_mismatch, position_mismatch, etc.
+    ["trading_mode", "type"],  # Werte fuer 'type': order_mismatch, position_mismatch, etc.
 )
 
 
@@ -276,7 +272,7 @@ def record_order_filled(
         side=side,
         trading_mode=trading_mode,
     ).inc()
-    
+
     order_latency_seconds.labels(
         exchange=exchange,
         symbol=symbol,
@@ -331,7 +327,7 @@ def record_trading_cycle_complete(
         status=status,
         symbol=symbol,
     ).inc()
-    
+
     trading_cycles_duration_seconds.labels(
         symbol=symbol,
     ).observe(duration_seconds)

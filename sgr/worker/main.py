@@ -29,11 +29,10 @@ import signal
 import sys
 from typing import Any
 
-from sgr.api.main import lifespan, AppState
-from sgr.core.logging import setup_logging
+from sgr.api.main import AppState, lifespan
 from sgr.core.config import get_config
-from sgr.core.types import Environment, TradingMode
-
+from sgr.core.logging import setup_logging
+from sgr.core.types import Environment
 
 logger = logging.getLogger(__name__)
 

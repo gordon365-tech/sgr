@@ -21,13 +21,18 @@ Test Coverage:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
-from uuid import uuid4
 
 import pytest
 
+# Benoetigt eine echte Redis-Instanz (echter EventBus, kein Mock) -
+# in Sandbox/CI ohne laufende Redis-Instanz nicht ausfuehrbar.
+# Siehe pyproject.toml: standardmaessig via -m ausgeschlossen.
+pytestmark = pytest.mark.requires_redis
+
 from sgr.core.types import (
+    Environment,
     ExchangeID,
     MarketRegime,
     OrderStatus,
@@ -36,20 +41,20 @@ from sgr.core.types import (
     Signal,
     SignalDirection,
     Symbol,
-    TradingMode,
     TradingCycleStatus,
+    TradingMode,
 )
 from sgr.exchanges.factory import ExchangePool
 from sgr.execution.engine import ExecutionEngine
+from sgr.market_data.feature_engineering import OHLCV
 from sgr.market_data.feature_store import FeatureStore
-from sgr.market_data.types import FeatureSet, OHLCV
+from sgr.market_data.types import FeatureSet
 from sgr.orchestrator.engine import TradingOrchestrator
 from sgr.portfolio.engine import PortfolioEngine
 from sgr.risk.engine import RiskEngine
 from sgr.strategy.base import BaseStrategy, ValidationStatus
-from sgr.strategy.registry import StrategyRegistry
 from sgr.strategy.engine import StrategyEngine
-
+from sgr.strategy.registry import StrategyRegistry
 
 # ============================================================================
 # Test Fixtures
@@ -61,7 +66,7 @@ class MockStrategy(BaseStrategy):
 
     name = "test_strategy"
     version = "1.0.0"
-    supported_regimes = [MarketRegime.TRENDING, MarketRegime.UNKNOWN]
+    supported_regimes = [MarketRegime.TRENDING_UP, MarketRegime.UNKNOWN]
 
     def generate_signal(self, context: Any) -> Signal | None:
         symbol = context.symbol
@@ -82,7 +87,7 @@ def paper_mode_config(tmp_path: Any) -> Any:
 
     return SGRConfig(
         trading_mode=TradingMode.PAPER,
-        environment="testing",
+        environment=Environment.DEVELOPMENT,
         version="0.1.0-test",
     )
 

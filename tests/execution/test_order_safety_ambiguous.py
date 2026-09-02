@@ -11,12 +11,13 @@ Testszenarios:
 
 from __future__ import annotations
 
-from decimal import Decimal
 from datetime import UTC, datetime
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+
 from sgr.core.types import (
     ExchangeID,
     OrderRequest,

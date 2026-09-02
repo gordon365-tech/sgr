@@ -22,12 +22,10 @@ Oder für einzelne Tests:
     pytest tests/docker_crash_tests/test_crash_scenarios.py::test_worker_kill_9 -v
 """
 
-import pytest
 import asyncio
-import time
-from decimal import Decimal
-from datetime import datetime, UTC
 from typing import Any
+
+import pytest
 
 # Diese Tests benötigen Docker Compose zu laufen
 # Tag: @pytest.mark.docker_crash
@@ -36,7 +34,7 @@ from typing import Any
 @pytest.mark.docker_crash
 class TestCrashScenarios:
     """Crash & Failure Scenario Tests."""
-    
+
     @pytest.mark.asyncio
     async def test_api_restart_during_cycle(self, api_client: Any, order_tracker: Any) -> None:
         """
@@ -49,26 +47,26 @@ class TestCrashScenarios:
         # Trigger einen Trading Cycle
         order_id = await api_client.trigger_cycle("BTC/USDT", "1h")
         assert order_id is not None
-        
+
         # Während Cycle läuft: API Container neustarten
         await api_client.restart_container()
-        
+
         # Warten bis API wieder up
         await api_client.wait_healthy(timeout=30)
-        
+
         # Prüfe: keine Duplicate Orders auf Exchange
         orders = await order_tracker.get_orders(order_id)
         assert len(orders) <= 1, "Duplicate orders detected!"
-        
+
         # Prüfe: Order Status ist konsistent
         if orders:
             order = orders[0]
             assert order["status"] in ["filled", "pending", "cancelled"]
-    
+
     @pytest.mark.asyncio
     async def test_worker_restart_during_execution(
-        self, 
-        worker_client: Any, 
+        self,
+        worker_client: Any,
         order_tracker: Any,
     ) -> None:
         """
@@ -81,28 +79,28 @@ class TestCrashScenarios:
         """
         # Starte einen Trading Cycle
         cycle_id = await worker_client.start_trading_cycle()
-        
+
         # Warte bis Order submitted
         await asyncio.sleep(2)
-        
+
         # Container forciert neustarten
         await worker_client.restart_container()
-        
+
         # Warten bis Worker wieder up
         await worker_client.wait_healthy(timeout=30)
-        
+
         # Reconcile
         await worker_client.run_reconciliation()
-        
+
         # Prüfe: keine Duplicates
         orders = await order_tracker.get_orders_for_cycle(cycle_id)
         assert len(orders) <= 1
-        
+
         if orders:
             order = orders[0]
             # Order sollte konsistent sein mit Recovery State
             assert order["status"] in ["filled", "cancelled"]
-    
+
     @pytest.mark.asyncio
     async def test_worker_kill_9_recovery(
         self,
@@ -121,31 +119,31 @@ class TestCrashScenarios:
         # Starte Trading Cycle
         cycle_id = await worker_client.start_trading_cycle()
         await asyncio.sleep(1)
-        
+
         # Kill -9: kein Signal Handler, sofort weg
         await worker_client.kill_process_9()
-        
+
         # Warten Sie Worker ist weg
         await asyncio.sleep(1)
         assert not await worker_client.is_running()
-        
+
         # Prüfe DB State: waren Orders geloggt?
         orders_in_db = await db_client.get_orders_for_cycle(cycle_id)
         initial_order_count = len(orders_in_db)
-        
+
         # Container neu starten
         await worker_client.restart_container()
         await worker_client.wait_healthy(timeout=30)
-        
+
         # Reconciliation run
         await worker_client.run_reconciliation()
-        
+
         # Prüfe: Order count sollte sich NICHT erhöht haben
         orders_after_recovery = await db_client.get_orders_for_cycle(cycle_id)
         assert (
             len(orders_after_recovery) == initial_order_count
         ), "Duplicate orders appeared after kill -9 recovery"
-    
+
     @pytest.mark.asyncio
     async def test_redis_loss_during_event_publish(
         self,
@@ -163,26 +161,26 @@ class TestCrashScenarios:
         """
         # Trigger Trading Cycle
         order_id = await worker_client.trigger_cycle("BTC/USDT")
-        
+
         # Während Execution: Redis stoppen
         await redis_client.stop_container()
-        
+
         # Trading sollte weitergehen (Fail-Safe!)
         # Redis ist ein "nice-to-have" für Observability, keine Blocker
-        
+
         # Nach kurzer Zeit: Redis wieder starten
         await asyncio.sleep(3)
         await redis_client.start_container()
-        
+
         # Warten bis Redis healthy
         await redis_client.wait_healthy(timeout=15)
-        
+
         # Prüfe: Order wurde trotzdem verarbeitet
         orders = await order_tracker.get_orders(order_id)
         # Order kann FILLED oder FAILED sein - beides OK
         # aber NICHT Duplicate
         assert len(orders) <= 1
-    
+
     @pytest.mark.asyncio
     async def test_postgres_loss_after_exchange_order(
         self,
@@ -202,29 +200,29 @@ class TestCrashScenarios:
         """
         # Trigger Cycle
         order_id = await worker_client.trigger_cycle("BTC/USDT")
-        
+
         # Warte bis Order auf Exchange submitted
         await asyncio.sleep(1)
-        
+
         # Stoppe PostgreSQL
         await postgres_client.stop_container()
-        
+
         # Execution sollte jetzt fehlschlagen beim DB Write
         # aber Exchange Order sollte bleiben
-        
+
         # Warte, dann PostgreSQL wieder on
         await asyncio.sleep(2)
         await postgres_client.start_container()
-        
+
         # Wait for recovery
         await postgres_client.wait_healthy(timeout=30)
         await worker_client.run_reconciliation()
-        
+
         # Prüfe: Order ist korrekt reconciled
         orders = await order_tracker.get_orders(order_id)
         # Sollte sich selbst korrigiert haben
         assert len(orders) <= 1
-    
+
     @pytest.mark.asyncio
     async def test_exchange_timeout_after_submit(
         self,
@@ -243,21 +241,21 @@ class TestCrashScenarios:
         """
         # Trigger Cycle
         order_id = await worker_client.trigger_cycle("BTC/USDT")
-        
+
         # Simuliere Exchange Timeout nach Submit
         await mock_exchange.set_timeout_after_submit(order_id)
-        
+
         # Order sollte in Unknown State enden (nicht REJECTED!)
         result = await order_tracker.get_order_result(order_id)
-        
+
         # Fail-Safe: lieber UNKNOWN als Retry!
         assert result["status"] in ["unknown", "pending"]
-        
+
         # NICHT auto-resubmit
         submission_count = await order_tracker.count_submissions(order_id)
         assert submission_count == 1, "Order was resubmitted despite timeout!"
-    
-    @pytest.mark.asyncio  
+
+    @pytest.mark.asyncio
     async def test_network_interrupt_between_containers(
         self,
         worker_client: Any,
@@ -273,21 +271,21 @@ class TestCrashScenarios:
         """
         # Trigger Cycle über API
         order_id = await api_client.trigger_cycle("BTC/USDT")
-        
+
         # Unterbreche Netzwerk zwischen Worker und API
         # (sie sind independent, sollte sich nicht gegenseitig beeinflussen)
         # Nur für Reconciliation/Reporting Zwecke verbunden
-        
+
         # Trading sollte weiterhin funktionieren (Independent Execution)
-        
+
         await asyncio.sleep(2)
-        
+
         # Netzwerk wieder herstellen
         # Beide sollten weiter synchron sein
-        
+
         # Reconciliation
         await worker_client.run_reconciliation()
-        
+
         # Prüfe: keine Duplicates
         orders = await order_tracker.get_orders(order_id)
         assert len(orders) <= 1

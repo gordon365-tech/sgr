@@ -96,7 +96,11 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "--cov=sgr --cov-report=term-missing --cov-fail-under=85"
+addopts = "--cov=sgr --cov-report=term-missing --cov-fail-under=85 -m \"not docker_crash and not requires_redis\""
+markers = [
+    "docker_crash: Tests, die einen laufenden Docker-Compose-Stack (Worker, API, Redis, Postgres) benoetigen. Nicht in Sandbox/CI ohne echte Infra lauffaehig - manuell mit -m docker_crash ausfuehren.",
+    "requires_redis: Tests, die eine laufende Redis-Instanz benoetigen (z.B. echter EventBus statt Mock). Nicht in Sandbox/CI ohne echte Infra lauffaehig - manuell mit -m requires_redis ausfuehren.",
+]
 
 [tool.mypy]
 python_version = "3.11"

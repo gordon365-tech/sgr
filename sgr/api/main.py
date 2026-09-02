@@ -377,6 +377,8 @@ def create_app() -> FastAPI:
         )
 
     # Mount Routers
+    from prometheus_client import REGISTRY, generate_latest
+
     from sgr.api.routers import (
         health,
         market,
@@ -390,7 +392,6 @@ def create_app() -> FastAPI:
         websocket,
     )
     from sgr.saas.routers import apikey_router, auth_router, billing_router
-    from prometheus_client import CollectorRegistry, generate_latest, REGISTRY
 
     app.include_router(health.router, tags=["health"])
     app.include_router(market.router, prefix="/api/v1/market", tags=["market"])

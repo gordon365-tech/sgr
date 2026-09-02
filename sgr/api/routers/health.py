@@ -83,7 +83,7 @@ async def health_ready(request: Request) -> Response:
     Load Balancer entfernt Pod (kein Neustart).
     """
     details: dict[str, Any] = {}
-    
+
     # DB Check
     db_connected = False
     try:
@@ -94,7 +94,7 @@ async def health_ready(request: Request) -> Response:
     except Exception as e:
         details["database"] = f"error: {str(e)[:50]}"
         db_connected = False
-    
+
     # Redis Check (Feature Store)
     redis_connected = False
     try:
@@ -104,13 +104,13 @@ async def health_ready(request: Request) -> Response:
     except Exception as e:
         details["redis"] = f"error: {str(e)[:50]}"
         redis_connected = False
-    
+
     # Komponenten Check
     components_initialized = db_connected and redis_connected
-    
+
     status = "healthy" if components_initialized else "unhealthy"
     http_status = 200 if components_initialized else 503
-    
+
     response_data = ReadinessResponse(
         status=status,
         db_connected=db_connected,
@@ -118,7 +118,7 @@ async def health_ready(request: Request) -> Response:
         components_initialized=components_initialized,
         details=details,
     )
-    
+
     return Response(
         content=response_data.model_dump_json(),
         status_code=http_status,
@@ -144,16 +144,16 @@ async def health_trading(request: Request) -> Response:
     config = get_config()
     trading_mode = config.trading_mode
     details: dict[str, Any] = {}
-    
+
     # Kill Switch Check
     kill_switch = get_kill_switch(trading_mode)
     kill_switch_active = kill_switch.is_active
     details["kill_switch_active"] = kill_switch_active
-    
+
     # Recovery State
     recovery_complete = True  # Im Lifespan bereits abgeschlossen
     details["recovery_complete"] = recovery_complete
-    
+
     # Exchange Connection
     exchange_connected = False
     try:
@@ -162,7 +162,7 @@ async def health_trading(request: Request) -> Response:
         details["exchange_connected"] = exchange_connected
     except Exception as e:
         details["exchange_connected"] = f"error: {str(e)[:50]}"
-    
+
     # Risk Engine
     risk_engine_available = False
     try:
@@ -171,7 +171,7 @@ async def health_trading(request: Request) -> Response:
         details["risk_engine_available"] = risk_engine_available
     except Exception as e:
         details["risk_engine_available"] = f"error: {str(e)[:50]}"
-    
+
     # Preflight (über Execution Engine)
     preflight_available = False
     try:
@@ -181,7 +181,7 @@ async def health_trading(request: Request) -> Response:
         details["preflight_available"] = preflight_available
     except Exception as e:
         details["preflight_available"] = f"error: {str(e)[:50]}"
-    
+
     # Trading Enabled Decision
     trading_enabled = (
         not kill_switch_active
@@ -190,12 +190,12 @@ async def health_trading(request: Request) -> Response:
         and preflight_available
         and risk_engine_available
     )
-    
+
     status = "healthy" if trading_enabled else "degraded"
     http_status = 200 if trading_enabled else 503
-    
+
     details["trading_mode"] = trading_mode.value
-    
+
     response_data = TradingHealthResponse(
         status=status,
         trading_enabled=trading_enabled,
@@ -206,7 +206,7 @@ async def health_trading(request: Request) -> Response:
         risk_engine_available=risk_engine_available,
         details=details,
     )
-    
+
     return Response(
         content=response_data.model_dump_json(),
         status_code=http_status,

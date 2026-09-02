@@ -25,7 +25,6 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from alembic import context
 
-
 # Alembic Config object
 config = context.config
 
@@ -38,9 +37,9 @@ if config.config_file_name is not None:
 # Import ORM metadata. The model imports below are required as side effects
 # (they register each model's table with Base.metadata) even though they are
 # not referenced directly here — needed for `alembic revision --autogenerate`.
-from sgr.core.database import Base
 from sgr.core.database import (  # noqa: F401
     APIKeyModel,
+    Base,
     CandleModel,
     OrderModel,
     PositionModel,
@@ -49,7 +48,6 @@ from sgr.core.database import (  # noqa: F401
     TradeModel,
     UserModel,
 )
-
 
 target_metadata = Base.metadata
 

@@ -51,7 +51,7 @@ Fail-Safe Principle:
 
 from __future__ import annotations
 
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends
@@ -59,7 +59,6 @@ from pydantic import BaseModel, Field
 
 from sgr.api.dependencies import get_orchestrator, get_portfolio_engine
 from sgr.core.logging import get_logger
-from sgr.core.types import TradingMode
 from sgr.risk.kill_switch import get_kill_switch
 
 log = get_logger(__name__)
@@ -185,7 +184,6 @@ async def health_trading(
     NICHT für Load Balancer Decisions, sondern für UI/Monitoring.
     """
     from sgr.core.config import get_config
-    from sgr.risk.kill_switch import get_kill_switch
 
     config = get_config()
     trading_mode = config.trading_mode
