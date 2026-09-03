@@ -205,7 +205,9 @@ class TradeModel(Base):
     trading_mode: Mapped[str] = mapped_column(String(10), nullable=False)
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     closed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    trade_metadata: Mapped[dict] = mapped_column(JSONB, default=dict)
+    trade_metadata: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
     user_id: Mapped[str | None] = mapped_column(
         PG_UUID(as_uuid=False), ForeignKey("users.id"), nullable=True
     )
@@ -286,8 +288,12 @@ class AuditLogModel(Base):
 
     id: Mapped[str] = mapped_column(PG_UUID(as_uuid=False), primary_key=True)
     action: Mapped[str] = mapped_column(String(50), nullable=False)
-    user_id: Mapped[str] = mapped_column(String(100), nullable=False, default="system")
-    details: Mapped[dict] = mapped_column(JSONB, default=dict)
+    user_id: Mapped[str] = mapped_column(
+        String(100), nullable=False, default="system", server_default="system"
+    )
+    details: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (
