@@ -30,11 +30,31 @@ RUN pip install --no-cache-dir \
 # Copy pyproject.toml for dependency resolution
 COPY pyproject.toml ./
 
-# Install dependencies with ML support for flexibility
-# Production kann via ENV var auf subsets beschraenkt werden
+# Install PyTorch CPU-only build first (avoids pulling in the full CUDA/GPU
+# stack - libcusparse, libcublas, etc. - which is unused on this server and
+# adds several GB to every build for nothing).
 RUN pip install --no-cache-dir \
     --prefix=/install \
+    --index-url https://download.pytorch.org/whl/cpu \
+    --extra-index-url https://pypi.org/simple \
+    "torch>=2.3.0"
+
+# Install remaining [ml] dependencies against the same --prefix. pip sees
+# the torch already installed there (via PYTHONPATH) and, per its normal
+# dependency resolution, will not touch an already-satisfied requirement
+# unless a newer version is explicitly requested - so the CPU-only wheel
+# from the step above is kept.
+RUN PYTHONPATH=/install/lib/python3.11/site-packages pip install --no-cache-dir \
+    --prefix=/install \
     ".[ml]"
+
+# Sanity check: fail the build now, loudly, if a CUDA-bundled torch somehow
+# got installed anyway - better than shipping a bloated image silently.
+RUN PYTHONPATH=/install/lib/python3.11/site-packages python3 -c "\
+import torch, sys; \
+cuda = getattr(torch.version, 'cuda', None); \
+print(f'torch {torch.__version__}, cuda={cuda}'); \
+sys.exit(1 if cuda else 0)"
 
 # Install project itself
 COPY . .
