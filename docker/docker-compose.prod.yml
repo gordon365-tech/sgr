@@ -1,4 +1,3 @@
-version: "3.9"
 
 # Project SGR – Production-Grade Docker Stack
 # 
@@ -48,10 +47,21 @@ services:
       sgr-net:
         ipv4_address: 172.28.1.10
     
+    # env_file liefert POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB.
+    # WICHTIG: diese duerfen NICHT zusaetzlich unter environment: mit
+    # ${VAR:-default} gesetzt werden - Compose interpoliert solche
+    # Ausdruecke beim YAML-Parsing aus der Shell-Umgebung, bevor env_file
+    # geladen wird, und ein environment-Key hat immer Vorrang vor
+    # env_file. Das hatte zuvor zur Folge, dass Postgres beim allerersten
+    # Volume-Init immer mit dem Fallback change_me_in_production
+    # initialisiert wurde, unabhaengig vom echten Wert in .env.prod.
+    env_file:
+      - path: ../.env.prod
+        required: false
+      - path: ../.env
+        required: false
+    
     environment:
-      POSTGRES_USER: ${DB_USER:-sgr}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-change_me_in_production}
-      POSTGRES_DB: ${DB_NAME:-sgr}
       TZ: UTC
       
       # TimescaleDB Tuning
@@ -75,7 +85,10 @@ services:
       - "5432:5432"  # Remove in true production (use unix socket instead)
       
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-sgr} -d ${DB_NAME:-sgr}"]
+      # $$-Escaping erzwingt Shell-Expansion zur Laufzeit IM Container
+      # (wo POSTGRES_USER/POSTGRES_DB aus env_file real gesetzt sind),
+      # statt Compose-Parse-Zeit-Interpolation mit falschem Fallback.
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -285,11 +298,16 @@ services:
         
     environment:
       # Override Compose-interne Service-Hostnamen
+      # DB_USER/DB_PASSWORD/DB_NAME werden bewusst NICHT hier gesetzt:
+      # Compose interpoliert ${VAR:-default} beim YAML-Parsing aus der
+      # Shell-Umgebung, BEVOR env_file geladen wird. Ein hier gesetzter
+      # environment-Key hat immer Vorrang vor env_file, daher wuerde ein
+      # Override wie DB_PASSWORD: ${DB_PASSWORD:-change_me_in_production}
+      # den Fallback fest einbrennen, sobald die Shell-Variable nicht
+      # gesetzt ist - unabhaengig vom tatsaechlichen Wert in .env.prod/.env.
+      # Diese drei Werte muessen daher ausschliesslich aus env_file kommen.
       DB_HOST: postgres
       DB_PORT: "5432"
-      DB_USER: ${DB_USER:-sgr}
-      DB_PASSWORD: ${DB_PASSWORD:-change_me_in_production}
-      DB_NAME: ${DB_NAME:-sgr}
       
       REDIS_HOST: redis
       REDIS_PORT: "6379"
@@ -366,11 +384,11 @@ services:
         required: false
         
     environment:
+      # Siehe Kommentar beim api-Service oben: DB_USER/DB_PASSWORD/DB_NAME
+      # duerfen hier nicht mit ${VAR:-default} gesetzt werden, sonst wird
+      # der Default fest eingebrannt statt aus env_file gelesen zu werden.
       DB_HOST: postgres
       DB_PORT: "5432"
-      DB_USER: ${DB_USER:-sgr}
-      DB_PASSWORD: ${DB_PASSWORD:-change_me_in_production}
-      DB_NAME: ${DB_NAME:-sgr}
       
       REDIS_HOST: redis
       REDIS_PORT: "6379"

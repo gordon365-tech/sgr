@@ -12,7 +12,9 @@ FROM sgr-api:latest as app-base
 # oder mit einem speziellen Signal Handler für Trading Lifecycle
 
 COPY --chown=sgr:sgr sgr/worker/main.py /app/sgr/worker/
-COPY --chown=sgr:sgr sgr/worker/signal_handler.py /app/sgr/worker/
+# Hinweis: sgr/worker/signal_handler.py existiert aktuell nicht im Repo
+# (sgr/worker/ enthaelt nur __init__.py + main.py) - diese Zeile wurde
+# entfernt, da der Build sonst mit COPY failed: file not found abbricht.
 
 # Worker kann spezifische Ressourcen-Limits definieren
 # (wird in docker-compose.yml / Kubernetes definiert, nicht hier)
