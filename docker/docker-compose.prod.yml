@@ -321,7 +321,7 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    read_only_filesystem: false  # Needs write for temp files
+    read_only: false  # Needs write for temp files
     
     # Resource limits
     deploy:
@@ -390,7 +390,7 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    read_only_filesystem: false
+    read_only: false
     
     # Resource limits (Can be higher/lower than API)
     deploy:
