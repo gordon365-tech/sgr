@@ -110,15 +110,23 @@ class OrderModel(Base):
     order_type: Mapped[str] = mapped_column(String(20), nullable=False)
     quantity: Mapped[Decimal] = mapped_column(Numeric(precision=28, scale=8), nullable=False)
     limit_price: Mapped[Decimal | None] = mapped_column(Numeric(precision=28, scale=8))
-    filled_quantity: Mapped[Decimal] = mapped_column(Numeric(precision=28, scale=8), default=0)
+    filled_quantity: Mapped[Decimal] = mapped_column(
+        Numeric(precision=28, scale=8), nullable=False, default=0, server_default="0"
+    )
     average_fill_price: Mapped[Decimal | None] = mapped_column(Numeric(precision=28, scale=8))
-    fees: Mapped[Decimal] = mapped_column(Numeric(precision=28, scale=8), default=0)
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    fees: Mapped[Decimal] = mapped_column(
+        Numeric(precision=28, scale=8), nullable=False, default=0, server_default="0"
+    )
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="pending", server_default="pending"
+    )
     trading_mode: Mapped[str] = mapped_column(String(10), nullable=False)  # "paper" | "live"
     strategy_name: Mapped[str] = mapped_column(String(100), nullable=False)
     submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     filled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    raw_response: Mapped[dict] = mapped_column(JSONB, default=dict)
+    raw_response: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
     user_id: Mapped[str | None] = mapped_column(
         PG_UUID(as_uuid=False), ForeignKey("users.id"), nullable=True
     )
@@ -142,10 +150,18 @@ class PositionModel(Base):
     quantity: Mapped[Decimal] = mapped_column(Numeric(precision=28, scale=8), nullable=False)
     entry_price: Mapped[Decimal] = mapped_column(Numeric(precision=28, scale=8), nullable=False)
     current_price: Mapped[Decimal] = mapped_column(Numeric(precision=28, scale=8), nullable=False)
-    leverage: Mapped[Decimal] = mapped_column(Numeric(precision=10, scale=2), default=1)
-    unrealized_pnl: Mapped[Decimal] = mapped_column(Numeric(precision=28, scale=8), default=0)
-    realized_pnl: Mapped[Decimal] = mapped_column(Numeric(precision=28, scale=8), default=0)
-    is_open: Mapped[bool] = mapped_column(Boolean, default=True)
+    leverage: Mapped[Decimal] = mapped_column(
+        Numeric(precision=10, scale=2), nullable=False, default=1, server_default="1"
+    )
+    unrealized_pnl: Mapped[Decimal] = mapped_column(
+        Numeric(precision=28, scale=8), nullable=False, default=0, server_default="0"
+    )
+    realized_pnl: Mapped[Decimal] = mapped_column(
+        Numeric(precision=28, scale=8), nullable=False, default=0, server_default="0"
+    )
+    is_open: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     strategy_name: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -179,7 +195,9 @@ class TradeModel(Base):
     exit_price: Mapped[Decimal] = mapped_column(Numeric(precision=28, scale=8), nullable=False)
     quantity: Mapped[Decimal] = mapped_column(Numeric(precision=28, scale=8), nullable=False)
     realized_pnl: Mapped[Decimal] = mapped_column(Numeric(precision=28, scale=8), nullable=False)
-    fees_total: Mapped[Decimal] = mapped_column(Numeric(precision=28, scale=8), default=0)
+    fees_total: Mapped[Decimal] = mapped_column(
+        Numeric(precision=28, scale=8), nullable=False, default=0, server_default="0"
+    )
     net_pnl: Mapped[Decimal] = mapped_column(Numeric(precision=28, scale=8), nullable=False)
     holding_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
     strategy_name: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -205,16 +223,26 @@ class StrategyModel(Base):
 
     name: Mapped[str] = mapped_column(String(100), primary_key=True)
     version: Mapped[str] = mapped_column(String(20), nullable=False)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=False)
-    is_validated: Mapped[bool] = mapped_column(Boolean, default=False)
-    supported_regimes: Mapped[list] = mapped_column(JSONB, default=list)
-    parameters: Mapped[dict] = mapped_column(JSONB, default=dict)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    is_validated: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    supported_regimes: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    parameters: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
     # Performance metrics (updated by learning loop)
     sharpe_ratio: Mapped[float | None] = mapped_column(Numeric(precision=10, scale=4))
     sortino_ratio: Mapped[float | None] = mapped_column(Numeric(precision=10, scale=4))
     max_drawdown: Mapped[float | None] = mapped_column(Numeric(precision=10, scale=4))
     hit_rate: Mapped[float | None] = mapped_column(Numeric(precision=10, scale=4))
-    total_trades: Mapped[int] = mapped_column(Integer, default=0)
+    total_trades: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     deactivation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -231,7 +259,9 @@ class RiskEventModel(Base):
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     trading_mode: Mapped[str] = mapped_column(String(10), nullable=False)
-    metrics_snapshot: Mapped[dict] = mapped_column(JSONB, default=dict)
+    metrics_snapshot: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     user_id: Mapped[str | None] = mapped_column(PG_UUID(as_uuid=False), nullable=True)
 
@@ -275,13 +305,21 @@ class UserModel(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     totp_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)  # encrypted
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    is_2fa_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
-    trading_mode: Mapped[str] = mapped_column(String(10), default="paper")
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+    is_2fa_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    trading_mode: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="paper", server_default="paper"
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     api_keys: Mapped[list[APIKeyModel]] = relationship(back_populates="user")
+
+    __table_args__ = (Index("ix_users_email", "email"),)
 
 
 class APIKeyModel(Base):
@@ -301,7 +339,9 @@ class APIKeyModel(Base):
     label: Mapped[str] = mapped_column(String(100), nullable=False)
     encrypted_api_key: Mapped[str] = mapped_column(Text, nullable=False)  # AES-256 ciphertext
     encrypted_secret: Mapped[str] = mapped_column(Text, nullable=False)  # AES-256 ciphertext
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -309,6 +349,7 @@ class APIKeyModel(Base):
 
     __table_args__ = (
         UniqueConstraint("user_id", "exchange", "trading_mode", name="uq_api_key_user_exchange"),
+        Index("ix_api_keys_user_id", "user_id"),
     )
 
 
