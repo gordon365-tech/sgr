@@ -17,7 +17,7 @@ Usage in Router:
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel
@@ -165,7 +165,7 @@ def get_feature_store(request: Request) -> FeatureStore:
     return store
 
 
-def get_exchange_pool(request: Request):  # type: ignore[return]
+def get_exchange_pool(request: Request) -> Any:
     pool = getattr(request.app.state, "exchange_pool", None)
     if pool is None:
         raise HTTPException(status_code=503, detail="Exchange pool not initialized")

@@ -6,6 +6,7 @@ Config must validate constraints at startup – fail fast, never silently.
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from sgr.core.config import (
     EncryptionConfig,
@@ -24,15 +25,15 @@ class TestRiskLimitsConfig:
         assert limits.max_single_position_pct == 0.10
 
     def test_drawdown_bounds(self) -> None:
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             RiskLimitsConfig(max_portfolio_drawdown=0.0)  # below min
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             RiskLimitsConfig(max_portfolio_drawdown=0.99)  # above max
 
 
 class TestEncryptionConfig:
     def test_short_key_raises(self) -> None:
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             EncryptionConfig(master_key="short")  # type: ignore
 
 
@@ -45,7 +46,7 @@ class TestSGRConfig:
 
     def test_production_live_requires_changed_secrets(self) -> None:
         """Production + Live must not use default secrets."""
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             SGRConfig(
                 environment=Environment.PRODUCTION,
                 trading_mode=TradingMode.LIVE,

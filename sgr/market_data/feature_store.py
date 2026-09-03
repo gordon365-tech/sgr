@@ -116,7 +116,10 @@ class FeatureStore:
         await pipe.execute()
 
         # Notify Strategy Engine via Pub/Sub
-        channel = f"feature_update:{features.symbol.exchange.value}:{features.symbol.ccxt_symbol}:{features.timeframe}"
+        channel = (
+            f"feature_update:{features.symbol.exchange.value}:"
+            f"{features.symbol.ccxt_symbol}:{features.timeframe}"
+        )
         await redis.publish(channel, features.latest_key.encode())
 
         log.debug(
