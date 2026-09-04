@@ -145,17 +145,29 @@ class CCXTBaseAdapter:
             "timeout": 30_000,  # 30s timeout per request
         }
 
-        # Testnet routing for paper mode
+        options.update(self._extra_options)
+        self._ccxt = exchange_class(options)
+
+        # Testnet/Sandbox-Routing fuer Paper Mode.
+        # WICHTIG: NICHT ueber options["urls"] = {"api": self._testnet_urls}
+        # (fruehere Implementierung) - das ueberschreibt nur die explizit
+        # gelisteten URL-Namespaces. Bei Binance z.B. nutzt ccxt bereits bei
+        # load_markets() intern auch den "sapi"-Namespace (u.a. fuer
+        # capital/config/getall), der dabei NICHT auf Testnet zeigen wuerde,
+        # sondern weiterhin auf die echte api.binance.com - das fuehrte zu
+        # "Invalid Api-Key ID", weil ein echter Testnet-Key gegen die
+        # Live-API validiert wurde. set_sandbox_mode(True) ist ccxt's
+        # eigener, vollstaendiger Mechanismus, der alle relevanten
+        # URL-Namespaces der jeweiligen Exchange konsistent umschaltet.
+        # Bei Exchanges ohne konfigurierten Sandbox-Endpoint in ccxt selbst
+        # ist dies ein sicheres No-Op (mit ccxt-eigener Warnung).
         if self.trading_mode == TradingMode.PAPER and self._testnet_urls:
-            options["urls"] = {"api": self._testnet_urls}
+            self._ccxt.set_sandbox_mode(True)
             log.info(
                 "exchange.testnet_mode",
                 exchange=self.exchange_id.value,
                 testnet_urls=list(self._testnet_urls.keys()),
             )
-
-        options.update(self._extra_options)
-        self._ccxt = exchange_class(options)
 
         try:
             await self._ccxt.load_markets()

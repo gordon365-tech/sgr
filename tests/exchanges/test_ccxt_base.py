@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import ccxt
@@ -51,6 +51,7 @@ class FakeCCXTExchange:
 
         self.load_markets = AsyncMock(return_value=self.markets)
         self.close = AsyncMock()
+        self.set_sandbox_mode = MagicMock()
         self.fetch_time = AsyncMock(return_value=1_700_000_000_000)
         self.fetch_ticker = AsyncMock(
             return_value={
@@ -178,18 +179,32 @@ class TestLifecycle:
         assert adapter._connected is True
         assert adapter._ccxt is not None
 
-    async def test_connect_paper_mode_uses_testnet_urls(self, monkeypatch):
+    async def test_connect_paper_mode_enables_sandbox_mode(self, monkeypatch):
+        """set_sandbox_mode(True) statt manuellem urls-Override (siehe
+        ccxt_base.py Kommentar): ein manuelles urls["api"]-Override deckt
+        nur die dort explizit gelisteten Namespaces ab, waehrend echte
+        Exchanges (z.B. Binance) intern auch andere Namespaces wie "sapi"
+        nutzen, die dabei unveraendert auf die Live-API zeigen wuerden."""
+        holder = install_fake_ccxt(monkeypatch)
+
         class PaperAdapter(CCXTBaseAdapter):
             exchange_id = ExchangeID.BINANCE
             _ccxt_id = "fakeexchange"
             _testnet_urls = {"public": "https://testnet.example.com"}
 
-        holder = install_fake_ccxt(monkeypatch)
         paper_adapter = PaperAdapter(api_key="k", secret="s", trading_mode=TradingMode.PAPER)
         await paper_adapter.connect()
-        assert holder["instance"].options["urls"] == {
-            "api": {"public": "https://testnet.example.com"}
-        }
+        holder["instance"].set_sandbox_mode.assert_called_once_with(True)
+        # Kein manuelles urls-Override mehr im options-dict
+        assert "urls" not in holder["instance"].options
+
+    async def test_connect_without_testnet_urls_skips_sandbox_mode(self, adapter, monkeypatch):
+        """FakeAdapter (adapter-Fixture) hat keine _testnet_urls gesetzt -
+        set_sandbox_mode() darf dann gar nicht erst aufgerufen werden
+        (z.B. Pionex, das kein ccxt-Sandbox hat)."""
+        holder = install_fake_ccxt(monkeypatch)
+        await adapter.connect()
+        holder["instance"].set_sandbox_mode.assert_not_called()
 
     async def test_connect_ccxt_not_installed(self, adapter, monkeypatch):
         import builtins
