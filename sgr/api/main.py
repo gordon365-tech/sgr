@@ -162,16 +162,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from sgr.exchanges.factory import ExchangePool
 
     pool = ExchangePool()
+    primary_exchange = config.primary_exchange
 
     try:
-        # Pionex hat kein Testnet: Paper Mode braucht keine echten Keys
-        # (PionexAdapter.connect() simuliert lokal, siehe pionex.py)
-        if config.trading_mode == TradingMode.PAPER or (
-            config.credentials.pionex_live_api_key and config.credentials.pionex_live_secret
-        ):
-            await pool.initialize([ExchangeID.PIONEX], config.trading_mode)
+        if primary_exchange == ExchangeID.PIONEX:
+            # Pionex hat kein Testnet: Paper Mode braucht keine echten Keys
+            # (PionexAdapter.connect() simuliert lokal, siehe pionex.py)
+            if config.trading_mode == TradingMode.PAPER or (
+                config.credentials.pionex_live_api_key and config.credentials.pionex_live_secret
+            ):
+                await pool.initialize([primary_exchange], config.trading_mode)
+        else:
+            # Andere Exchanges (z.B. Binance) haben ein echtes Testnet und
+            # brauchen dafuer konfigurierte Paper-Testnet-Keys, bzw. echte
+            # Live-Keys im LIVE-Modus. get_credentials() wirft ValueError,
+            # wenn die entsprechenden Env-Vars nicht gesetzt sind.
+            try:
+                config.credentials.get_credentials(primary_exchange.value, config.trading_mode)
+                await pool.initialize([primary_exchange], config.trading_mode)
+            except ValueError:
+                log.warning(
+                    "sgr.api.exchange_credentials_missing",
+                    exchange=primary_exchange.value,
+                    trading_mode=config.trading_mode.value,
+                )
     except Exception as e:
-        log.warning("sgr.api.exchange_init_failed", exchange="pionex", error=str(e))
+        log.warning("sgr.api.exchange_init_failed", exchange=primary_exchange.value, error=str(e))
 
     app.state.exchange_pool = pool
 
@@ -276,8 +292,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     md_engine = MarketDataEngine(pool, config.trading_mode, feature_store)
     # Standard-Subscriptions
     if pool._adapters:
-        md_engine.subscribe("BTC/USDT", ExchangeID.PIONEX, ["1h", "4h"])
-        md_engine.subscribe("ETH/USDT", ExchangeID.PIONEX, ["1h"])
+        md_engine.subscribe("BTC/USDT", primary_exchange, ["1h", "4h"])
+        md_engine.subscribe("ETH/USDT", primary_exchange, ["1h"])
         await md_engine.start()
 
         # Orchestrator automatisch bei jedem neuen Candle auslösen

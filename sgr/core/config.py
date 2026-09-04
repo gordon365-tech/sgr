@@ -20,7 +20,7 @@ from typing import Any
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from sgr.core.types import Environment, TradingMode
+from sgr.core.types import Environment, ExchangeID, TradingMode
 
 
 class DatabaseConfig(BaseSettings):
@@ -233,6 +233,12 @@ class SGRConfig(BaseSettings):
     trading_mode: TradingMode = TradingMode.PAPER
     app_name: str = "SGR"
     version: str = "0.1.0"
+
+    # Welche Exchange der Lifecycle standardmaessig verwendet (Market Data
+    # Subscriptions + Exchange Pool). Default bleibt PIONEX fuer
+    # Abwaertskompatibilitaet; per PRIMARY_EXCHANGE=binance env var
+    # umschaltbar, z.B. solange Pionex nicht via ccxt unterstuetzt wird.
+    primary_exchange: ExchangeID = ExchangeID.PIONEX
 
     # Sub-configs (nested, loaded from env with prefixes)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)

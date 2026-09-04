@@ -36,7 +36,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from sgr.api.main import AppState, create_app, lifespan
-from sgr.core.types import Environment, TradingMode
+from sgr.core.types import Environment, ExchangeID, TradingMode
 
 pytestmark = pytest.mark.asyncio
 
@@ -119,7 +119,11 @@ class TestCreateApp:
 # ---------------------------------------------------------------------
 
 
-def _patch_lifespan_dependencies(paper_mode: bool = True, has_adapters: bool = True):
+def _patch_lifespan_dependencies(
+    paper_mode: bool = True,
+    has_adapters: bool = True,
+    primary_exchange: ExchangeID = ExchangeID.PIONEX,
+):
     """
     Baut den vollständigen Satz an Patches, um lifespan() ohne echte
     Infrastruktur durchlaufen zu lassen. Gibt (patchers, mocks) zurück,
@@ -132,12 +136,22 @@ def _patch_lifespan_dependencies(paper_mode: bool = True, has_adapters: bool = T
     config.version = "0.0.0-test"
     config.api.host = "127.0.0.1"
     config.api.port = 8000
+    config.primary_exchange = primary_exchange
     if paper_mode:
         config.credentials.pionex_live_api_key = None
         config.credentials.pionex_live_secret = None
     else:
         config.credentials.pionex_live_api_key = "key"
         config.credentials.pionex_live_secret = "secret"
+
+    # get_credentials() wird nur fuer Nicht-Pionex-Exchanges (z.B. Binance)
+    # aufgerufen (siehe lifespan()-Zweig fuer primary_exchange != PIONEX).
+    # Default: liefert gueltige Dummy-Credentials. Einzelne Tests
+    # ueberschreiben mocks["config"].credentials.get_credentials mit einem
+    # side_effect, um den ValueError-Pfad (fehlende Keys) zu testen.
+    config.credentials.get_credentials = MagicMock(
+        return_value={"apiKey": "test_key", "secret": "test_secret", "testnet": True}
+    )
 
     repos = MagicMock()
 
@@ -368,6 +382,115 @@ class TestLifespanLiveModeWithoutAdapters:
         try:
             async with lifespan(app):
                 mocks["pool"].initialize.assert_awaited_once()
+        finally:
+            for p in patchers:
+                p.stop()
+
+
+class TestLifespanPrimaryExchangeConfigurable:
+    """
+    Deckt config.primary_exchange als Umschalter zwischen Pionex (kein
+    Testnet, Paper braucht keine Keys) und anderen ccxt-unterstuetzten
+    Exchanges wie Binance (echtes Testnet, Paper UND Live brauchen
+    konfigurierte Keys ueber get_credentials()) ab. Hintergrund: Pionex
+    wird von der oeffentlichen ccxt-Bibliothek aktuell nicht unterstuetzt
+    (verifiziert ueber ccxt 3.1.60 bis 4.5.77 hinweg), primary_exchange
+    erlaubt daher ein Umschalten ohne Code-Aenderung.
+    """
+
+    async def test_binance_paper_mode_with_configured_credentials_initializes(self) -> None:
+        patchers, mocks = _patch_lifespan_dependencies(
+            paper_mode=True, has_adapters=True, primary_exchange=ExchangeID.BINANCE
+        )
+
+        app = FastAPI()
+        app.state = AppState()  # type: ignore[assignment]
+
+        for p in patchers:
+            p.start()
+        try:
+            async with lifespan(app):
+                mocks["config"].credentials.get_credentials.assert_called_once_with(
+                    "binance", TradingMode.PAPER
+                )
+                mocks["pool"].initialize.assert_awaited_once_with(
+                    [ExchangeID.BINANCE], TradingMode.PAPER
+                )
+        finally:
+            for p in patchers:
+                p.stop()
+
+    async def test_binance_without_configured_credentials_skips_init_and_does_not_raise(
+        self,
+    ) -> None:
+        """get_credentials() wirft ValueError, wenn BINANCE_PAPER_API_KEY/
+        SECRET nicht gesetzt sind. lifespan() darf dabei nicht crashen -
+        Verhalten muss identisch zum bestehenden 'Pionex ohne Keys'-Fall
+        sein (fail-safe, nur geloggt)."""
+        patchers, mocks = _patch_lifespan_dependencies(
+            paper_mode=True, has_adapters=False, primary_exchange=ExchangeID.BINANCE
+        )
+        mocks["config"].credentials.get_credentials = MagicMock(
+            side_effect=ValueError(
+                "Credentials not configured for binance in paper mode. "
+                "Set BINANCE_PAPER_API_KEY and BINANCE_PAPER_SECRET env vars."
+            )
+        )
+
+        app = FastAPI()
+        app.state = AppState()  # type: ignore[assignment]
+
+        for p in patchers:
+            p.start()
+        try:
+            async with lifespan(app):
+                mocks["pool"].initialize.assert_not_awaited()
+        finally:
+            for p in patchers:
+                p.stop()
+
+    async def test_pionex_still_uses_legacy_no_testnet_path(self) -> None:
+        """Regressionstest: primary_exchange=PIONEX (Default) darf weiterhin
+        NICHT ueber get_credentials() laufen, sondern ueber den bestehenden
+        Pionex-Sonderpfad (kein Testnet, Paper Mode braucht keine Keys)."""
+        patchers, mocks = _patch_lifespan_dependencies(
+            paper_mode=True, has_adapters=True, primary_exchange=ExchangeID.PIONEX
+        )
+
+        app = FastAPI()
+        app.state = AppState()  # type: ignore[assignment]
+
+        for p in patchers:
+            p.start()
+        try:
+            async with lifespan(app):
+                mocks["config"].credentials.get_credentials.assert_not_called()
+                mocks["pool"].initialize.assert_awaited_once_with(
+                    [ExchangeID.PIONEX], TradingMode.PAPER
+                )
+        finally:
+            for p in patchers:
+                p.stop()
+
+    async def test_market_data_subscriptions_use_configured_primary_exchange(self) -> None:
+        """Standard-Subscriptions (BTC/USDT, ETH/USDT) muessen auf die
+        konfigurierte primary_exchange zeigen, nicht hartcodiert auf
+        Pionex."""
+        patchers, mocks = _patch_lifespan_dependencies(
+            paper_mode=True, has_adapters=True, primary_exchange=ExchangeID.BINANCE
+        )
+
+        app = FastAPI()
+        app.state = AppState()  # type: ignore[assignment]
+
+        for p in patchers:
+            p.start()
+        try:
+            async with lifespan(app):
+                calls = mocks["md_engine"].subscribe.call_args_list
+                assert len(calls) == 2
+                for call in calls:
+                    assert call.args[1] == ExchangeID.BINANCE
         finally:
             for p in patchers:
                 p.stop()
