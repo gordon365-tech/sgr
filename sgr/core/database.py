@@ -19,6 +19,10 @@ Tables overview:
     risk_events     → Risk alerts, kill switch events
     users           → SaaS user accounts (multi-tenant)
     api_keys        → Encrypted exchange API keys
+    portfolio_snapshots → Periodic portfolio-value/cash/drawdown snapshots
+                          (written by the worker; lets the API read the
+                          latest portfolio state from DB instead of an
+                          in-memory PortfolioEngine it no longer owns)
 """
 
 from __future__ import annotations
@@ -173,6 +177,57 @@ class PositionModel(Base):
     __table_args__ = (
         Index("ix_positions_open", "is_open", "trading_mode"),
         Index("ix_positions_user", "user_id", "is_open"),
+    )
+
+
+class PortfolioSnapshotModel(Base):
+    """
+    Periodischer Snapshot des Portfolio-Zustands (Cash, Portfolio-Value,
+    Peak-Value, Drawdown).
+
+    Notwendig, weil PortfolioEngine.summary() (portfolio_value, cash,
+    peak_value, drawdown) reiner In-Memory-Zustand ist, der sich NICHT
+    allein aus positions/trades rekonstruieren laesst - der Cash-Stand
+    haengt von der vollstaendigen Fill-Historie ab, nicht nur von aktuell
+    offenen Positionen. Seit sgr-api keine eigene PortfolioEngine-Instanz
+    mehr besitzt (Trading Lifecycle liegt exklusiv im Worker), braucht
+    die API einen persistenten Lesepfad fuer den aktuellen Portfolio-Wert.
+
+    Der Worker schreibt periodisch (z.B. nach jedem Trading-Zyklus oder
+    auf festem Intervall) einen neuen Snapshot; die API liest per
+    get_latest() den jeweils neuesten Snapshot pro (user_id, trading_mode).
+    Historische Snapshots bleiben fuer Performance-Charts/Drawdown-Verlauf
+    erhalten (kein Update-in-place, reines Insert).
+    """
+
+    __tablename__ = "portfolio_snapshots"
+
+    id: Mapped[str] = mapped_column(PG_UUID(as_uuid=False), primary_key=True)
+    user_id: Mapped[str | None] = mapped_column(
+        PG_UUID(as_uuid=False), ForeignKey("users.id"), nullable=True
+    )
+    trading_mode: Mapped[str] = mapped_column(String(10), nullable=False)
+    portfolio_value: Mapped[Decimal] = mapped_column(
+        Numeric(precision=28, scale=8), nullable=False
+    )
+    cash: Mapped[Decimal] = mapped_column(Numeric(precision=28, scale=8), nullable=False)
+    unrealized_pnl: Mapped[Decimal] = mapped_column(
+        Numeric(precision=28, scale=8), nullable=False, default=0, server_default="0"
+    )
+    peak_value: Mapped[Decimal] = mapped_column(Numeric(precision=28, scale=8), nullable=False)
+    drawdown: Mapped[Decimal] = mapped_column(
+        Numeric(precision=10, scale=6), nullable=False, default=0, server_default="0"
+    )
+    open_positions_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    total_trades: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index("ix_portfolio_snapshots_latest", "user_id", "trading_mode", "created_at"),
     )
 
 

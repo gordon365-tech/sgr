@@ -31,6 +31,7 @@ from sgr.core.database import (
     AuditLogModel,
     CandleModel,
     OrderModel,
+    PortfolioSnapshotModel,
     PositionModel,
     RiskEventModel,
     StrategyModel,
@@ -418,6 +419,76 @@ class PositionRepository:
 
 
 # ---------------------------------------------------------------------------
+# Portfolio Snapshot Repository
+# ---------------------------------------------------------------------------
+
+
+class PortfolioSnapshotRepository:
+    """
+    Periodische Portfolio-Zustands-Snapshots (Cash, Wert, Drawdown).
+
+    Geschrieben vom Worker (alleiniger PortfolioEngine-Owner), gelesen von
+    der API (kein eigener In-Memory-State mehr, siehe PortfolioSnapshotModel
+    Docstring). Reines Insert, keine Updates - historische Snapshots bleiben
+    fuer spaetere Performance-/Drawdown-Charts erhalten.
+    """
+
+    async def create(self, snapshot_data: dict[str, Any]) -> str:
+        """
+        Erwartete Keys: user_id (optional), trading_mode, portfolio_value,
+        cash, unrealized_pnl, peak_value, drawdown, open_positions_count,
+        total_trades, created_at.
+        """
+        async with get_session() as session:
+            snapshot_id = snapshot_data.get("id") or str(uuid4())
+            row = {**snapshot_data, "id": snapshot_id}
+            snapshot = PortfolioSnapshotModel(**row)
+            session.add(snapshot)
+            await session.flush()
+            return str(snapshot.id)
+
+    async def get_latest(
+        self,
+        trading_mode: TradingMode,
+        user_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Neuester Snapshot fuer (user_id, trading_mode). None, falls noch keiner existiert
+        (z.B. Worker lief noch nicht lang genug fuer den ersten Snapshot)."""
+        async with get_session() as session:
+            conditions = [PortfolioSnapshotModel.trading_mode == trading_mode.value]
+            if user_id is not None:
+                conditions.append(PortfolioSnapshotModel.user_id == user_id)
+            else:
+                conditions.append(PortfolioSnapshotModel.user_id.is_(None))
+
+            stmt = (
+                select(PortfolioSnapshotModel)
+                .where(and_(*conditions))
+                .order_by(desc(PortfolioSnapshotModel.created_at))
+                .limit(1)
+            )
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            return self._to_dict(row) if row is not None else None
+
+    @staticmethod
+    def _to_dict(r: PortfolioSnapshotModel) -> dict[str, Any]:
+        return {
+            "id": str(r.id),
+            "user_id": str(r.user_id) if r.user_id else None,
+            "trading_mode": r.trading_mode,
+            "portfolio_value": r.portfolio_value,
+            "cash": r.cash,
+            "unrealized_pnl": r.unrealized_pnl,
+            "peak_value": r.peak_value,
+            "drawdown": r.drawdown,
+            "open_positions_count": r.open_positions_count,
+            "total_trades": r.total_trades,
+            "created_at": r.created_at,
+        }
+
+
+# ---------------------------------------------------------------------------
 # Trade Repository
 # ---------------------------------------------------------------------------
 
@@ -473,6 +544,45 @@ class TradeRepository:
                     sum(winners) / abs(sum(losers)) if losers and sum(losers) != 0 else float("inf")
                 ),
             }
+
+
+    async def get_recent(
+        self,
+        trading_mode: TradingMode,
+        limit: int = 50,
+        user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Zuletzt geschlossene Trades, neueste zuerst. Fuer /portfolio/trades."""
+        async with get_session() as session:
+            conditions = [TradeModel.trading_mode == trading_mode.value]
+            if user_id is not None:
+                conditions.append(TradeModel.user_id == user_id)
+
+            stmt = (
+                select(TradeModel)
+                .where(and_(*conditions))
+                .order_by(desc(TradeModel.closed_at))
+                .limit(limit)
+            )
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+            return [
+                {
+                    "id": str(r.id),
+                    "symbol": r.symbol,
+                    "side": r.side,
+                    "entry_price": str(r.entry_price),
+                    "exit_price": str(r.exit_price),
+                    "quantity": str(r.quantity),
+                    "realized_pnl": str(r.realized_pnl),
+                    "fees": str(r.fees_total),
+                    "net_pnl": str(r.net_pnl),
+                    "strategy": r.strategy_name,
+                    "opened_at": r.opened_at.isoformat(),
+                    "closed_at": r.closed_at.isoformat(),
+                }
+                for r in rows
+            ]
 
 
 # ---------------------------------------------------------------------------
@@ -675,6 +785,7 @@ class Repositories:
         self.candles = CandleRepository()
         self.orders = OrderRepository()
         self.positions = PositionRepository()
+        self.portfolio_snapshots = PortfolioSnapshotRepository()
         self.trades = TradeRepository()
         self.strategies = StrategyRepository()
         self.users = UserRepository()

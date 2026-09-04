@@ -42,6 +42,7 @@ from sgr.core.database import (  # noqa: F401
     Base,
     CandleModel,
     OrderModel,
+    PortfolioSnapshotModel,
     PositionModel,
     RiskEventModel,
     StrategyModel,
