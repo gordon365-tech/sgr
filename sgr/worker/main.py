@@ -37,6 +37,19 @@ from sgr.core.types import Environment
 logger = structlog.get_logger(__name__)
 
 
+class _FakeApp:
+    """
+    Minimaler App-Stand-in fuer lifespan(), das intern app.state.xyz
+    schreibt. Der Worker hat kein echtes FastAPI-App-Objekt, braucht
+    aber denselben Storage-Ort wie die API, damit lifespan() unveraendert
+    bleibt (siehe Migrationsplan: lifespan()-Scope wird bewusst erst in
+    Commit 4 entkoppelt, nicht in diesem Zwischen-Fix).
+    """
+
+    def __init__(self, state: AppState) -> None:
+        self.state = state
+
+
 class TradingWorker:
     """Hauptklasse für Trading Worker."""
 
@@ -70,7 +83,7 @@ class TradingWorker:
 
         # Lifespan Context: initialisiert alle Services
         # (identisch wie in der API, nutzt dieselbe shared Infrastructure)
-        async with lifespan(None):  # type: ignore[arg-type]
+        async with lifespan(_FakeApp(self.app_state)):  # type: ignore[arg-type]
             logger.info("worker.ready")
 
             # Worker hauptschleife
