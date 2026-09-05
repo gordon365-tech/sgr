@@ -821,6 +821,84 @@ class TestRiskEngineLimits:
 
 
 # ---------------------------------------------------------------------------
+# Redis Metrics Publish (Cross-Prozess-Sichtbarkeit fuer sgr-api)
+# ---------------------------------------------------------------------------
+
+
+class TestRiskEngineRedisMetricsPublish:
+    """Deckt die additive inject_redis()/publish_risk_metrics()-Anbindung
+    aus evaluate() ab. Siehe sgr/risk/metrics_cache.py fuer die eigentliche
+    Redis-Logik (dort dediziert getestet) - hier nur die Verdrahtung."""
+
+    async def test_evaluate_without_injected_redis_does_not_raise(
+        self,
+        risk_engine: RiskEngine,
+        sample_signal: Signal,
+    ) -> None:
+        """Regressionsschutz: ohne inject_redis() (Default) bleibt evaluate()
+        unveraendert - keine neue Pflicht-Abhaengigkeit."""
+        await risk_engine.initialize()
+        assessment = await risk_engine.evaluate(
+            signal=sample_signal,
+            open_positions=[],
+            portfolio_value=Decimal("100000"),
+            available_capital=Decimal("90000"),
+            current_price=Decimal("50000"),
+            atr=Decimal("500"),
+        )
+        assert assessment.decision in (RiskDecision.APPROVED, RiskDecision.REDUCED)
+
+    async def test_evaluate_publishes_metrics_when_redis_injected(
+        self,
+        risk_engine: RiskEngine,
+        sample_signal: Signal,
+    ) -> None:
+        from unittest.mock import AsyncMock
+
+        fake_redis = AsyncMock()
+        fake_redis.set = AsyncMock()
+        risk_engine.inject_redis(fake_redis)
+
+        await risk_engine.initialize()
+        await risk_engine.evaluate(
+            signal=sample_signal,
+            open_positions=[],
+            portfolio_value=Decimal("100000"),
+            available_capital=Decimal("90000"),
+            current_price=Decimal("50000"),
+            atr=Decimal("500"),
+        )
+
+        fake_redis.set.assert_awaited_once()
+        key, _payload = fake_redis.set.call_args.args
+        assert key == f"sgr:risk:metrics:{risk_engine._trading_mode.value}"
+
+    async def test_evaluate_swallows_redis_publish_failure(
+        self,
+        risk_engine: RiskEngine,
+        sample_signal: Signal,
+    ) -> None:
+        """Ein Redis-Fehler beim Metrics-Publish darf die eigentliche
+        Risk-Bewertung niemals verhindern (Fail-Safe, wie beim Kill Switch)."""
+        from unittest.mock import AsyncMock
+
+        fake_redis = AsyncMock()
+        fake_redis.set = AsyncMock(side_effect=ConnectionError("redis down"))
+        risk_engine.inject_redis(fake_redis)
+
+        await risk_engine.initialize()
+        assessment = await risk_engine.evaluate(
+            signal=sample_signal,
+            open_positions=[],
+            portfolio_value=Decimal("100000"),
+            available_capital=Decimal("90000"),
+            current_price=Decimal("50000"),
+            atr=Decimal("500"),
+        )
+        assert assessment.decision in (RiskDecision.APPROVED, RiskDecision.REDUCED)
+
+
+# ---------------------------------------------------------------------------
 # Leverage Guard (max_leverage Hard Limit)
 # ---------------------------------------------------------------------------
 

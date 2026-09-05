@@ -41,7 +41,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -58,6 +58,7 @@ from sgr.core.types import (
     TradingMode,
 )
 from sgr.risk.kill_switch import KillSwitch, get_kill_switch
+from sgr.risk.metrics_cache import publish_risk_metrics
 from sgr.risk.position_sizer import PositionSizer
 from sgr.risk.types import (
     LimitCheck,
@@ -66,6 +67,9 @@ from sgr.risk.types import (
     RiskReport,
 )
 from sgr.risk.var_calculator import VaRCalculator, VaRMethod
+
+if TYPE_CHECKING:
+    from redis.asyncio import Redis
 
 log = get_logger(__name__)
 
@@ -90,6 +94,11 @@ class RiskEngine:
         self._var_calc = VaRCalculator()
         self._sizer = PositionSizer()
         self._kill_switch: KillSwitch = get_kill_switch(trading_mode)
+        # Optionaler Redis-Client fuer Cross-Prozess-Sichtbarkeit der
+        # RiskMetrics (sgr-api liest, kein eigener RiskEngine dort mehr).
+        # Analog zum Kill-Switch-Pattern: None = reines In-Memory-Verhalten,
+        # keine neue Pflicht-Abhaengigkeit fuer bestehende Nutzung/Tests.
+        self._redis: Redis | None = None
 
         # Portfolio State (wird bei jedem evaluate Update)
         self._peak_portfolio_value: Decimal = Decimal("0")
@@ -111,6 +120,14 @@ class RiskEngine:
             "risk_engine.initialized",
             trading_mode=self._trading_mode.value,
         )
+
+    def inject_redis(self, redis_client: Redis) -> None:
+        """
+        Injiziert einen Redis-Client fuer die Cross-Prozess-Sichtbarkeit
+        der RiskMetrics (sgr-api Read-Only-Zugriff). Optional - ohne
+        Aufruf verhaelt sich die Engine exakt wie zuvor (kein Redis-Write).
+        """
+        self._redis = redis_client
 
     # ------------------------------------------------------------------
     # Main Entry Point
@@ -199,6 +216,11 @@ class RiskEngine:
 
         # 2. Portfolio Metriken berechnen
         metrics = self._compute_metrics(portfolio_value, open_positions)
+
+        # 2b. Metriken additiv nach Redis publizieren (Cross-Prozess-Read
+        # fuer sgr-api, siehe sgr/risk/metrics_cache.py). Fail-safe: ein
+        # Fehler oder fehlender Redis-Client darf evaluate() nie stoeren.
+        await publish_risk_metrics(self._redis, self._trading_mode, metrics)
 
         # 3. Alle Limit-Checks durchführen
         checks = self._run_all_checks(metrics)

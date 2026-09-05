@@ -85,6 +85,22 @@ class FeatureStore:
             raise RuntimeError("FeatureStore not connected. Call connect() first.")
         return self._redis
 
+    @property
+    def redis_client(self) -> aioredis.Redis | None:
+        """
+        Oeffentlicher, rein lesender Zugriff auf den zugrunde liegenden
+        Redis-Client (oder None, falls noch nicht verbunden).
+
+        Zweck: FeatureStore ist bereits die einzige Redis-Verbindung, die
+        die API-Schicht ohnehin haelt (siehe app.state.feature_store).
+        Andere rein lesende Konsumenten (z.B. sgr/api/dependencies.py fuer
+        Kill-Switch- oder Risk-Metrics-Reads) sollen diese Verbindung
+        wiederverwenden statt eine zweite Redis-Connection aufzubauen.
+        Bewusst als benannte Property statt direktem Zugriff auf _redis,
+        damit der Zugriffspunkt explizit und stabil bleibt.
+        """
+        return self._redis
+
     # ------------------------------------------------------------------
     # Write
     # ------------------------------------------------------------------

@@ -1,4 +1,5 @@
-"""SGR Health Check Routers
+"""
+SGR Health Check Routers
 
 Implementiert differentierte Health Checks:
 
@@ -11,6 +12,25 @@ Implementiert differentierte Health Checks:
 Fail-Safe Principle:
 - Jeder unbekannte Zustand → FALSE/unhealthy (konservativ)
 - Lieber kurz nicht ready als falschlicherweise ready zu sagen
+
+Migrationsstand (sgr-api Read-Only-Zielarchitektur):
+    Alle Checks laufen jetzt über echte Konnektivitäts-Pruefungen (DB,
+    Redis) und Redis-gelesene Zustände (Kill Switch), nicht mehr über
+    die Anwesenheit von In-Memory-Engines in app.state.
+
+    /health/trading: exchange_connected, preflight_available und
+    risk_engine_available sind Worker-interne Zustände ohne aktuelle
+    Redis/DB-Repräsentation (kein Push-Mechanismus vom Worker analog
+    zum Kill Switch). Sie werden bewusst als "unknown" statt "ok"/
+    "degraded" gemeldet, bis ein Folge-Commit den Worker dazu bringt,
+    diese Zustände nach Redis zu publizieren. trading_enabled bleibt
+    dabei konservativ False, solange irgendein Signal unknown ist
+    (Fail-Safe-Prinzip dieses Moduls).
+
+    WICHTIGER FUND (bereits vor der Migration bestehender Bug): die
+    alte /health/ready-Implementierung prüfte "db_connected" fälschlich
+    über die Anwesenheit von exchange_pool, nicht über einen echten
+    Datenbank-Zugriff. Hier korrigiert (echter SELECT 1 Ping).
 """
 
 from __future__ import annotations
@@ -20,10 +40,13 @@ from typing import Any
 
 from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 
+from sgr.api.dependencies import get_redis_client_or_none
 from sgr.core.config import get_config
+from sgr.core.database import get_session
 from sgr.core.logging import get_logger
-from sgr.risk.kill_switch import get_kill_switch
+from sgr.risk.kill_switch import read_kill_switch_state_from_redis
 
 log = get_logger(__name__)
 
@@ -59,13 +82,22 @@ class TradingHealthResponse(BaseModel):
     """Trading Health: Ist es sicher zu traden?"""
     status: str
     trading_enabled: bool
-    kill_switch_active: bool
+    kill_switch_active: bool | None
     recovery_complete: bool
-    exchange_connected: bool
-    preflight_available: bool
-    risk_engine_available: bool
+    exchange_connected: str
+    preflight_available: str
+    risk_engine_available: str
     details: dict[str, Any] = Field(default_factory=dict)
     timestamp: str = Field(default_factory=lambda: datetime.now(tz=UTC).isoformat())
+
+
+async def _check_database() -> tuple[bool, str]:
+    try:
+        async with get_session() as session:
+            await session.execute(text("SELECT 1"))
+        return True, "connected"
+    except Exception as e:
+        return False, f"error: {str(e)[:50]}"
 
 
 @router.get("/health/live", response_model=LivenessResponse, status_code=200)
@@ -78,34 +110,27 @@ async def health_live() -> LivenessResponse:
 async def health_ready(request: Request) -> Response:
     """
     Readiness Probe: Ist der Service bereit für Traffic?
-    
+
     Returns 200 wenn ready, 503 wenn nicht ready.
     Load Balancer entfernt Pod (kein Neustart).
     """
     details: dict[str, Any] = {}
 
-    # DB Check
-    db_connected = False
-    try:
-        pool = getattr(request.app.state, "exchange_pool", None)
-        # Vereinfachte Check: wenn pool existiert und nicht leer
-        db_connected = pool is not None and len(pool) > 0 if pool else False
-        details["database"] = "connected" if db_connected else "disconnected"
-    except Exception as e:
-        details["database"] = f"error: {str(e)[:50]}"
-        db_connected = False
+    db_connected, db_detail = await _check_database()
+    details["database"] = db_detail
 
-    # Redis Check (Feature Store)
+    redis_client = get_redis_client_or_none(request)
     redis_connected = False
-    try:
-        store = getattr(request.app.state, "feature_store", None)
-        redis_connected = store is not None and getattr(store, "_redis", None) is not None
-        details["redis"] = "connected" if redis_connected else "disconnected"
-    except Exception as e:
-        details["redis"] = f"error: {str(e)[:50]}"
-        redis_connected = False
+    if redis_client is None:
+        details["redis"] = "disconnected"
+    else:
+        try:
+            await redis_client.ping()
+            redis_connected = True
+            details["redis"] = "connected"
+        except Exception as e:
+            details["redis"] = f"error: {str(e)[:50]}"
 
-    # Komponenten Check
     components_initialized = db_connected and redis_connected
 
     status = "healthy" if components_initialized else "unhealthy"
@@ -130,14 +155,14 @@ async def health_ready(request: Request) -> Response:
 async def health_trading(request: Request) -> Response:
     """
     Trading Health: Ist es sicher zu traden?
-    
+
     Prüft:
-    - Kill Switch nicht aktiv
+    - Kill Switch nicht aktiv (aus Redis, vom Worker geschrieben)
     - Recovery abgeschlossen
-    - Exchange-Verbindung
-    - Preflight verfügbar  
-    - Risk Engine verfügbar
-    
+    - Exchange-Verbindung, Preflight, Risk Engine: siehe Modul-Docstring
+      - diese drei sind aktuell "unknown" (Worker-interne Zustände ohne
+        Redis-Repräsentation, Folge-Commit geplant).
+
     Returns 200 wenn trading_enabled, 503 wenn disabled.
     Nicht für Load Balancer Decisions, sondern für UI/Monitoring.
     """
@@ -145,50 +170,46 @@ async def health_trading(request: Request) -> Response:
     trading_mode = config.trading_mode
     details: dict[str, Any] = {}
 
-    # Kill Switch Check
-    kill_switch = get_kill_switch(trading_mode)
-    kill_switch_active = kill_switch.is_active
-    details["kill_switch_active"] = kill_switch_active
+    redis_client = get_redis_client_or_none(request)
+    kill_switch_active: bool | None
+    if redis_client is None:
+        kill_switch_active = None
+        details["kill_switch_active"] = "unknown"
+    else:
+        ks_state = await read_kill_switch_state_from_redis(redis_client, trading_mode)
+        kill_switch_active = bool(ks_state["is_active"]) if ks_state is not None else None
+        details["kill_switch_active"] = (
+            "unknown" if kill_switch_active is None else kill_switch_active
+        )
 
-    # Recovery State
     recovery_complete = True  # Im Lifespan bereits abgeschlossen
     details["recovery_complete"] = recovery_complete
 
-    # Exchange Connection
-    exchange_connected = False
-    try:
-        pool = getattr(request.app.state, "exchange_pool", None)
-        exchange_connected = pool is not None and len(pool) > 0 if pool else False
-        details["exchange_connected"] = exchange_connected
-    except Exception as e:
-        details["exchange_connected"] = f"error: {str(e)[:50]}"
+    # Worker-interne Zustände ohne aktuelle Redis-Repraesentation - siehe
+    # Modul-Docstring. Bewusst "unknown" statt erfunden/geraten.
+    exchange_connected = "unknown"
+    preflight_available = "unknown"
+    risk_engine_available = "unknown"
+    details["exchange_connected"] = exchange_connected
+    details["preflight_available"] = preflight_available
+    details["risk_engine_available"] = risk_engine_available
 
-    # Risk Engine
-    risk_engine_available = False
-    try:
-        risk = getattr(request.app.state, "risk_engine", None)
-        risk_engine_available = risk is not None and getattr(risk, "_initialized", False)
-        details["risk_engine_available"] = risk_engine_available
-    except Exception as e:
-        details["risk_engine_available"] = f"error: {str(e)[:50]}"
-
-    # Preflight (über Execution Engine)
-    preflight_available = False
-    try:
-        exec_engine = getattr(request.app.state, "execution_engine", None)
-        preflight = getattr(exec_engine, "_preflight", None) if exec_engine else None
-        preflight_available = preflight is not None
-        details["preflight_available"] = preflight_available
-    except Exception as e:
-        details["preflight_available"] = f"error: {str(e)[:50]}"
-
-    # Trading Enabled Decision
+    # Fail-safe (siehe Modul-Docstring-Prinzip: unbekannt -> False).
+    # exchange_connected/preflight_available/risk_engine_available sind
+    # aktuell durchgehend "unknown" (siehe oben) - trading_enabled kann
+    # daher derzeit nie True werden, bis der Folge-Commit diese Signale
+    # verlaesslich aus Redis liefert. Das ist eine bewusste, dokumentierte
+    # Konsequenz des Zwischenstands, keine Regression: der alte Code
+    # konnte diese Signale zwar auf True setzen, aber nur ueber
+    # In-Memory-Engines, die im Read-Only-API-Prozess nicht mehr existieren
+    # wuerden - "immer optimistisch True" waere die eigentliche Regression.
+    signals_known = (
+        exchange_connected != "unknown"
+        and preflight_available != "unknown"
+        and risk_engine_available != "unknown"
+    )
     trading_enabled = (
-        not kill_switch_active
-        and recovery_complete
-        and exchange_connected
-        and preflight_available
-        and risk_engine_available
+        kill_switch_active is False and recovery_complete and signals_known
     )
 
     status = "healthy" if trading_enabled else "degraded"
@@ -224,21 +245,18 @@ async def health_check(request: Request) -> HealthResponse:
     config = get_config()
     components: dict[str, str] = {}
 
-    # Exchange Pool
-    pool = getattr(request.app.state, "exchange_pool", None)
-    components["exchange_pool"] = "ok" if pool and len(pool) > 0 else "degraded"
+    db_connected, _ = await _check_database()
+    components["database"] = "ok" if db_connected else "degraded"
 
-    # Feature Store
-    store = getattr(request.app.state, "feature_store", None)
-    components["feature_store"] = "ok" if store and getattr(store, "_redis", None) else "degraded"
-
-    # Risk Engine
-    risk = getattr(request.app.state, "risk_engine", None)
-    components["risk_engine"] = "ok" if risk and getattr(risk, "_initialized", False) else "degraded"
-
-    # Market Data Engine
-    md = getattr(request.app.state, "market_data_engine", None)
-    components["market_data"] = "ok" if md and getattr(md, "is_running", False) else "degraded"
+    redis_client = get_redis_client_or_none(request)
+    if redis_client is None:
+        components["redis"] = "degraded"
+    else:
+        try:
+            await redis_client.ping()
+            components["redis"] = "ok"
+        except Exception:
+            components["redis"] = "degraded"
 
     overall = "ok" if all(v == "ok" for v in components.values()) else "degraded"
 

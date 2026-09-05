@@ -24,7 +24,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import and_, desc, select, update
+from sqlalchemy import and_, desc, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from sgr.core.database import (
@@ -566,23 +566,59 @@ class TradeRepository:
             )
             result = await session.execute(stmt)
             rows = result.scalars().all()
-            return [
-                {
-                    "id": str(r.id),
-                    "symbol": r.symbol,
-                    "side": r.side,
-                    "entry_price": str(r.entry_price),
-                    "exit_price": str(r.exit_price),
-                    "quantity": str(r.quantity),
-                    "realized_pnl": str(r.realized_pnl),
-                    "fees": str(r.fees_total),
-                    "net_pnl": str(r.net_pnl),
-                    "strategy": r.strategy_name,
-                    "opened_at": r.opened_at.isoformat(),
-                    "closed_at": r.closed_at.isoformat(),
-                }
-                for r in rows
-            ]
+            return [self._to_dict(r) for r in rows]
+
+    async def get_pnl_summary(
+        self,
+        trading_mode: TradingMode,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Aggregierte realized-PnL-Kennzahlen ueber ALLE geschlossenen Trades
+        (nicht nur die letzten N wie get_recent()). Aggregation erfolgt in
+        SQL statt Python, damit keine unbeschraenkte Row-Menge in den
+        API-Prozess geladen werden muss - fuer GET /portfolio/pnl.
+        """
+        async with get_session() as session:
+            conditions = [TradeModel.trading_mode == trading_mode.value]
+            if user_id is not None:
+                conditions.append(TradeModel.user_id == user_id)
+
+            stmt = select(
+                func.count(TradeModel.id),
+                func.coalesce(func.sum(TradeModel.realized_pnl), 0),
+                func.coalesce(func.sum(TradeModel.fees_total), 0),
+                func.count(TradeModel.id).filter(TradeModel.realized_pnl > 0),
+            ).where(and_(*conditions))
+            result = await session.execute(stmt)
+            total_trades, total_realized, total_fees, winning_trades = result.one()
+
+            hit_rate = (winning_trades / total_trades) if total_trades else 0.0
+
+            return {
+                "total_trades": total_trades,
+                "winning_trades": winning_trades,
+                "total_realized_pnl": Decimal(total_realized),
+                "total_fees": Decimal(total_fees),
+                "hit_rate": hit_rate,
+            }
+
+    @staticmethod
+    def _to_dict(r: TradeModel) -> dict[str, Any]:
+        return {
+            "id": str(r.id),
+            "symbol": r.symbol,
+            "side": r.side,
+            "entry_price": str(r.entry_price),
+            "exit_price": str(r.exit_price),
+            "quantity": str(r.quantity),
+            "realized_pnl": str(r.realized_pnl),
+            "fees": str(r.fees_total),
+            "net_pnl": str(r.net_pnl),
+            "strategy": r.strategy_name,
+            "opened_at": r.opened_at.isoformat(),
+            "closed_at": r.closed_at.isoformat(),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -656,6 +692,50 @@ class StrategyRepository:
             stmt = select(StrategyModel.name).where(StrategyModel.is_active.is_(True))
             result = await session.execute(stmt)
             return list(result.scalars().all())
+
+    async def get_all(self) -> list[dict[str, Any]]:
+        """
+        Alle registrierten Strategien mit vollstaendigem Status + Performance.
+
+        Fuer sgr-api (GET /api/v1/strategy/): die API besitzt seit der
+        sgr-api/sgr-worker-Trennung keine eigene StrategyRegistry-Instanz
+        mehr, die etwas bedeuten wuerde (StrategyRegistry._entries ist
+        In-Memory und prozesslokal - eine Instanz im API-Prozess wuesste
+        nichts von den tatsaechlich im Worker laufenden Strategien). Die
+        DB ist daher die einzige Quelle, die beide Prozesse teilen.
+        """
+        async with get_session() as session:
+            stmt = select(StrategyModel).order_by(StrategyModel.name)
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+            return [self._to_dict(r) for r in rows]
+
+    async def get_by_name(self, name: str) -> dict[str, Any] | None:
+        """Einzelne Strategie nach Name, oder None falls nicht registriert.
+        Fuer den 404-Check in den activate/deactivate-Endpunkten - siehe
+        get_all() Docstring fuer den Hintergrund, warum das ueber die DB
+        statt StrategyRegistry laeuft."""
+        async with get_session() as session:
+            stmt = select(StrategyModel).where(StrategyModel.name == name)
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            return self._to_dict(row) if row is not None else None
+
+    @staticmethod
+    def _to_dict(r: StrategyModel) -> dict[str, Any]:
+        return {
+            "name": r.name,
+            "version": r.version,
+            "is_active": r.is_active,
+            "is_validated": r.is_validated,
+            "supported_regimes": r.supported_regimes,
+            "deactivation_reason": r.deactivation_reason,
+            "sharpe_ratio": float(r.sharpe_ratio) if r.sharpe_ratio is not None else None,
+            "sortino_ratio": float(r.sortino_ratio) if r.sortino_ratio is not None else None,
+            "max_drawdown": float(r.max_drawdown) if r.max_drawdown is not None else None,
+            "hit_rate": float(r.hit_rate) if r.hit_rate is not None else None,
+            "total_trades": r.total_trades,
+        }
 
 
 # ---------------------------------------------------------------------------

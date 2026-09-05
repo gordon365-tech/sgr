@@ -1,4 +1,20 @@
-"""SGR Market Data Router"""
+"""
+SGR Market Data Router
+========================
+/features/{symbol}: bereits Redis-nativ (FeatureStore), keine Änderung
+nötig für die sgr-api Read-Only-Zielarchitektur.
+
+/ticker/{symbol}: TEMPORÄR AUSSER BETRIEB (501). Der bisherige Code rief
+einen Live-Exchange-Adapter direkt aus dem API-Prozess auf (echter
+Netzwerk-Call zu Pionex/Binance) - das ist kein bloßes app.state-
+Lesbarkeitsproblem, sondern ein Architekturbruch: die API darf laut
+Zielbild keine Live-Exchange-Calls mehr machen. Es existiert noch kein
+Redis-Cache für rohe Ticker-Daten (nur FeatureStore für BERECHNETE
+Features, keine Rohdaten wie bid/ask/volume_24h). Ein FeatureSet.close
+als Ersatz auszugeben wäre ein stiller Contract-Bruch (bid/ask/volume
+könnten nicht befüllt werden). Der Ticker-Cache im Worker ist daher ein
+eigener, fokussierter Folge-Commit - siehe Gap-Analyse zu Commit 3.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +22,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from sgr.api.dependencies import TokenData, get_exchange_pool, get_feature_store, require_auth
+from sgr.api.dependencies import TokenData, get_feature_store_connection, require_auth
 from sgr.market_data.feature_store import FeatureStore
 
 router = APIRouter()
@@ -15,38 +31,35 @@ router = APIRouter()
 @router.get("/ticker/{symbol}")
 async def get_ticker(
     symbol: str,
-    pool=Depends(get_exchange_pool),
-    user: Annotated[TokenData, Depends(require_auth)] = None,  # type: ignore
+    user: Annotated[TokenData, Depends(require_auth)],
 ) -> dict:
-    """Aktueller Ticker für ein Symbol."""
-    from sgr.core.config import get_config
-    from sgr.core.types import ExchangeID
+    """
+    Aktueller Ticker für ein Symbol.
 
-    config = get_config()
-    try:
-        adapter = pool.get(ExchangeID.PIONEX, config.trading_mode)
-        ticker = await adapter.get_ticker(symbol.upper().replace("-", "/"))
-        return {
-            "symbol": ticker.symbol,
-            "bid": str(ticker.bid),
-            "ask": str(ticker.ask),
-            "last": str(ticker.last),
-            "volume_24h": str(ticker.volume_24h),
-            "change_24h_pct": ticker.change_24h_pct,
-            "timestamp": ticker.timestamp.isoformat(),
-        }
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e)) from e
+    Noch nicht auf die sgr-api Read-Only-Zielarchitektur migriert (siehe
+    Modul-Docstring) - liefert bewusst 501 statt live einen Exchange-
+    Adapter aus der API heraus aufzurufen oder erfundene/unvollständige
+    Daten zurückzugeben.
+    """
+    raise HTTPException(
+        status_code=501,
+        detail=(
+            "Ticker endpoint not yet migrated to the read-only API "
+            "architecture. Live exchange calls from the API process are "
+            "no longer permitted; a Redis-backed ticker cache written by "
+            "sgr-worker is planned as a follow-up."
+        ),
+    )
 
 
 @router.get("/features/{symbol}")
 async def get_features(
     symbol: str,
+    user: Annotated[TokenData, Depends(require_auth)],
+    store: Annotated[FeatureStore, Depends(get_feature_store_connection)],
     timeframe: str = Query(default="1h", pattern="^(1m|5m|15m|1h|4h|1d)$"),
-    store: Annotated[FeatureStore, Depends(get_feature_store)] = None,  # type: ignore
-    user: Annotated[TokenData, Depends(require_auth)] = None,  # type: ignore
 ) -> dict:
-    """Aktuelle berechnete Features für ein Symbol."""
+    """Aktuelle berechnete Features für ein Symbol (bereits Redis-nativ)."""
     symbol_key = f"binance:{symbol.upper().replace('-', '/')}"
     features = await store.get_latest(symbol_key, timeframe)
     if features is None:

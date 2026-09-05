@@ -1,14 +1,25 @@
 """
 API Integration Tests.
 Testet die FastAPI Endpoints ohne echte Exchange-Verbindung.
-Alle Engines werden mit Mocks injiziert.
+
+Migrationsstand (sgr-api Read-Only-Zielarchitektur):
+    Router, die bereits auf Repository/Redis-Reads umgestellt sind
+    (siehe sgr/api/dependencies.py), werden hier über
+    app.dependency_overrides[get_repos]/[get_trading_mode]/[get_redis_client]
+    mit einem gefälschten Repository-Bündel getestet - nicht mehr über
+    echte Engine-Instanzen in app.state (die die API seit der
+    sgr-api/sgr-worker-Trennung nicht mehr besitzt).
+
+    Noch nicht migrierte Router in dieser Datei behalten vorerst ihre
+    bisherige app.state-basierte Mock-Strategie bei, bis sie im Zuge von
+    Commit 3 (Router-für-Router-Umstellung) ebenfalls umgestellt werden.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,8 +28,75 @@ from sgr.core.config import get_config
 from sgr.core.types import TradingMode
 
 # ---------------------------------------------------------------------------
-# App Factory für Tests (ohne echte DB/Redis)
+# Fake Repositories (fuer bereits migrierte Router, z.B. portfolio.py)
 # ---------------------------------------------------------------------------
+
+
+def _make_fake_repos() -> MagicMock:
+    """
+    Gefälschtes Repositories-Bündel mit realistischen Rückgabewerten für
+    die bereits migrierten Router. Jede Repository-Methode ist ein
+    AsyncMock mit einem sinnvollen Default-Rückgabewert (leeres/None
+    entspricht "frisches Deployment, Worker hat noch nichts geschrieben").
+    """
+    repos = MagicMock()
+
+    repos.portfolio_snapshots.get_latest = AsyncMock(
+        return_value={
+            "portfolio_value": Decimal("100000"),
+            "cash": Decimal("80000"),
+            "unrealized_pnl": Decimal("500"),
+            "peak_value": Decimal("102000"),
+            "drawdown": Decimal("0.02"),
+            "open_positions_count": 2,
+            "total_trades": 5,
+            "trading_mode": "paper",
+        }
+    )
+    repos.positions.get_open_positions = AsyncMock(return_value=[])
+    repos.trades.get_recent = AsyncMock(return_value=[])
+    repos.trades.get_pnl_summary = AsyncMock(
+        return_value={
+            "total_trades": 0,
+            "winning_trades": 0,
+            "total_realized_pnl": Decimal("0"),
+            "total_fees": Decimal("0"),
+            "hit_rate": 0.0,
+        }
+    )
+    repos.strategies.get_all = AsyncMock(
+        return_value=[
+            {
+                "name": "trend_following_v1",
+                "version": "1.0.0",
+                "is_active": True,
+                "is_validated": True,
+                "supported_regimes": ["trending_up", "trending_down"],
+                "deactivation_reason": None,
+                "sharpe_ratio": None,
+                "sortino_ratio": None,
+                "max_drawdown": None,
+                "hit_rate": None,
+                "total_trades": 0,
+            },
+            {
+                "name": "mean_reversion_v1",
+                "version": "1.0.0",
+                "is_active": True,
+                "is_validated": True,
+                "supported_regimes": ["ranging"],
+                "deactivation_reason": None,
+                "sharpe_ratio": None,
+                "sortino_ratio": None,
+                "max_drawdown": None,
+                "hit_rate": None,
+                "total_trades": 0,
+            },
+        ]
+    )
+    repos.strategies.get_by_name = AsyncMock(return_value=None)
+    repos.strategies.set_active = AsyncMock(return_value=None)
+    return repos
 
 
 def _create_test_app():
@@ -31,12 +109,6 @@ def _create_test_app():
     from sgr.api.main import AppState
 
     app.state = AppState()
-
-    # Mock Portfolio Engine
-    from sgr.portfolio.engine import PortfolioEngine
-
-    portfolio = PortfolioEngine(TradingMode.PAPER, initial_cash=Decimal("100000"))
-    app.state.portfolio_engine = portfolio
 
     # Mock Risk Engine
     risk_mock = MagicMock()
@@ -58,9 +130,14 @@ def _create_test_app():
     )
     app.state.risk_engine = risk_mock
 
-    # Mock Feature Store
+    # Mock Feature Store (redis_client-Property statt privatem _redis,
+    # siehe FeatureStore.redis_client in sgr/market_data/feature_store.py)
+    fake_redis = AsyncMock()
+    fake_redis.get = AsyncMock(return_value=None)  # kein State geschrieben -> "unknown"/"stale"
+    fake_redis.set = AsyncMock()
+    fake_redis.ping = AsyncMock(return_value=True)
     store_mock = MagicMock()
-    store_mock._redis = True  # Mark as connected
+    store_mock.redis_client = fake_redis
     app.state.feature_store = store_mock
 
     # Mock Exchange Pool
@@ -74,6 +151,7 @@ def _create_test_app():
     app.state.market_data_engine = md_mock
 
     # Mount routers
+    from sgr.api.dependencies import get_redis_client, get_repos, get_trading_mode
     from sgr.api.routers import (
         health,
         orders,
@@ -89,6 +167,14 @@ def _create_test_app():
     app.include_router(strategy.router, prefix="/api/v1/strategy", tags=["strategy"])
     app.include_router(orders.router, prefix="/api/v1/orders", tags=["orders"])
     app.include_router(system.router, prefix="/api/v1/system", tags=["system"])
+
+    # portfolio.py/risk.py/strategy.py/orders.py sind bereits auf
+    # Repository/Redis-Reads umgestellt (Commit 3) - kein
+    # app.state.portfolio_engine/risk_engine mehr als fachliche
+    # Datenquelle, stattdessen dependency_overrides.
+    app.dependency_overrides[get_repos] = _make_fake_repos
+    app.dependency_overrides[get_trading_mode] = lambda: TradingMode.PAPER
+    app.dependency_overrides[get_redis_client] = lambda: fake_redis
 
     return app
 
@@ -233,12 +319,18 @@ class TestRiskEndpoints:
         assert "hard_limits" in data
         assert "soft_limits" in data
 
-    def test_kill_switch_status(self, client: TestClient, auth_headers: dict) -> None:
+    def test_kill_switch_status_unknown_when_never_written(
+        self, client: TestClient, auth_headers: dict
+    ) -> None:
+        """Kein State je geschrieben (frisches Test-Setup) -> is_active ist
+        None/status_known False, NICHT False - siehe Commit-3-Entscheidung:
+        KillSwitchResponse musste bool -> bool|None erweitert werden, damit
+        'unbekannt' nicht mit 'inaktiv' verwechselt werden kann."""
         response = client.get("/api/v1/risk/kill-switch", headers=auth_headers)
         assert response.status_code == 200
         data = response.json()
-        assert "is_active" in data
-        assert data["is_active"] is False
+        assert data["is_active"] is None
+        assert data["status_known"] is False
         assert data["trading_mode"] == "paper"
 
     def test_kill_switch_reset_requires_admin(self, client: TestClient, auth_headers: dict) -> None:

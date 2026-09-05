@@ -1,15 +1,24 @@
 """
 SGR Trading Router
 ===================
-Manuelles Auslösen eines Trading-Zyklus über den Orchestrator.
+Manuelles Auslösen eines Trading-Zyklus - AKTUELL AUSSER BETRIEB (501).
 
-Sicherheitsmechanismus für Live Trading:
-    Ein Aufruf mit trading_mode == LIVE wird abgelehnt, sofern nicht
-    explizit confirm_live=true im Request-Body gesetzt ist. Das verhindert,
-    dass ein versehentlicher/automatisierter Client-Call in Live einen
-    echten Trade auslöst. Dry Run und Paper Trading benötigen dieses
-    Flag nicht - sie haben laut Projektgrundsatz ohnehin Vorrang und
-    sind risikofrei.
+Architektur-Hintergrund (sgr-api Read-Only-Zielarchitektur):
+    Der bisherige Code führte orchestrator.run_cycle() DIREKT im
+    API-Prozess aus - der klarste Fall von "Trading Lifecycle Logik in
+    der API", die laut Zielarchitektur vollständig entfallen muss.
+    sgr-worker ist alleiniger Owner des Trading Lifecycle; die API darf
+    keinen eigenen Orchestrator mehr besitzen oder aufrufen.
+
+    Ein manueller Cycle-Trigger bleibt ein legitimes operatives
+    Werkzeug (z.B. nach einem Deployment gezielt testen, statt auf den
+    nächsten automatischen Zyklus zu warten) - daher wird der Endpoint
+    NICHT ersatzlos entfernt, sondern bewusst als 501 beantwortet, bis
+    ein Folge-Commit einen echten Command-Channel (Redis Pub/Sub oder
+    Stream, inkl. Ack/Timeout-Semantik) zum Worker einführt. Das ist
+    mehr als ein Router-Datenquellen-Wechsel und verdient einen eigenen,
+    fokussierten Commit mit eigenen Tests (analog zur Kill-Switch-
+    Umstellung in Commit 2).
 """
 
 from __future__ import annotations
@@ -19,13 +28,8 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from sgr.api.dependencies import TokenData, get_orchestrator, require_admin
-from sgr.core.config import get_config
-from sgr.core.logging import get_logger
-from sgr.core.types import MarketRegime, TradingCycleResult, TradingMode
-from sgr.orchestrator.engine import TradingOrchestrator
-
-log = get_logger(__name__)
+from sgr.api.dependencies import TokenData, require_admin
+from sgr.core.types import MarketRegime
 
 router = APIRouter()
 
@@ -37,31 +41,24 @@ class TriggerCycleRequest(BaseModel):
     confirm_live: bool = False
 
 
-@router.post("/cycle", response_model=TradingCycleResult)
+@router.post("/cycle")
 async def trigger_cycle(
     body: TriggerCycleRequest,
     user: Annotated[TokenData, Depends(require_admin)],
-    orchestrator: Annotated[TradingOrchestrator, Depends(get_orchestrator)],
-) -> TradingCycleResult:
+) -> dict:
     """
     Löst manuell einen einzelnen Trading-Zyklus aus.
-    Nur für Admins. In LIVE-Mode ist confirm_live=true zwingend erforderlich.
+
+    Noch nicht auf die sgr-api Read-Only-Zielarchitektur migriert (siehe
+    Modul-Docstring) - liefert bewusst 501 statt Trading-Lifecycle-Logik
+    direkt im API-Prozess auszuführen.
     """
-    config = get_config()
-
-    if config.trading_mode == TradingMode.LIVE and not body.confirm_live:
-        log.warning(
-            "trading_router.live_trigger_blocked",
-            symbol_key=body.symbol_key,
-            reason="confirm_live not set",
-        )
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Live trading cycle requires explicit confirm_live=true. "
-                "This is a deliberate safety gate, not an error."
-            ),
-        )
-
-    result = await orchestrator.run_cycle(body.symbol_key, body.timeframe, body.regime)
-    return result
+    raise HTTPException(
+        status_code=501,
+        detail=(
+            "Manual cycle trigger not yet migrated to the read-only API "
+            "architecture. Running the trading orchestrator directly in "
+            "the API process is no longer permitted; a Redis-backed "
+            "command channel to sgr-worker is planned as a follow-up."
+        ),
+    )
