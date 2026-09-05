@@ -24,7 +24,7 @@ WICHTIG:
 from __future__ import annotations
 
 import asyncio
-import logging
+import structlog
 import signal
 import sys
 from typing import Any
@@ -34,7 +34,7 @@ from sgr.core.config import get_config
 from sgr.core.logging import setup_logging
 from sgr.core.types import Environment
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class TradingWorker:
