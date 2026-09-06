@@ -24,17 +24,16 @@ WICHTIG:
 from __future__ import annotations
 
 import asyncio
-import structlog
 import signal
 import sys
 from typing import Any
 
 from sgr.api.main import AppState, lifespan
 from sgr.core.config import get_config
-from sgr.core.logging import setup_logging
+from sgr.core.logging import get_logger, setup_logging
 from sgr.core.types import Environment
 
-logger = structlog.get_logger(__name__)
+logger = get_logger(__name__)
 
 
 class _FakeApp:
