@@ -16,7 +16,8 @@
 #       ↓
 #   [ Internal Network ]
 #       ├── api (port 8000)
-#       ├── worker
+#       ├── worker-gordon, worker-sumo (ein Container pro Tenant,
+#       │   Commit 5: Isolation durch OS-Prozesstrennung)
 #       ├── postgres (port 5432 internal only)
 #       ├── redis (port 6379 internal only)
 #       ├── prometheus (port 9090 internal, optional external)
@@ -361,15 +362,18 @@ services:
           memory: 2G
 
   # =========================================================================
-  # SGR Worker (Trading Engine – separater Container)
+  # SGR Worker (Trading Engine - separater Container, ein Container pro
+  # Tenant, Commit 5 Option A: Isolation durch OS-Prozesstrennung statt
+  # In-Memory-Multiplexing im API-Prozess, siehe sgr/core/config.py
+  # SGRConfig.tenant_id Docstring und sgr/core/tenant_credentials.py)
   # =========================================================================
-  worker:
+  worker-gordon:
     build:
       context: ..
       dockerfile: docker/Dockerfile.worker
     image: sgr-worker:latest
-    container_name: sgr-worker
-    hostname: worker
+    container_name: sgr-worker-gordon
+    hostname: worker-gordon
     networks:
       sgr-net:
         ipv4_address: 172.28.1.21
@@ -399,6 +403,11 @@ services:
       LOG_LEVEL: info
       
       WORKER_ROLE: trading
+      # Multi-Tenant-Worker: laedt Exchange-Credentials aus der DB
+      # (APIKeyModel, ueber POST /api-keys hinterlegt) statt aus .env,
+      # siehe sgr/core/tenant_credentials.py. Muss mit der user_id in
+      # der users-Tabelle uebereinstimmen (Auth via sgr.saas.auth).
+      TENANT_ID: gordon
       
       SENTRY_DSN: ${SENTRY_DSN:-}
       
@@ -420,6 +429,67 @@ services:
     read_only: false
     
     # Resource limits (Can be higher/lower than API)
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+
+  worker-sumo:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    image: sgr-worker:latest
+    container_name: sgr-worker-sumo
+    hostname: worker-sumo
+    networks:
+      sgr-net:
+        ipv4_address: 172.28.1.22
+        
+    # NO ports exposed - internal only
+    
+    env_file:
+      - path: ../.env.prod
+        required: false
+      - path: ../.env
+        required: false
+        
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      
+      ENVIRONMENT: production
+      TRADING_MODE: paper
+      
+      LOG_LEVEL: info
+      
+      WORKER_ROLE: trading
+      TENANT_ID: sumo
+      
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+        
+    restart: unless-stopped
+    
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: false
+    
     deploy:
       resources:
         limits:

@@ -58,3 +58,24 @@ class TestSGRConfig:
         c2 = get_config()
         assert c1 is c2  # same object
         get_config.cache_clear()
+
+
+class TestSGRConfigTenantId:
+    """
+    Commit 5 (Option A): tenant_id steuert, ob lifespan() Exchange-
+    Credentials aus der DB (Multi-Tenant-Worker) oder aus .env
+    (Single-Tenant, unveraendertes Verhalten) laedt.
+    """
+
+    def test_default_tenant_id_is_none(self) -> None:
+        config = SGRConfig()
+        assert config.tenant_id is None
+
+    def test_tenant_id_from_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TENANT_ID", "gordon")
+        config = SGRConfig()
+        assert config.tenant_id == "gordon"
+
+    def test_tenant_id_explicit_constructor_arg(self) -> None:
+        config = SGRConfig(tenant_id="sumo")
+        assert config.tenant_id == "sumo"

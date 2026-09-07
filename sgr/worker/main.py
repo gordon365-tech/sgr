@@ -101,6 +101,7 @@ class TradingWorker:
             version=self.config.version,
             environment=self.config.environment.value,
             trading_mode=self.config.trading_mode.value,
+            tenant_id=self.config.tenant_id,
         )
 
         # Signalhandler registrieren

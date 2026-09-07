@@ -240,6 +240,17 @@ class SGRConfig(BaseSettings):
     # umschaltbar, z.B. solange Pionex nicht via ccxt unterstuetzt wird.
     primary_exchange: ExchangeID = ExchangeID.PIONEX
 
+    # Multi-Tenant-Worker (Commit 5, Option A): wenn gesetzt, laedt
+    # lifespan() Exchange-Credentials fuer diesen Worker-Prozess aus der
+    # DB (APIKeyModel, verschluesselt mit get_cipher(), siehe
+    # sgr/core/tenant_credentials.py) statt aus config.credentials
+    # (.env). Jeder Tenant (z.B. Gordon, Sumo) laeuft als eigener
+    # sgr-worker-Container mit eigener TENANT_ID env var - Isolation
+    # entsteht durch OS-Prozesstrennung, nicht durch In-Memory-State im
+    # API-Prozess (siehe Entscheidung zu Commit 5, Option A vs. B).
+    # Default None = unveraendertes Single-Tenant-Verhalten (.env).
+    tenant_id: str | None = Field(default=None)
+
     # Sub-configs (nested, loaded from env with prefixes)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     redis: RedisConfig = Field(default_factory=RedisConfig)

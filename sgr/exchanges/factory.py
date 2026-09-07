@@ -211,14 +211,35 @@ class ExchangePool:
         self,
         exchanges: list[ExchangeID],
         trading_mode: TradingMode,
+        credentials: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> None:
-        """Connect all specified exchanges concurrently."""
+        """Connect all specified exchanges concurrently.
+
+        credentials: wenn gesetzt (dict mit "apiKey"/"secret", siehe
+            ExchangeFactory.create_with_credentials()), werden diese
+            expliziten Credentials verwendet statt config.credentials
+            (.env) - fuer Multi-Tenant-Worker (Commit 5), die ihre
+            Keys aus der DB laden (siehe
+            sgr.core.tenant_credentials.load_tenant_credentials()).
+            Gilt fuer ALLE exchanges in diesem Aufruf; fuer
+            unterschiedliche Credentials pro Exchange initialize()
+            mehrfach mit je einer Exchange aufrufen.
+        """
         async with self._lock:
             tasks = []
             for exchange_id in exchanges:
                 if (exchange_id, trading_mode) not in self._adapters:
-                    adapter = ExchangeFactory.create(exchange_id, trading_mode, **kwargs)
+                    if credentials is not None:
+                        adapter = ExchangeFactory.create_with_credentials(
+                            exchange_id=exchange_id,
+                            trading_mode=trading_mode,
+                            api_key=credentials["apiKey"],
+                            secret=credentials["secret"],
+                            **kwargs,
+                        )
+                    else:
+                        adapter = ExchangeFactory.create(exchange_id, trading_mode, **kwargs)
                     self._adapters[(exchange_id, trading_mode)] = adapter
                     tasks.append(adapter.connect())
 

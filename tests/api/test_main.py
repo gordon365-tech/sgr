@@ -123,11 +123,17 @@ def _patch_lifespan_dependencies(
     paper_mode: bool = True,
     has_adapters: bool = True,
     primary_exchange: ExchangeID = ExchangeID.PIONEX,
+    tenant_id: str | None = None,
 ):
     """
     Baut den vollständigen Satz an Patches, um lifespan() ohne echte
     Infrastruktur durchlaufen zu lassen. Gibt (patchers, mocks) zurück,
     damit Tests gezielt Assertions auf einzelne Komponenten machen können.
+
+    tenant_id: default None (Single-Tenant-Verhalten, unveraendert).
+        Gesetzt aktiviert den Multi-Tenant-Zweig in lifespan() Schritt 5
+        (Commit 5) - siehe TestLifespanTenantId weiter unten fuer die
+        zugehoerigen load_tenant_credentials()-Patches.
     """
     config = MagicMock()
     config.monitoring.log_level = "INFO"
@@ -137,6 +143,11 @@ def _patch_lifespan_dependencies(
     config.api.host = "127.0.0.1"
     config.api.port = 8000
     config.primary_exchange = primary_exchange
+    # MagicMock()-Attribute sind standardmaessig truthy/nicht-None - ohne
+    # diese explizite Zeile wuerde config.tenant_id ein MagicMock-Objekt
+    # sein und den "if config.tenant_id is not None:"-Zweig in lifespan()
+    # unbeabsichtigt in JEDEM bestehenden Test aktivieren.
+    config.tenant_id = tenant_id
     if paper_mode:
         config.credentials.pionex_live_api_key = None
         config.credentials.pionex_live_secret = None
@@ -613,6 +624,103 @@ class TestCreateAppUsesApiRole:
                 # role="api"-Verhalten: kein Exchange-Pool-Init.
                 mocks["pool"].initialize.assert_not_awaited()
                 assert app.state.exchange_pool is None
+        finally:
+            for p in patchers:
+                p.stop()
+
+
+class TestLifespanTenantId:
+    """
+    Commit 5 (Option A): config.tenant_id gesetzt -> lifespan() Schritt 5
+    laedt Exchange-Credentials aus der DB (load_tenant_credentials())
+    statt aus config.credentials (.env). Der bestehende Pionex/Binance-
+    .env-Verzweigungscode (siehe TestLifespanStartupShutdownPaperMode)
+    bleibt fuer tenant_id=None unangetastet und wird hier nicht erneut
+    getestet.
+    """
+
+    async def test_tenant_id_none_does_not_call_load_tenant_credentials(self) -> None:
+        """Regressionsschutz: der bestehende Single-Tenant-Pfad darf durch
+        die neue Verzweigung nicht beeinflusst werden."""
+        patchers, mocks = _patch_lifespan_dependencies(
+            paper_mode=True, has_adapters=True, tenant_id=None
+        )
+
+        app = FastAPI()
+        app.state = AppState()  # type: ignore[assignment]
+
+        for p in patchers:
+            p.start()
+        try:
+            with patch(
+                "sgr.core.tenant_credentials.load_tenant_credentials",
+                new=AsyncMock(),
+            ) as mock_load:
+                async with lifespan(app):
+                    mock_load.assert_not_awaited()
+                    mocks["pool"].initialize.assert_awaited_once_with(
+                        [mocks["config"].primary_exchange], TradingMode.PAPER
+                    )
+        finally:
+            for p in patchers:
+                p.stop()
+
+    async def test_tenant_id_set_loads_credentials_from_db_and_initializes_pool(self) -> None:
+        patchers, mocks = _patch_lifespan_dependencies(
+            paper_mode=True, has_adapters=True, tenant_id="gordon"
+        )
+
+        app = FastAPI()
+        app.state = AppState()  # type: ignore[assignment]
+
+        tenant_creds = {"apiKey": "gordon-key", "secret": "gordon-secret"}
+
+        for p in patchers:
+            p.start()
+        try:
+            with patch(
+                "sgr.core.tenant_credentials.load_tenant_credentials",
+                new=AsyncMock(return_value=tenant_creds),
+            ) as mock_load:
+                async with lifespan(app):
+                    mock_load.assert_awaited_once_with(
+                        "gordon", ExchangeID.PIONEX, TradingMode.PAPER
+                    )
+                    mocks["pool"].initialize.assert_awaited_once_with(
+                        [ExchangeID.PIONEX],
+                        TradingMode.PAPER,
+                        credentials=tenant_creds,
+                    )
+                    # .env-Pfad (config.credentials.get_credentials) darf im
+                    # Multi-Tenant-Zweig nicht aufgerufen werden.
+                    mocks["config"].credentials.get_credentials.assert_not_called()
+        finally:
+            for p in patchers:
+                p.stop()
+
+    async def test_tenant_id_set_but_no_db_credentials_logs_warning_and_continues(self) -> None:
+        """Analog zum bestehenden .env-ValueError-Pfad: ein Tenant ohne
+        konfigurierte DB-Keys darf den Worker-Start nicht blockieren -
+        nur der Exchange Pool bleibt fuer diesen Prozess leer."""
+        patchers, mocks = _patch_lifespan_dependencies(
+            paper_mode=True, has_adapters=False, tenant_id="sumo"
+        )
+
+        app = FastAPI()
+        app.state = AppState()  # type: ignore[assignment]
+
+        for p in patchers:
+            p.start()
+        try:
+            with patch(
+                "sgr.core.tenant_credentials.load_tenant_credentials",
+                new=AsyncMock(side_effect=ValueError("No API keys configured")),
+            ):
+                # Darf nicht raisen - lifespan() muss trotzdem sauber
+                # durchlaufen (fail-safe, nicht fail-fast, siehe
+                # bestehendes Verhalten fuer den .env-Pfad).
+                async with lifespan(app):
+                    mocks["pool"].initialize.assert_not_awaited()
         finally:
             for p in patchers:
                 p.stop()

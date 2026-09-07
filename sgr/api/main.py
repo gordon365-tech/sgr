@@ -208,7 +208,34 @@ async def lifespan(
         primary_exchange = config.primary_exchange
 
         try:
-            if primary_exchange == ExchangeID.PIONEX:
+            if config.tenant_id is not None:
+                # Multi-Tenant-Worker (Commit 5, Option A): Credentials
+                # kommen aus der DB (APIKeyModel) statt aus config.credentials
+                # (.env). Kein Pionex/Testnet-Sonderfall hier - Paper-Mode-
+                # Credentials muessen fuer Tenants genauso explizit in der DB
+                # hinterlegt sein wie Live-Credentials (siehe
+                # sgr.core.tenant_credentials.load_tenant_credentials()
+                # Docstring: Tenant ohne konfigurierte Keys faehrt den
+                # Worker trotzdem hoch, nur ohne Exchange Pool - kein
+                # fail-fast, analog zum bestehenden .env-ValueError-Pfad
+                # unten).
+                from sgr.core.tenant_credentials import load_tenant_credentials
+
+                try:
+                    tenant_credentials = await load_tenant_credentials(
+                        config.tenant_id, primary_exchange, config.trading_mode
+                    )
+                    await pool.initialize(
+                        [primary_exchange], config.trading_mode, credentials=tenant_credentials
+                    )
+                except ValueError:
+                    log.warning(
+                        "sgr.api.tenant_credentials_missing",
+                        tenant_id=config.tenant_id,
+                        exchange=primary_exchange.value,
+                        trading_mode=config.trading_mode.value,
+                    )
+            elif primary_exchange == ExchangeID.PIONEX:
                 # Pionex hat kein Testnet: Paper Mode braucht keine echten Keys
                 # (PionexAdapter.connect() simuliert lokal, siehe pionex.py)
                 if config.trading_mode == TradingMode.PAPER or (
@@ -361,7 +388,13 @@ async def lifespan(
             )
         app.state.market_data_engine = md_engine
 
-    log.info("sgr.api.ready", role=role, host=config.api.host, port=config.api.port)
+    log.info(
+        "sgr.api.ready",
+        role=role,
+        tenant_id=config.tenant_id,
+        host=config.api.host,
+        port=config.api.port,
+    )
 
     yield
 

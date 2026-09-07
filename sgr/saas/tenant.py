@@ -3,6 +3,20 @@ SGR Tenant Manager
 ==================
 Verwaltet per-User Engine-Instanzen für Multi-Tenant-Betrieb.
 
+STATUS (Commit 5, Option A - siehe Migrationsplan): store_api_key()
+wird weiterhin aktiv genutzt (via sgr.saas.routers.apikey_router) als
+DB-Persistenz-Layer fuer Tenant-Credentials, gelesen von
+sgr.core.tenant_credentials.load_tenant_credentials() im Worker-
+lifespan()-Startup-Pfad. TenantSession/get_or_create_session/
+get_exchange_adapter unten sind dagegen fuer ein Pro-Request-In-Memory-
+Engine-Modell im API-Prozess gedacht, das der etablierten Zielarchitektur
+widerspricht (API ist seit Commit 3/4 strikt read-only, haelt keine
+Trading-Engines mehr - siehe sgr/api/dependencies.py Modul-Docstring).
+Werden aktuell nirgends aufgerufen. Ob dieser Teil entfernt, umgebaut,
+oder fuer einen anderen Zweck weiterverwendet wird, ist eine bewusst
+zurueckgestellte, separate Entscheidung - nicht im Rahmen von Commit 5
+behandelt.
+
 Kern-Prinzip: Vollständige Isolation zwischen Tenants.
     - Jeder User hat eigene Portfolio-Engine-Instanz
     - Jeder User hat eigenen Kill Switch
