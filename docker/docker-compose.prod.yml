@@ -413,7 +413,7 @@ services:
       # (frueher: kryptischer asyncpg.exceptions.DataError, siehe
       # Deployment-Vorfall). Platzhalter unten MUSS vor dem Start durch
       # die echte UUID ersetzt werden.
-      TENANT_ID: REPLACE_WITH_GORDON_USERS_TABLE_UUID
+      TENANT_ID: a47d994d-35cc-4619-83bb-86fd0cb48447
       
       SENTRY_DSN: ${SENTRY_DSN:-}
       
@@ -478,7 +478,7 @@ services:
       WORKER_ROLE: trading
       # Siehe ausfuehrlichen Kommentar bei worker-gordon oben: TENANT_ID
       # muss die echte users.id-UUID sein, kein Klartext-Name.
-      TENANT_ID: REPLACE_WITH_SUMO_USERS_TABLE_UUID
+      TENANT_ID: 144f7bb0-113d-4c66-b5d3-7a34ab1d551a
       
       SENTRY_DSN: ${SENTRY_DSN:-}
       
