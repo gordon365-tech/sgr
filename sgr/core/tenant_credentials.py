@@ -41,18 +41,36 @@ async def load_tenant_credentials(
     dort abgelegt).
 
     Raises:
-        ValueError: kein aktiver API-Key-Eintrag fuer diese
-            (tenant_id, exchange_id, trading_mode)-Kombination gefunden.
-            Der Aufrufer (lifespan()) behandelt das analog zum
-            bestehenden .env-ValueError-Pfad: Exchange Pool bleibt
-            fuer diesen Prozess leer, Server startet trotzdem (kein
-            fail-fast hier - ein Tenant ohne konfigurierte Keys soll
-            den Worker nicht komplett verhindern, siehe bestehendes
-            Verhalten in lifespan() Schritt 5).
+        ValueError: entweder tenant_id ist keine gueltige UUID (TENANT_ID
+            env var muss die tatsaechliche users.id-UUID sein, nicht ein
+            sprechender Name wie "gordon" - siehe
+            docker-compose.prod.yml Kommentar bei TENANT_ID), oder es
+            existiert kein aktiver API-Key-Eintrag fuer diese
+            (tenant_id, exchange_id, trading_mode)-Kombination. Der
+            Aufrufer (lifespan()) behandelt beide Faelle gleich: Exchange
+            Pool bleibt fuer diesen Prozess leer, Server startet
+            trotzdem (kein fail-fast hier - ein Tenant ohne konfigurierte
+            Keys soll den Worker nicht komplett verhindern, siehe
+            bestehendes Verhalten in lifespan() Schritt 5).
     """
+    from uuid import UUID
+
     from sqlalchemy import and_, select
 
     from sgr.core.database import APIKeyModel, get_session as db_session
+
+    try:
+        UUID(tenant_id)
+    except ValueError as e:
+        # APIKeyModel.user_id ist PG_UUID(as_uuid=False) - ein
+        # nicht-UUID-Wert wuerde sonst erst als kryptischer
+        # asyncpg.exceptions.DataError aus der DB-Query auftauchen
+        # (siehe Deployment-Vorfall: TENANT_ID=sumo statt echter UUID).
+        raise ValueError(
+            f"tenant_id {tenant_id!r} is not a valid UUID. TENANT_ID must "
+            f"be the actual users.id UUID (SELECT id FROM users WHERE "
+            f"email = ...), not a human-readable name."
+        ) from e
 
     async with db_session() as db:
         result = await db.execute(

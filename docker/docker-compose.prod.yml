@@ -405,9 +405,15 @@ services:
       WORKER_ROLE: trading
       # Multi-Tenant-Worker: laedt Exchange-Credentials aus der DB
       # (APIKeyModel, ueber POST /api-keys hinterlegt) statt aus .env,
-      # siehe sgr/core/tenant_credentials.py. Muss mit der user_id in
-      # der users-Tabelle uebereinstimmen (Auth via sgr.saas.auth).
-      TENANT_ID: gordon
+      # siehe sgr/core/tenant_credentials.py. MUSS die tatsaechliche
+      # users.id-UUID sein (z.B. per SELECT id FROM users WHERE email =
+      # 'gordon@...' ermittelt), NICHT ein sprechender Name - ein
+      # Klartext-Wert wie "gordon" scheitert an der UUID-Validierung in
+      # load_tenant_credentials() mit einer klaren Fehlermeldung
+      # (frueher: kryptischer asyncpg.exceptions.DataError, siehe
+      # Deployment-Vorfall). Platzhalter unten MUSS vor dem Start durch
+      # die echte UUID ersetzt werden.
+      TENANT_ID: REPLACE_WITH_GORDON_USERS_TABLE_UUID
       
       SENTRY_DSN: ${SENTRY_DSN:-}
       
@@ -470,7 +476,9 @@ services:
       LOG_LEVEL: info
       
       WORKER_ROLE: trading
-      TENANT_ID: sumo
+      # Siehe ausfuehrlichen Kommentar bei worker-gordon oben: TENANT_ID
+      # muss die echte users.id-UUID sein, kein Klartext-Name.
+      TENANT_ID: REPLACE_WITH_SUMO_USERS_TABLE_UUID
       
       SENTRY_DSN: ${SENTRY_DSN:-}
       
