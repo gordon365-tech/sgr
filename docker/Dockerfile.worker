@@ -19,6 +19,21 @@ COPY --chown=sgr:sgr sgr/worker/main.py /app/sgr/worker/
 # Worker kann spezifische Ressourcen-Limits definieren
 # (wird in docker-compose.yml / Kubernetes definiert, nicht hier)
 
+# Healthcheck: ueberschreibt explizit den vom sgr-api-Base-Image geerbten
+# HTTP-Check (curl gegen localhost:8000/health/live). Der Worker exponiert
+# bewusst keinen HTTP-Port (siehe docker-compose.prod.yml: "NO ports
+# exposed - internal only"), weshalb der geerbte Check immer mit
+# "Failed to connect to localhost port 8000" fehlschlug, obwohl der
+# Worker-Prozess funktional lief (unhealthy trotz sauberem worker.ready).
+#
+# Stattdessen wird ein Datei-basierter Liveness-Marker geprueft, den
+# sgr/worker/main.py periodisch aktualisiert (siehe HEARTBEAT_PATH /
+# HEARTBEAT_INTERVAL_SECONDS dort). "-mmin -1" (juenger als 60s) erlaubt
+# bis zu vier verpasste 15s-Heartbeat-Intervalle, bevor retries=3 den
+# Container als unhealthy markiert.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD find /tmp/worker_heartbeat -mmin -1 | grep -q . || exit 1
+
 ENTRYPOINT ["/usr/bin/tini", "--"]
 
 # Worker läuft mit spezialisiertem Entry Point

@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import signal
 import sys
+from pathlib import Path
 from typing import Any
 
 from sgr.api.main import AppState, lifespan
@@ -34,6 +35,21 @@ from sgr.core.logging import get_logger, setup_logging
 from sgr.core.types import Environment
 
 logger = get_logger(__name__)
+
+# Datei-basierter Liveness-Marker fuer den Docker-HEALTHCHECK.
+#
+# Der Worker exponiert bewusst keinen HTTP-Port (siehe docker-compose.prod.yml:
+# "NO ports exposed - internal only"). Ein vom sgr-api-Image geerbter
+# HTTP-Healthcheck gegen localhost:8000 schlaegt deshalb immer fehl, obwohl
+# der Worker-Prozess funktional laeuft (docker inspect zeigte:
+# "curl: (7) Failed to connect to localhost port 8000").
+#
+# Statt HTTP wird hier ein Heartbeat-File verwendet: sobald der Worker
+# betriebsbereit ist (lifespan()-Init abgeschlossen), wird die Datei
+# angelegt und danach periodisch aktualisiert. Der HEALTHCHECK in
+# Dockerfile.worker prueft Existenz + Alter dieser Datei.
+HEARTBEAT_PATH = Path("/tmp/worker_heartbeat")
+HEARTBEAT_INTERVAL_SECONDS = 15
 
 
 class _FakeApp:
@@ -57,6 +73,7 @@ class TradingWorker:
         self.app_state = AppState()
         self._shutdown_event = asyncio.Event()
         self._running = False
+        self._heartbeat_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         """Startet den Worker."""
@@ -84,6 +101,8 @@ class TradingWorker:
         # (identisch wie in der API, nutzt dieselbe shared Infrastructure)
         async with lifespan(_FakeApp(self.app_state)):  # type: ignore[arg-type]
             logger.info("worker.ready")
+            self._write_heartbeat()
+            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
             # Worker hauptschleife
             try:
@@ -91,8 +110,45 @@ class TradingWorker:
             except asyncio.CancelledError:
                 logger.info("worker.cancelled")
                 raise
+            finally:
+                if self._heartbeat_task is not None:
+                    self._heartbeat_task.cancel()
+                    try:
+                        await self._heartbeat_task
+                    except asyncio.CancelledError:
+                        pass
+                self._remove_heartbeat()
 
         logger.info("worker.stopped")
+
+    def _write_heartbeat(self) -> None:
+        """Schreibt/aktualisiert den Heartbeat-Marker fuer den Healthcheck."""
+        try:
+            HEARTBEAT_PATH.write_text(str(asyncio.get_event_loop().time()))
+        except OSError as e:
+            # Fail-safe: ein Heartbeat-Schreibfehler darf den Trading-
+            # Lifecycle nicht blockieren, nur den Healthcheck betreffen.
+            logger.warning("worker.heartbeat_write_failed", error=str(e))
+
+    def _remove_heartbeat(self) -> None:
+        """Entfernt den Heartbeat-Marker beim Shutdown, damit der
+        Healthcheck einen gestoppten Worker korrekt als unhealthy zeigt."""
+        try:
+            HEARTBEAT_PATH.unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning("worker.heartbeat_cleanup_failed", error=str(e))
+
+    async def _heartbeat_loop(self) -> None:
+        """Aktualisiert den Heartbeat-Marker periodisch, solange der
+        Worker laeuft. Ein hängender Event-Loop (z.B. Deadlock in der
+        Trading-Hauptschleife) fuehrt dazu, dass der Marker veraltet und
+        der Healthcheck den Container als unhealthy erkennt."""
+        try:
+            while True:
+                await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
+                self._write_heartbeat()
+        except asyncio.CancelledError:
+            raise
 
     def _signal_handler(self, signum: int, frame: Any) -> None:
         """SIGTERM/SIGINT Handler - triggert graceful shutdown."""
