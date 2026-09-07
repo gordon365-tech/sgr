@@ -52,13 +52,25 @@ HEARTBEAT_PATH = Path("/tmp/worker_heartbeat")
 HEARTBEAT_INTERVAL_SECONDS = 15
 
 
-class _FakeApp:
+class _WorkerAppState:
     """
-    Minimaler App-Stand-in fuer lifespan(), das intern app.state.xyz
-    schreibt. Der Worker hat kein echtes FastAPI-App-Objekt, braucht
-    aber denselben Storage-Ort wie die API, damit lifespan() unveraendert
-    bleibt (siehe Migrationsplan: lifespan()-Scope wird bewusst erst in
-    Commit 4 entkoppelt, nicht in diesem Zwischen-Fix).
+    Kompatibilitaetsadapter: minimaler App-Stand-in fuer lifespan(), das
+    intern app.state.xyz schreibt/liest. Der Worker hat kein echtes
+    FastAPI-App-Objekt, braucht aber denselben Attribut-Speicherort wie
+    die API, weil lifespan() strukturell weiterhin an app.state gebunden
+    ist (siehe sgr/api/main.py).
+
+    WICHTIG - bewusst NICHT als erledigt zu verstehen: Commit 4 loest nur
+    die Verdoppelung des Trading Lifecycle zwischen sgr-api und
+    sgr-worker (siehe role-Parameter in lifespan()), NICHT die
+    zugrundeliegende Kopplung von lifespan() an app.state als
+    Speicherort. Diese vollstaendige State-Entkopplung (lifespan() gibt
+    einen eigenen State-Container zurueck statt in app.state zu
+    schreiben, wovon dann auch sgr/api/dependencies.py und alle Router
+    betroffen waeren) ist weiterhin eine offene, nicht angegangene
+    Architekturfrage - siehe Entscheidung zu Commit 4 (Option A vs. B).
+    Dieser Adapter ist der bewusst gewaehlte Zwischenzustand, kein
+    Uebergangs-Hack, der "eigentlich schon erledigt" waere.
     """
 
     def __init__(self, state: AppState) -> None:
@@ -97,9 +109,12 @@ class TradingWorker:
 
         self._running = True
 
-        # Lifespan Context: initialisiert alle Services
-        # (identisch wie in der API, nutzt dieselbe shared Infrastructure)
-        async with lifespan(_FakeApp(self.app_state)):  # type: ignore[arg-type]
+        # Lifespan Context: initialisiert den vollstaendigen Trading
+        # Lifecycle (role="worker", siehe sgr/api/main.py lifespan()
+        # Docstring). Der Worker ist seit Commit 4 alleiniger Owner
+        # dieser Komponenten - sgr-api laeuft mit role="api" und startet
+        # sie nicht mehr (siehe _api_lifespan() in sgr/api/main.py).
+        async with lifespan(_WorkerAppState(self.app_state), role="worker"):  # type: ignore[arg-type]
             logger.info("worker.ready")
             self._write_heartbeat()
             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())

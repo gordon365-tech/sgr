@@ -494,3 +494,125 @@ class TestLifespanPrimaryExchangeConfigurable:
         finally:
             for p in patchers:
                 p.stop()
+
+
+class TestLifespanRoleApi:
+    """
+    role="api" (Commit 4): startet nur die Infrastruktur, die die
+    Read-Only-API-Router brauchen (DB, Redis, Event Bus, Feature Store).
+    Kein Exchange Pool, keine Trading Engines, kein Orchestrator, kein
+    Market Data Polling - die entsprechenden app.state.*-Attribute
+    bleiben auf ihrem AppState-Klassendefault None (siehe
+    sgr/api/dependencies.py Modul-Docstring).
+    """
+
+    async def test_only_infrastructure_started_no_trading_engines(self) -> None:
+        patchers, mocks = _patch_lifespan_dependencies(paper_mode=True, has_adapters=True)
+
+        app = FastAPI()
+        app.state = AppState()  # type: ignore[assignment]
+
+        for p in patchers:
+            p.start()
+        try:
+            async with lifespan(app, role="api"):
+                # --------- Infrastruktur MUSS starten ---------
+                mocks["bus"].connect.assert_awaited_once()
+                mocks["feature_store"].connect.assert_awaited_once()
+                assert app.state.repositories is mocks["repos"]
+                assert app.state.feature_store is mocks["feature_store"]
+
+                # --------- Trading Lifecycle DARF NICHT starten ---------
+                mocks["pool"].initialize.assert_not_awaited()
+                mocks["risk_engine"].initialize.assert_not_awaited()
+                mocks["strategy_engine"].start.assert_not_awaited()
+                mocks["recovery_manager"].recover_after_crash.assert_not_awaited()
+                mocks["md_engine"].start.assert_not_awaited()
+
+                # app.state Engine-Attribute bleiben auf AppState-Default None
+                assert app.state.exchange_pool is None
+                assert app.state.risk_engine is None
+                assert app.state.portfolio_engine is None
+                assert app.state.strategy_engine is None
+                assert app.state.execution_engine is None
+                assert app.state.orchestrator is None
+                assert app.state.reconciliation_engine is None
+                assert app.state.market_data_engine is None
+        finally:
+            for p in patchers:
+                p.stop()
+
+    async def test_shutdown_only_closes_infrastructure(self) -> None:
+        """Shutdown darf pool.close_all()/strategy_engine.stop()/
+        execution_engine.shutdown() nicht aufrufen - diese Objekte
+        existieren im role="api"-Pfad gar nicht (blieben lokale
+        None-Variablen, siehe lifespan())."""
+        patchers, mocks = _patch_lifespan_dependencies(paper_mode=True, has_adapters=True)
+
+        app = FastAPI()
+        app.state = AppState()  # type: ignore[assignment]
+
+        for p in patchers:
+            p.start()
+        try:
+            async with lifespan(app, role="api"):
+                pass
+
+            # Infrastruktur wird trotzdem sauber heruntergefahren.
+            mocks["feature_store"].close.assert_awaited_once()
+            mocks["bus"].close.assert_awaited_once()
+
+            # Trading-Engine-Shutdown-Pfade werden NICHT aufgerufen.
+            mocks["strategy_engine"].stop.assert_not_awaited()
+            mocks["md_engine"].stop.assert_not_awaited()
+            mocks["execution_engine"].shutdown.assert_not_awaited()
+            mocks["pool"].close_all.assert_not_awaited()
+        finally:
+            for p in patchers:
+                p.stop()
+
+    async def test_default_role_is_worker_for_backwards_compatibility(self) -> None:
+        """lifespan(app) ohne role-Argument muss weiterhin den vollen
+        Trading Lifecycle starten (Default role="worker") - das
+        bestehende Verhalten vor der role-Aufteilung, auf das sich
+        TestLifespanStartupShutdownPaperMode weiterhin verlaesst."""
+        patchers, mocks = _patch_lifespan_dependencies(paper_mode=True, has_adapters=True)
+
+        app = FastAPI()
+        app.state = AppState()  # type: ignore[assignment]
+
+        for p in patchers:
+            p.start()
+        try:
+            async with lifespan(app):  # kein role= Argument
+                mocks["pool"].initialize.assert_awaited_once()
+                mocks["risk_engine"].initialize.assert_awaited_once()
+                assert app.state.exchange_pool is mocks["pool"]
+        finally:
+            for p in patchers:
+                p.stop()
+
+
+class TestCreateAppUsesApiRole:
+    """create_app() (sgr-api) muss role="api" fest verdrahten, ueber den
+    _api_lifespan()-Wrapper - sgr-worker/main.py ruft lifespan() dagegen
+    direkt mit role="worker" auf (siehe sgr/worker/main.py)."""
+
+    async def test_api_lifespan_wrapper_forces_role_api(self) -> None:
+        patchers, mocks = _patch_lifespan_dependencies(paper_mode=True, has_adapters=True)
+
+        from sgr.api.main import _api_lifespan
+
+        app = FastAPI()
+        app.state = AppState()  # type: ignore[assignment]
+
+        for p in patchers:
+            p.start()
+        try:
+            async with _api_lifespan(app):
+                # role="api"-Verhalten: kein Exchange-Pool-Init.
+                mocks["pool"].initialize.assert_not_awaited()
+                assert app.state.exchange_pool is None
+        finally:
+            for p in patchers:
+                p.stop()

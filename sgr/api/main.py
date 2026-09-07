@@ -36,7 +36,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -47,6 +47,20 @@ from sgr.core.logging import get_logger, setup_logging
 from sgr.core.types import Environment, TradingMode
 
 log = get_logger(__name__)
+
+# Rolle, mit der lifespan() aufgerufen wird. Steuert, ob der volle Trading
+# Lifecycle (Exchange Pool, Strategy Engine, Execution Engine, Orchestrator,
+# Market Data Engine) gestartet wird, oder nur die Read-Pfad-Infrastruktur
+# (DB, Redis, Event Bus, Feature Store), die die Read-Only-API-Router
+# brauchen (siehe sgr/api/dependencies.py Modul-Docstring).
+#
+# "worker" ist bewusst der Default: er entspricht dem Verhalten VOR dieser
+# Aufteilung und ist das, was die bestehende Test-Suite (tests/api/
+# test_main.py) bereits durchgehend prueft (voller Lifecycle inkl.
+# strategy_engine.start(), md_engine.start() etc.). sgr-worker/main.py
+# ruft explizit role="worker" auf; create_app() (fuer sgr-api) uebergibt
+# explizit role="api".
+LifespanRole = Literal["api", "worker"]
 
 
 # ---------------------------------------------------------------------------
@@ -77,10 +91,26 @@ class AppState:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+async def lifespan(
+    app: FastAPI, role: LifespanRole = "worker"
+) -> AsyncIterator[None]:
     """
     Startup + Shutdown aller Systemkomponenten.
     Fehler beim Startup → Server startet nicht (fail fast).
+
+    role="worker" (Default): startet den vollstaendigen Trading Lifecycle
+        (Exchange Pool, Risk/Portfolio/Strategy/Execution Engines,
+        Orchestrator, Reconciliation Engine, Crash Recovery, Market Data
+        Engine mit Candle-Event-Subscription). sgr-worker ist alleiniger
+        Owner dieser Komponenten (siehe sgr/worker/main.py).
+    role="api": startet ausschliesslich die Infrastruktur, die die
+        Read-Only-API-Router brauchen (DB, Redis, Event Bus, Feature
+        Store als Redis-Fassade). Kein Exchange Pool, keine Trading
+        Engines, kein Orchestrator, kein Market Data Polling - die API
+        besitzt seit der sgr-api/sgr-worker-Trennung keinen eigenen
+        Trading Lifecycle mehr (siehe sgr/api/dependencies.py
+        Modul-Docstring). app.state.* Engine-Attribute bleiben dabei
+        auf ihrem AppState-Klassendefault None stehen.
     """
     config = get_config()
 
@@ -157,185 +187,224 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await feature_store.connect()
     app.state.feature_store = feature_store
 
-    # 5. Exchange Pool (nur bei konfigurierten Keys)
-    from sgr.core.types import ExchangeID
-    from sgr.exchanges.factory import ExchangePool
+    # ------------------------------------------------------------------
+    # Ab hier: nur role="worker" startet den vollstaendigen Trading
+    # Lifecycle (Exchange Pool, Trading Engines, Orchestrator, Market
+    # Data Engine). role="api" ueberspringt diesen gesamten Block - die
+    # entsprechenden app.state.*-Attribute bleiben auf ihrem
+    # AppState-Klassendefault None (siehe Klassendefinition oben).
+    # ------------------------------------------------------------------
+    pool: Any = None
+    strategy_engine: Any = None
+    execution_engine: Any = None
+    md_engine: Any = None
 
-    pool = ExchangePool()
-    primary_exchange = config.primary_exchange
+    if role == "worker":
+        # 5. Exchange Pool (nur bei konfigurierten Keys)
+        from sgr.core.types import ExchangeID
+        from sgr.exchanges.factory import ExchangePool
 
-    try:
-        if primary_exchange == ExchangeID.PIONEX:
-            # Pionex hat kein Testnet: Paper Mode braucht keine echten Keys
-            # (PionexAdapter.connect() simuliert lokal, siehe pionex.py)
-            if config.trading_mode == TradingMode.PAPER or (
-                config.credentials.pionex_live_api_key and config.credentials.pionex_live_secret
-            ):
-                await pool.initialize([primary_exchange], config.trading_mode)
-        else:
-            # Andere Exchanges (z.B. Binance) haben ein echtes Testnet und
-            # brauchen dafuer konfigurierte Paper-Testnet-Keys, bzw. echte
-            # Live-Keys im LIVE-Modus. get_credentials() wirft ValueError,
-            # wenn die entsprechenden Env-Vars nicht gesetzt sind.
-            try:
-                config.credentials.get_credentials(primary_exchange.value, config.trading_mode)
-                await pool.initialize([primary_exchange], config.trading_mode)
-            except ValueError:
-                log.warning(
-                    "sgr.api.exchange_credentials_missing",
-                    exchange=primary_exchange.value,
-                    trading_mode=config.trading_mode.value,
-                )
-    except Exception as e:
-        log.warning("sgr.api.exchange_init_failed", exchange=primary_exchange.value, error=str(e))
+        pool = ExchangePool()
+        primary_exchange = config.primary_exchange
 
-    app.state.exchange_pool = pool
-
-    # 6. Risk Engine
-    from sgr.risk.engine import RiskEngine
-
-    risk_engine = RiskEngine(config.trading_mode)
-    await risk_engine.initialize()
-    app.state.risk_engine = risk_engine
-
-    # 7. Portfolio Engine
-    from sgr.portfolio.engine import PortfolioEngine
-
-    portfolio_engine = PortfolioEngine(config.trading_mode, position_repository=repos.positions)
-    app.state.portfolio_engine = portfolio_engine
-
-    # 8. Strategy Engine
-    # Strategien registrieren (Import triggert @register Decorator)
-    import sgr.strategy.mean_reversion  # noqa: F401
-    import sgr.strategy.trend_following  # noqa: F401
-    from sgr.strategy.engine import StrategyEngine
-    from sgr.strategy.registry import StrategyRegistry
-
-    registry = StrategyRegistry.get()
-    registry.inject_repository(repos.strategies)
-    await registry.sync_registrations_to_db()
-
-    # Aktiviere alle validierten Strategien für das Paper Trading.
-    # Default: Strategien starten deaktiviert, müssen explizit aktiviert werden.
-    # Hier aktivieren wir nur die, die bereits validiert sind (is_validated=True
-    # nach erfolgreichem Backtest). Weitere Strategien können durch Management-APIs
-    # später aktiviert werden.
-    for entry in registry.get_all().values():
-        if entry.is_validated:
-            await registry.activate(entry.strategy.name)
-            log.info(
-                "sgr.api.strategy_activated",
-                name=entry.strategy.name,
-                version=entry.strategy.version,
+        try:
+            if primary_exchange == ExchangeID.PIONEX:
+                # Pionex hat kein Testnet: Paper Mode braucht keine echten Keys
+                # (PionexAdapter.connect() simuliert lokal, siehe pionex.py)
+                if config.trading_mode == TradingMode.PAPER or (
+                    config.credentials.pionex_live_api_key
+                    and config.credentials.pionex_live_secret
+                ):
+                    await pool.initialize([primary_exchange], config.trading_mode)
+            else:
+                # Andere Exchanges (z.B. Binance) haben ein echtes Testnet und
+                # brauchen dafuer konfigurierte Paper-Testnet-Keys, bzw. echte
+                # Live-Keys im LIVE-Modus. get_credentials() wirft ValueError,
+                # wenn die entsprechenden Env-Vars nicht gesetzt sind.
+                try:
+                    config.credentials.get_credentials(
+                        primary_exchange.value, config.trading_mode
+                    )
+                    await pool.initialize([primary_exchange], config.trading_mode)
+                except ValueError:
+                    log.warning(
+                        "sgr.api.exchange_credentials_missing",
+                        exchange=primary_exchange.value,
+                        trading_mode=config.trading_mode.value,
+                    )
+        except Exception as e:
+            log.warning(
+                "sgr.api.exchange_init_failed", exchange=primary_exchange.value, error=str(e)
             )
 
-    strategy_engine = StrategyEngine(config.trading_mode, feature_store)
-    await strategy_engine.start()
-    app.state.strategy_engine = strategy_engine
+        app.state.exchange_pool = pool
 
-    # 8b. Execution Engine + Trading Orchestrator
-    # Verdrahtet den zuvor nicht verbundenen Pfad Signal -> Risk -> Order ->
-    # Portfolio. Siehe sgr/orchestrator/engine.py für die Architekturbegründung.
-    from sgr.execution.engine import ExecutionEngine
-    from sgr.orchestrator.engine import TradingOrchestrator
+        # 6. Risk Engine
+        from sgr.risk.engine import RiskEngine
 
-    execution_engine = ExecutionEngine(pool, config.trading_mode, order_repository=repos.orders)
-    app.state.execution_engine = execution_engine
+        risk_engine = RiskEngine(config.trading_mode)
+        await risk_engine.initialize()
+        app.state.risk_engine = risk_engine
 
-    orchestrator = TradingOrchestrator(
-        strategy_engine=strategy_engine,
-        risk_engine=risk_engine,
-        execution_engine=execution_engine,
-        portfolio_engine=portfolio_engine,
-        feature_store=feature_store,
-        trading_mode=config.trading_mode,
-    )
-    app.state.orchestrator = orchestrator
+        # 7. Portfolio Engine
+        from sgr.portfolio.engine import PortfolioEngine
 
-    # 8c. Reconciliation Engine (Phase 7B)
-    # Nur in LIVE aussagekräftig (siehe sgr/reconciliation/engine.py
-    # Modul-Docstring) - wird trotzdem immer instanziiert, damit
-    # get_reconciliation_engine() nicht je nach Modus fehlschlägt.
-    # reconcile() selbst gibt in PAPER/DRY_RUN fail-safe SKIPPED_NOT_LIVE
-    # zurück, statt einen Fehler zu werfen.
-    from sgr.reconciliation.engine import ReconciliationEngine
-
-    reconciliation_engine = ReconciliationEngine(
-        exchange_pool=pool,
-        portfolio_engine=portfolio_engine,
-        trading_mode=config.trading_mode,
-    )
-    app.state.reconciliation_engine = reconciliation_engine
-
-    # 8d. Crash Recovery
-    # Frueher reiner Pseudo-Code (RecoveryManager._restore_*() taten
-    # nichts). Jetzt echter Delegat an die gerade injizierten Komponenten.
-    # Laeuft VOR dem Market-Data-Start (Schritt 9), damit Recovery
-    # abgeschlossen ist, bevor Live-Candle-Events den Orchestrator ausloesen.
-    # Fehler hier stoppen den Start NICHT (fail-safe, nicht fail-fast) -
-    # ein unvollstaendiges Recovery ist besser als ein Server, der gar
-    # nicht hochkommt; die naechste ReconciliationEngine (Phase 7B)
-    # deckt verbleibende Diskrepanzen ohnehin auf.
-    from sgr.core.resilience import RecoveryManager
-
-    recovery_manager = RecoveryManager(
-        portfolio_engine=portfolio_engine,
-        order_repository=repos.orders,
-        strategy_registry=registry,
-        trading_mode=config.trading_mode,
-    )
-    await recovery_manager.recover_after_crash()
-
-    # 9. Market Data Engine
-    from sgr.market_data.engine import MarketDataEngine
-
-    md_engine = MarketDataEngine(pool, config.trading_mode, feature_store)
-    # Standard-Subscriptions
-    if pool._adapters:
-        md_engine.subscribe("BTC/USDT", primary_exchange, ["1h", "4h"])
-        md_engine.subscribe("ETH/USDT", primary_exchange, ["1h"])
-        await md_engine.start()
-
-        # Orchestrator automatisch bei jedem neuen Candle auslösen
-        # (additiver Event-Trigger; run_cycle() bleibt auch direkt aufrufbar,
-        # z.B. für manuelle Trigger oder Tests, ohne Redis-Abhängigkeit)
-        from sgr.core.types import CandleEvent
-
-        bus.subscribe(
-            CandleEvent,
-            orchestrator.on_candle_event,
-            consumer_group="orchestrator",
-            consumer_name="orchestrator-1",
+        portfolio_engine = PortfolioEngine(
+            config.trading_mode, position_repository=repos.positions
         )
-    app.state.market_data_engine = md_engine
+        app.state.portfolio_engine = portfolio_engine
 
-    log.info("sgr.api.ready", host=config.api.host, port=config.api.port)
+        # 8. Strategy Engine
+        # Strategien registrieren (Import triggert @register Decorator)
+        import sgr.strategy.mean_reversion  # noqa: F401
+        import sgr.strategy.trend_following  # noqa: F401
+        from sgr.strategy.engine import StrategyEngine
+        from sgr.strategy.registry import StrategyRegistry
+
+        registry = StrategyRegistry.get()
+        registry.inject_repository(repos.strategies)
+        await registry.sync_registrations_to_db()
+
+        # Aktiviere alle validierten Strategien für das Paper Trading.
+        # Default: Strategien starten deaktiviert, müssen explizit aktiviert werden.
+        # Hier aktivieren wir nur die, die bereits validiert sind (is_validated=True
+        # nach erfolgreichem Backtest). Weitere Strategien können durch Management-APIs
+        # später aktiviert werden.
+        for entry in registry.get_all().values():
+            if entry.is_validated:
+                await registry.activate(entry.strategy.name)
+                log.info(
+                    "sgr.api.strategy_activated",
+                    name=entry.strategy.name,
+                    version=entry.strategy.version,
+                )
+
+        strategy_engine = StrategyEngine(config.trading_mode, feature_store)
+        await strategy_engine.start()
+        app.state.strategy_engine = strategy_engine
+
+        # 8b. Execution Engine + Trading Orchestrator
+        # Verdrahtet den zuvor nicht verbundenen Pfad Signal -> Risk -> Order ->
+        # Portfolio. Siehe sgr/orchestrator/engine.py für die Architekturbegründung.
+        from sgr.execution.engine import ExecutionEngine
+        from sgr.orchestrator.engine import TradingOrchestrator
+
+        execution_engine = ExecutionEngine(
+            pool, config.trading_mode, order_repository=repos.orders
+        )
+        app.state.execution_engine = execution_engine
+
+        orchestrator = TradingOrchestrator(
+            strategy_engine=strategy_engine,
+            risk_engine=risk_engine,
+            execution_engine=execution_engine,
+            portfolio_engine=portfolio_engine,
+            feature_store=feature_store,
+            trading_mode=config.trading_mode,
+        )
+        app.state.orchestrator = orchestrator
+
+        # 8c. Reconciliation Engine (Phase 7B)
+        # Nur in LIVE aussagekräftig (siehe sgr/reconciliation/engine.py
+        # Modul-Docstring) - wird trotzdem immer instanziiert, damit
+        # get_reconciliation_engine() nicht je nach Modus fehlschlägt.
+        # reconcile() selbst gibt in PAPER/DRY_RUN fail-safe SKIPPED_NOT_LIVE
+        # zurück, statt einen Fehler zu werfen.
+        from sgr.reconciliation.engine import ReconciliationEngine
+
+        reconciliation_engine = ReconciliationEngine(
+            exchange_pool=pool,
+            portfolio_engine=portfolio_engine,
+            trading_mode=config.trading_mode,
+        )
+        app.state.reconciliation_engine = reconciliation_engine
+
+        # 8d. Crash Recovery
+        # Frueher reiner Pseudo-Code (RecoveryManager._restore_*() taten
+        # nichts). Jetzt echter Delegat an die gerade injizierten Komponenten.
+        # Laeuft VOR dem Market-Data-Start (Schritt 9), damit Recovery
+        # abgeschlossen ist, bevor Live-Candle-Events den Orchestrator ausloesen.
+        # Fehler hier stoppen den Start NICHT (fail-safe, nicht fail-fast) -
+        # ein unvollstaendiges Recovery ist besser als ein Server, der gar
+        # nicht hochkommt; die naechste ReconciliationEngine (Phase 7B)
+        # deckt verbleibende Diskrepanzen ohnehin auf.
+        from sgr.core.resilience import RecoveryManager
+
+        recovery_manager = RecoveryManager(
+            portfolio_engine=portfolio_engine,
+            order_repository=repos.orders,
+            strategy_registry=registry,
+            trading_mode=config.trading_mode,
+        )
+        await recovery_manager.recover_after_crash()
+
+        # 9. Market Data Engine
+        from sgr.market_data.engine import MarketDataEngine
+
+        md_engine = MarketDataEngine(pool, config.trading_mode, feature_store)
+        # Standard-Subscriptions
+        if pool._adapters:
+            md_engine.subscribe("BTC/USDT", primary_exchange, ["1h", "4h"])
+            md_engine.subscribe("ETH/USDT", primary_exchange, ["1h"])
+            await md_engine.start()
+
+            # Orchestrator automatisch bei jedem neuen Candle auslösen
+            # (additiver Event-Trigger; run_cycle() bleibt auch direkt aufrufbar,
+            # z.B. für manuelle Trigger oder Tests, ohne Redis-Abhängigkeit)
+            from sgr.core.types import CandleEvent
+
+            bus.subscribe(
+                CandleEvent,
+                orchestrator.on_candle_event,
+                consumer_group="orchestrator",
+                consumer_name="orchestrator-1",
+            )
+        app.state.market_data_engine = md_engine
+
+    log.info("sgr.api.ready", role=role, host=config.api.host, port=config.api.port)
 
     yield
 
     # --------------- Shutdown ---------------
-    log.info("sgr.api.shutting_down")
+    log.info("sgr.api.shutting_down", role=role)
 
-    await strategy_engine.stop()
-    if md_engine.is_running:
-        await md_engine.stop()
-    # Baustein 7 (Shutdown Safety): noch offene/im Fill-Monitoring
-    # befindliche Orders best-effort cancelln, BEVOR die
-    # Exchange-Verbindungen geschlossen werden - danach waere kein
-    # Cancel mehr moeglich.
-    await execution_engine.shutdown()
-    await pool.close_all()
+    if role == "worker":
+        await strategy_engine.stop()
+        if md_engine.is_running:
+            await md_engine.stop()
+        # Baustein 7 (Shutdown Safety): noch offene/im Fill-Monitoring
+        # befindliche Orders best-effort cancelln, BEVOR die
+        # Exchange-Verbindungen geschlossen werden - danach waere kein
+        # Cancel mehr moeglich.
+        await execution_engine.shutdown()
+        await pool.close_all()
+
     await feature_store.close()
     await bus.close()
 
     await close_db()
 
-    log.info("sgr.api.stopped")
+    log.info("sgr.api.stopped", role=role)
 
 
 # ---------------------------------------------------------------------------
 # App Factory
 # ---------------------------------------------------------------------------
+
+
+@asynccontextmanager
+async def _api_lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """
+    Wrapper um lifespan(), der role="api" fest verdrahtet.
+
+    FastAPI ruft den lifespan-Contextmanager immer mit genau einem
+    Positionsargument (der App-Instanz) auf - ein zusaetzlicher Parameter
+    wie role kann daher nicht direkt als lifespan= uebergeben werden.
+    sgr-worker/main.py ruft lifespan() dagegen direkt mit role="worker"
+    auf (siehe dort), ohne diesen Wrapper.
+    """
+    async with lifespan(app, role="api"):
+        yield
 
 
 def create_app() -> FastAPI:
@@ -347,7 +416,7 @@ def create_app() -> FastAPI:
         version=config.version,
         docs_url="/docs" if config.environment != Environment.PRODUCTION else None,
         redoc_url="/redoc" if config.environment != Environment.PRODUCTION else None,
-        lifespan=lifespan,
+        lifespan=_api_lifespan,
     )
 
     app.state = AppState()  # type: ignore[assignment]

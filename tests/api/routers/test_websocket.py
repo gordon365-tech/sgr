@@ -16,45 +16,17 @@ import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
 
 import pytest
 from fastapi import WebSocketDisconnect
 
 from sgr.api.routers import websocket as ws_router
-from sgr.core.types import (
-    AssetClass,
-    ExchangeID,
-    Position,
-    PositionSide,
-    RiskMetrics,
-    Symbol,
-    TradingMode,
-)
-from sgr.risk.kill_switch import _kill_switches, get_kill_switch
+from sgr.core.types import TradingMode
+from sgr.risk.kill_switch import _kill_switches
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _make_symbol() -> Symbol:
-    return Symbol(base="BTC", quote="USDT", exchange=ExchangeID.PIONEX, asset_class=AssetClass.SPOT)
-
-
-def _make_position() -> Position:
-    return Position(
-        id=uuid4(),
-        symbol=_make_symbol(),
-        side=PositionSide.LONG,
-        quantity=Decimal("1.5"),
-        entry_price=Decimal("100"),
-        current_price=Decimal("110"),
-        unrealized_pnl=Decimal("15"),
-        opened_at=datetime.now(tz=UTC),
-        strategy_name="trend_following",
-        trading_mode=TradingMode.PAPER,
-    )
 
 
 class FakeWebSocket:
@@ -150,34 +122,59 @@ class TestSendJson:
 
 
 class TestWsPortfolio:
-    async def test_no_portfolio_engine_sends_error_and_closes(self):
-        fake_ws = FakeWebSocket()
-        request = FakeRequest(portfolio_engine=None)
+    """
+    Liest ausschliesslich DB (get_repositories()) statt app.state.
+    Analog zu GET /api/v1/portfolio/* (siehe sgr/api/routers/portfolio.py).
+    """
 
-        await ws_router.ws_portfolio(fake_ws, request, token="")
+    async def test_no_snapshot_sends_error_message_and_continues(self):
+        repos = MagicMock()
+        repos.portfolio_snapshots.get_latest = AsyncMock(return_value=None)
+
+        fake_ws = FakeWebSocket(disconnect_after=1)
+        request = FakeRequest()
+
+        with (
+            patch("sgr.api.routers.websocket.get_repositories", return_value=repos),
+            patch("sgr.api.dependencies.get_trading_mode", return_value=TradingMode.PAPER),
+        ):
+            await ws_router.ws_portfolio(fake_ws, request, token="")
 
         assert fake_ws.accepted is True
-        assert fake_ws.closed is True
-        assert fake_ws.messages == [{"error": "Portfolio engine not available"}]
+        assert fake_ws.messages[0]["type"] == "portfolio_update"
+        assert fake_ws.messages[0]["error"] == "No portfolio snapshot available yet"
 
     async def test_sends_portfolio_updates_until_disconnect(self):
-        portfolio = MagicMock()
-        portfolio.summary.return_value = {
-            "portfolio_value": "1000",
-            "cash": "500",
-            "unrealized_pnl": "15",
-            "open_positions": 1,
-            "total_trades": 3,
-            "peak_value": "1000",
-            "drawdown": "0",
-            "trading_mode": "paper",
-        }
-        portfolio.positions = [_make_position()]
+        repos = MagicMock()
+        repos.portfolio_snapshots.get_latest = AsyncMock(
+            return_value={
+                "portfolio_value": Decimal("1000"),
+                "cash": Decimal("500"),
+                "unrealized_pnl": Decimal("15"),
+                "open_positions_count": 1,
+            }
+        )
+        repos.positions.get_open_positions = AsyncMock(
+            return_value=[
+                {
+                    "symbol": "BTC/USDT",
+                    "side": "long",
+                    "quantity": Decimal("1.5"),
+                    "entry_price": Decimal("100"),
+                    "current_price": Decimal("110"),
+                    "unrealized_pnl": Decimal("15"),
+                }
+            ]
+        )
 
         fake_ws = FakeWebSocket(disconnect_after=2)
-        request = FakeRequest(portfolio_engine=portfolio)
+        request = FakeRequest()
 
-        await ws_router.ws_portfolio(fake_ws, request, token="tok")
+        with (
+            patch("sgr.api.routers.websocket.get_repositories", return_value=repos),
+            patch("sgr.api.dependencies.get_trading_mode", return_value=TradingMode.PAPER),
+        ):
+            await ws_router.ws_portfolio(fake_ws, request, token="tok")
 
         assert fake_ws.accepted is True
         assert len(fake_ws.messages) == 2
@@ -186,42 +183,59 @@ class TestWsPortfolio:
         assert msg["data"]["portfolio_value"] == "1000"
         assert msg["data"]["positions"][0]["symbol"] == "BTC/USDT"
         assert msg["data"]["positions"][0]["side"] == "long"
-        assert msg["data"]["positions"][0]["pnl_pct"] == 10.0
 
     async def test_heartbeat_sent_every_15_updates(self):
-        portfolio = MagicMock()
-        portfolio.summary.return_value = {"portfolio_value": "1000"}
-        portfolio.positions = []
+        repos = MagicMock()
+        repos.portfolio_snapshots.get_latest = AsyncMock(
+            return_value={
+                "portfolio_value": Decimal("1000"),
+                "cash": Decimal("500"),
+                "unrealized_pnl": Decimal("0"),
+                "open_positions_count": 0,
+            }
+        )
+        repos.positions.get_open_positions = AsyncMock(return_value=[])
 
         fake_ws = FakeWebSocket(disconnect_after=16)
-        request = FakeRequest(portfolio_engine=portfolio)
+        request = FakeRequest()
 
-        await ws_router.ws_portfolio(fake_ws, request, token="")
+        with (
+            patch("sgr.api.routers.websocket.get_repositories", return_value=repos),
+            patch("sgr.api.dependencies.get_trading_mode", return_value=TradingMode.PAPER),
+        ):
+            await ws_router.ws_portfolio(fake_ws, request, token="")
 
         heartbeats = [m for m in fake_ws.messages if m.get("type") == "heartbeat"]
         assert len(heartbeats) == 1
 
     async def test_generic_exception_is_caught_and_logged(self):
-        portfolio = MagicMock()
-        portfolio.summary.side_effect = RuntimeError("boom")
+        repos = MagicMock()
+        repos.portfolio_snapshots.get_latest = AsyncMock(side_effect=RuntimeError("boom"))
 
         fake_ws = FakeWebSocket()
-        request = FakeRequest(portfolio_engine=portfolio)
+        request = FakeRequest()
 
-        # Should not raise.
-        await ws_router.ws_portfolio(fake_ws, request, token="")
+        with (
+            patch("sgr.api.routers.websocket.get_repositories", return_value=repos),
+            patch("sgr.api.dependencies.get_trading_mode", return_value=TradingMode.PAPER),
+        ):
+            await ws_router.ws_portfolio(fake_ws, request, token="")
         assert fake_ws.accepted is True
 
     async def test_websocket_disconnect_raised_directly_is_caught(self):
-        """WebSocketDisconnect raised from outside _send_json (e.g. summary())
+        """WebSocketDisconnect raised from outside _send_json (e.g. DB read)
         must be caught by the dedicated except WebSocketDisconnect branch."""
-        portfolio = MagicMock()
-        portfolio.summary.side_effect = WebSocketDisconnect()
+        repos = MagicMock()
+        repos.portfolio_snapshots.get_latest = AsyncMock(side_effect=WebSocketDisconnect())
 
         fake_ws = FakeWebSocket()
-        request = FakeRequest(portfolio_engine=portfolio)
+        request = FakeRequest()
 
-        await ws_router.ws_portfolio(fake_ws, request, token="")
+        with (
+            patch("sgr.api.routers.websocket.get_repositories", return_value=repos),
+            patch("sgr.api.dependencies.get_trading_mode", return_value=TradingMode.PAPER),
+        ):
+            await ws_router.ws_portfolio(fake_ws, request, token="")
         assert fake_ws.accepted is True
 
 
@@ -231,48 +245,57 @@ class TestWsPortfolio:
 
 
 class TestWsRisk:
-    async def test_missing_engines_sends_error_and_closes(self):
-        fake_ws = FakeWebSocket()
-        request = FakeRequest(risk_engine=None, portfolio_engine=None)
+    """
+    Liest ausschliesslich Redis (read_risk_metrics_from_redis,
+    read_kill_switch_state_from_redis) statt app.state. Analog zu
+    GET /api/v1/risk/metrics (siehe sgr/api/routers/risk.py).
+    """
 
-        await ws_router.ws_risk(fake_ws, request, token="")
+    async def test_no_redis_connection_sends_error_and_closes(self):
+        fake_ws = FakeWebSocket()
+        request = FakeRequest()
+
+        with patch(
+            "sgr.api.routers.websocket.get_redis_client_or_none", return_value=None
+        ):
+            await ws_router.ws_risk(fake_ws, request, token="")
 
         assert fake_ws.closed is True
-        assert fake_ws.messages == [{"error": "Engines not available"}]
-
-    async def test_missing_portfolio_engine_only_sends_error(self):
-        fake_ws = FakeWebSocket()
-        request = FakeRequest(risk_engine=MagicMock(), portfolio_engine=None)
-
-        await ws_router.ws_risk(fake_ws, request, token="")
-
-        assert fake_ws.closed is True
+        assert fake_ws.messages == [{"error": "Redis connection not available"}]
 
     async def test_sends_risk_updates_until_disconnect(self):
-        risk = MagicMock()
-        risk._trading_mode = TradingMode.PAPER
-        metrics = RiskMetrics(
-            timestamp=datetime.now(tz=UTC),
-            portfolio_value=Decimal("1000"),
-            daily_pnl=Decimal("10"),
-            daily_pnl_pct=0.01,
-            drawdown_from_peak=0.05,
-            var_95=0.02,
-            expected_shortfall=0.03,
-            portfolio_heat=0.4,
-            active_positions=2,
-            correlation_exposure=0.1,
-        )
-        risk._compute_metrics.return_value = metrics
-
-        portfolio = MagicMock()
-        portfolio.portfolio_value = Decimal("1000")
-        portfolio.positions = []
-
+        redis_client = AsyncMock()
         fake_ws = FakeWebSocket(disconnect_after=2)
-        request = FakeRequest(risk_engine=risk, portfolio_engine=portfolio)
+        request = FakeRequest()
 
-        await ws_router.ws_risk(fake_ws, request, token="")
+        metrics = {
+            "portfolio_value": Decimal("1000"),
+            "daily_pnl": Decimal("10"),
+            "daily_pnl_pct": 0.01,
+            "drawdown_from_peak": 0.05,
+            "var_95": 0.02,
+            "expected_shortfall": 0.03,
+            "portfolio_heat": 0.4,
+            "active_positions": 2,
+        }
+        ks_state = {"is_active": False, "reason": None}
+
+        with (
+            patch(
+                "sgr.api.routers.websocket.get_redis_client_or_none",
+                return_value=redis_client,
+            ),
+            patch("sgr.api.dependencies.get_trading_mode", return_value=TradingMode.PAPER),
+            patch(
+                "sgr.risk.metrics_cache.read_risk_metrics_from_redis",
+                new=AsyncMock(return_value=metrics),
+            ),
+            patch(
+                "sgr.risk.kill_switch.read_kill_switch_state_from_redis",
+                new=AsyncMock(return_value=ks_state),
+            ),
+        ):
+            await ws_router.ws_risk(fake_ws, request, token="")
 
         assert len(fake_ws.messages) == 2
         msg = fake_ws.messages[0]
@@ -283,64 +306,108 @@ class TestWsRisk:
         assert msg["data"]["active_positions"] == 2
         assert msg["data"]["kill_switch_active"] is False
         assert msg["data"]["kill_switch_reason"] is None
+        assert msg["data"]["stale"] is False
+
+    async def test_stale_when_no_metrics_written_yet(self):
+        redis_client = AsyncMock()
+        fake_ws = FakeWebSocket(disconnect_after=1)
+        request = FakeRequest()
+
+        with (
+            patch(
+                "sgr.api.routers.websocket.get_redis_client_or_none",
+                return_value=redis_client,
+            ),
+            patch("sgr.api.dependencies.get_trading_mode", return_value=TradingMode.PAPER),
+            patch(
+                "sgr.risk.metrics_cache.read_risk_metrics_from_redis",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "sgr.risk.kill_switch.read_kill_switch_state_from_redis",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
+            await ws_router.ws_risk(fake_ws, request, token="")
+
+        msg = fake_ws.messages[0]
+        assert msg["data"]["stale"] is True
+        assert msg["data"]["kill_switch_active"] is False
 
     async def test_reflects_active_kill_switch(self):
-        risk = MagicMock()
-        risk._trading_mode = TradingMode.PAPER
-        risk._compute_metrics.return_value = RiskMetrics(
-            timestamp=datetime.now(tz=UTC),
-            portfolio_value=Decimal("1000"),
-            daily_pnl=Decimal("0"),
-            daily_pnl_pct=0.0,
-            drawdown_from_peak=0.0,
-            var_95=0.0,
-            expected_shortfall=0.0,
-            portfolio_heat=0.0,
-            active_positions=0,
-            correlation_exposure=0.0,
-        )
-        portfolio = MagicMock()
-        portfolio.portfolio_value = Decimal("1000")
-        portfolio.positions = []
-
-        ks = get_kill_switch(TradingMode.PAPER)
-        await ks.trigger("max_drawdown_breached")
-
+        redis_client = AsyncMock()
         fake_ws = FakeWebSocket(disconnect_after=1)
-        request = FakeRequest(risk_engine=risk, portfolio_engine=portfolio)
+        request = FakeRequest()
 
-        await ws_router.ws_risk(fake_ws, request, token="")
+        metrics = {
+            "portfolio_value": Decimal("1000"),
+            "daily_pnl": Decimal("0"),
+            "daily_pnl_pct": 0.0,
+            "drawdown_from_peak": 0.0,
+            "var_95": 0.0,
+            "expected_shortfall": 0.0,
+            "portfolio_heat": 0.0,
+            "active_positions": 0,
+        }
+        ks_state = {"is_active": True, "reason": "max_drawdown_breached"}
+
+        with (
+            patch(
+                "sgr.api.routers.websocket.get_redis_client_or_none",
+                return_value=redis_client,
+            ),
+            patch("sgr.api.dependencies.get_trading_mode", return_value=TradingMode.PAPER),
+            patch(
+                "sgr.risk.metrics_cache.read_risk_metrics_from_redis",
+                new=AsyncMock(return_value=metrics),
+            ),
+            patch(
+                "sgr.risk.kill_switch.read_kill_switch_state_from_redis",
+                new=AsyncMock(return_value=ks_state),
+            ),
+        ):
+            await ws_router.ws_risk(fake_ws, request, token="")
 
         msg = fake_ws.messages[0]
         assert msg["data"]["kill_switch_active"] is True
         assert msg["data"]["kill_switch_reason"] == "max_drawdown_breached"
 
     async def test_generic_exception_is_caught(self):
-        risk = MagicMock()
-        risk._trading_mode = TradingMode.PAPER
-        risk._compute_metrics.side_effect = RuntimeError("boom")
-        portfolio = MagicMock()
-        portfolio.portfolio_value = Decimal("1000")
-        portfolio.positions = []
-
+        redis_client = AsyncMock()
         fake_ws = FakeWebSocket()
-        request = FakeRequest(risk_engine=risk, portfolio_engine=portfolio)
+        request = FakeRequest()
 
-        await ws_router.ws_risk(fake_ws, request, token="")
+        with (
+            patch(
+                "sgr.api.routers.websocket.get_redis_client_or_none",
+                return_value=redis_client,
+            ),
+            patch("sgr.api.dependencies.get_trading_mode", return_value=TradingMode.PAPER),
+            patch(
+                "sgr.risk.metrics_cache.read_risk_metrics_from_redis",
+                new=AsyncMock(side_effect=RuntimeError("boom")),
+            ),
+        ):
+            await ws_router.ws_risk(fake_ws, request, token="")
         assert fake_ws.accepted is True
 
     async def test_websocket_disconnect_raised_directly_is_caught(self):
-        risk = MagicMock()
-        risk._trading_mode = TradingMode.PAPER
-        risk._compute_metrics.side_effect = WebSocketDisconnect()
-        portfolio = MagicMock()
-        portfolio.portfolio_value = Decimal("1000")
-        portfolio.positions = []
-
+        redis_client = AsyncMock()
         fake_ws = FakeWebSocket()
-        request = FakeRequest(risk_engine=risk, portfolio_engine=portfolio)
+        request = FakeRequest()
 
-        await ws_router.ws_risk(fake_ws, request, token="")
+        with (
+            patch(
+                "sgr.api.routers.websocket.get_redis_client_or_none",
+                return_value=redis_client,
+            ),
+            patch("sgr.api.dependencies.get_trading_mode", return_value=TradingMode.PAPER),
+            patch(
+                "sgr.risk.metrics_cache.read_risk_metrics_from_redis",
+                new=AsyncMock(side_effect=WebSocketDisconnect()),
+            ),
+        ):
+            await ws_router.ws_risk(fake_ws, request, token="")
         assert fake_ws.accepted is True
 
 
@@ -350,136 +417,24 @@ class TestWsRisk:
 
 
 class TestWsMarket:
-    async def test_no_exchange_pool_sends_error_and_closes(self):
+    """
+    Temporaer ausser Betrieb (bewusster Platzhalter, identisches Muster
+    wie GET /api/v1/market/ticker/{symbol}, siehe ws_market Docstring).
+    Kein Live-Exchange-Call mehr aus dem API-Prozess.
+    """
+
+    async def test_sends_not_available_error_and_closes(self):
         fake_ws = FakeWebSocket()
-        request = FakeRequest(exchange_pool=None)
+        request = FakeRequest()
 
         await ws_router.ws_market(fake_ws, "btc-usdt", request, token="")
 
-        assert fake_ws.closed is True
-        assert fake_ws.messages == [{"error": "Exchange pool not available"}]
-
-    async def test_sends_ticks_until_disconnect(self):
-        ticker = MagicMock()
-        ticker.timestamp = datetime.now(tz=UTC)
-        ticker.bid = Decimal("100")
-        ticker.ask = Decimal("101")
-        ticker.last = Decimal("100.5")
-        ticker.volume_24h = Decimal("5000")
-        ticker.change_24h_pct = 1.23
-
-        adapter = AsyncMock()
-        adapter.get_ticker.return_value = ticker
-        pool = MagicMock()
-        pool.get.return_value = adapter
-
-        fake_ws = FakeWebSocket(disconnect_after=2)
-        request = FakeRequest(exchange_pool=pool)
-
-        with patch("sgr.core.config.get_config") as mock_cfg:
-            mock_cfg.return_value.trading_mode = TradingMode.PAPER
-            await ws_router.ws_market(fake_ws, "btc-usdt", request, token="")
-
-        assert len(fake_ws.messages) == 2
-        msg = fake_ws.messages[0]
-        assert msg["type"] == "tick"
-        assert msg["symbol"] == "BTC/USDT"
-        assert msg["data"]["bid"] == "100"
-        assert msg["data"]["spread_pct"] > 0
-
-    async def test_ticker_error_sends_error_message_and_continues(self):
-        adapter = AsyncMock()
-        adapter.get_ticker.side_effect = RuntimeError("exchange down")
-        pool = MagicMock()
-        pool.get.return_value = adapter
-
-        fake_ws = FakeWebSocket(disconnect_after=1)
-        request = FakeRequest(exchange_pool=pool)
-
-        with patch("sgr.core.config.get_config") as mock_cfg:
-            mock_cfg.return_value.trading_mode = TradingMode.PAPER
-            await ws_router.ws_market(fake_ws, "btc-usdt", request, token="")
-
-        assert fake_ws.messages[0] == {"type": "error", "message": "exchange down"}
-
-    async def test_outer_exception_from_send_json_call_itself_is_caught(self):
-        """The outer try/except wraps the while-loop; a failure in _send_json's
-        call machinery itself (not just a returned False) exercises the outer
-        except Exception branch (lines 253-254)."""
-        pool = MagicMock()
-        adapter = AsyncMock()
-        ticker = MagicMock()
-        ticker.timestamp = datetime.now(tz=UTC)
-        ticker.bid = Decimal("100")
-        ticker.ask = Decimal("101")
-        ticker.last = Decimal("100.5")
-        ticker.volume_24h = Decimal("5000")
-        ticker.change_24h_pct = 1.0
-        adapter.get_ticker.return_value = ticker
-        pool.get.return_value = adapter
-
-        fake_ws = FakeWebSocket()
-        request = FakeRequest(exchange_pool=pool)
-
-        with (
-            patch("sgr.core.config.get_config") as mock_cfg,
-            patch(
-                "sgr.api.routers.websocket._send_json",
-                new=AsyncMock(side_effect=RuntimeError("send machinery broke")),
-            ),
-        ):
-            mock_cfg.return_value.trading_mode = TradingMode.PAPER
-            await ws_router.ws_market(fake_ws, "btc-usdt", request, token="")
-
         assert fake_ws.accepted is True
-
-    async def test_websocket_disconnect_from_sleep_is_caught(self):
-        """WebSocketDisconnect raised from asyncio.sleep (outside the inner
-        try/except Exception) must hit the outer except WebSocketDisconnect."""
-        ticker = MagicMock()
-        ticker.timestamp = datetime.now(tz=UTC)
-        ticker.bid = Decimal("100")
-        ticker.ask = Decimal("101")
-        ticker.last = Decimal("100.5")
-        ticker.volume_24h = Decimal("5000")
-        ticker.change_24h_pct = 1.0
-
-        adapter = AsyncMock()
-        adapter.get_ticker.return_value = ticker
-        pool = MagicMock()
-        pool.get.return_value = adapter
-
-        fake_ws = FakeWebSocket()
-        request = FakeRequest(exchange_pool=pool)
-
-        with (
-            patch("sgr.core.config.get_config") as mock_cfg,
-            patch(
-                "sgr.api.routers.websocket.asyncio.sleep",
-                new=AsyncMock(side_effect=WebSocketDisconnect()),
-            ),
-        ):
-            mock_cfg.return_value.trading_mode = TradingMode.PAPER
-            await ws_router.ws_market(fake_ws, "btc-usdt", request, token="")
-
-        assert fake_ws.accepted is True
-
-    async def test_get_config_error_sends_error_and_closes(self):
-        """get_config() now runs inside its own try/except (deferred finding
-        fix). A failure there must send a graceful error message and close
-        the socket instead of propagating unhandled."""
-        pool = MagicMock()
-        fake_ws = FakeWebSocket()
-        request = FakeRequest(exchange_pool=pool)
-
-        with patch(
-            "sgr.core.config.get_config",
-            side_effect=RuntimeError("invalid configuration"),
-        ):
-            await ws_router.ws_market(fake_ws, "btc-usdt", request, token="")
-
         assert fake_ws.closed is True
-        assert fake_ws.messages == [{"error": "Server configuration error"}]
+        assert len(fake_ws.messages) == 1
+        assert fake_ws.messages[0]["type"] == "error"
+        assert fake_ws.messages[0]["code"] == 501
+        assert "not yet migrated" in fake_ws.messages[0]["message"]
 
 
 # ---------------------------------------------------------------------------
