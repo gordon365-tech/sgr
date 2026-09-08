@@ -751,6 +751,7 @@ class UserRepository:
         email: str,
         hashed_password: str,
         trading_mode: TradingMode = TradingMode.PAPER,
+        is_admin: bool = False,
     ) -> str:
         async with get_session() as session:
             now = datetime.utcnow()
@@ -759,6 +760,7 @@ class UserRepository:
                 email=email,
                 hashed_password=hashed_password,
                 trading_mode=trading_mode.value,
+                is_admin=is_admin,
                 created_at=now,
             )
             session.add(user)
@@ -778,6 +780,7 @@ class UserRepository:
                 "hashed_password": user.hashed_password,
                 "is_active": user.is_active,
                 "is_2fa_enabled": user.is_2fa_enabled,
+                "is_admin": user.is_admin,
                 "trading_mode": user.trading_mode,
                 "totp_secret": user.totp_secret,
             }
@@ -790,6 +793,23 @@ class UserRepository:
                 .values(last_login_at=datetime.utcnow())
             )
             await session.execute(stmt)
+
+    async def set_admin_status(self, email: str, is_admin: bool) -> bool:
+        """
+        Setzt is_admin fuer einen User per Email. Fuer scripts/grant_admin.py
+        (siehe dort) - bewusst kein API-Endpoint dafuer, siehe UserModel
+        Docstring bei is_admin.
+
+        Returns:
+            True wenn ein User aktualisiert wurde, False wenn kein User
+            mit dieser Email existiert.
+        """
+        async with get_session() as session:
+            stmt = (
+                update(UserModel).where(UserModel.email == email).values(is_admin=is_admin)
+            )
+            result = await session.execute(stmt)
+            return bool(result.rowcount and result.rowcount > 0)
 
 
 # ---------------------------------------------------------------------------

@@ -335,7 +335,9 @@ class AuthService:
                 raise ValueError("Invalid 2FA code")
 
         trading_mode = TradingMode(user["trading_mode"])
-        access_token = self.create_access_token(user["id"], trading_mode)
+        access_token = self.create_access_token(
+            user["id"], trading_mode, is_admin=user["is_admin"]
+        )
         refresh_token = self.create_refresh_token(user["id"])
 
         await repos.users.update_last_login(user["id"])

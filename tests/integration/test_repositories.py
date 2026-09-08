@@ -130,10 +130,62 @@ class TestUserRepository:
         assert user is not None
         assert user["email"] == email
         assert user["trading_mode"] == "paper"
+        assert user["is_admin"] is False  # Default: neue User sind nie Admin
 
     async def test_get_nonexistent_returns_none(self, repos) -> None:
         user = await repos.users.get_by_email("doesnotexist@never.com")
         assert user is None
+
+    async def test_create_with_explicit_is_admin(self, repos) -> None:
+        import uuid
+
+        from passlib.context import CryptContext
+
+        from sgr.core.types import TradingMode
+
+        pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+        email = f"test_{uuid.uuid4().hex[:8]}@sgr.test"
+        hashed = pwd_context.hash("testpassword123")
+
+        await repos.users.create(
+            email=email,
+            hashed_password=hashed,
+            trading_mode=TradingMode.PAPER,
+            is_admin=True,
+        )
+
+        user = await repos.users.get_by_email(email)
+        assert user["is_admin"] is True
+
+    async def test_set_admin_status_grants_and_revokes(self, repos) -> None:
+        """Siehe scripts/grant_admin.py - dieselbe Repository-Methode."""
+        import uuid
+
+        from passlib.context import CryptContext
+
+        from sgr.core.types import TradingMode
+
+        pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+        email = f"test_{uuid.uuid4().hex[:8]}@sgr.test"
+        hashed = pwd_context.hash("testpassword123")
+
+        await repos.users.create(
+            email=email, hashed_password=hashed, trading_mode=TradingMode.PAPER
+        )
+
+        granted = await repos.users.set_admin_status(email, is_admin=True)
+        assert granted is True
+        user = await repos.users.get_by_email(email)
+        assert user["is_admin"] is True
+
+        revoked = await repos.users.set_admin_status(email, is_admin=False)
+        assert revoked is True
+        user = await repos.users.get_by_email(email)
+        assert user["is_admin"] is False
+
+    async def test_set_admin_status_unknown_email_returns_false(self, repos) -> None:
+        updated = await repos.users.set_admin_status("nobody@never.com", is_admin=True)
+        assert updated is False
 
 
 class TestRiskEventRepository:

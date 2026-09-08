@@ -372,6 +372,13 @@ class UserModel(Base):
     is_2fa_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
+    # Vergabe bewusst NICHT ueber einen API-Endpoint (siehe
+    # scripts/grant_admin.py Docstring) - ein Selbstbedienungsweg zum
+    # Admin-Status waere ein Sicherheitsrisiko. Default false: neue User
+    # (auch via POST /auth/register) sind niemals automatisch Admin.
+    is_admin: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     trading_mode: Mapped[str] = mapped_column(
         String(10), nullable=False, default="paper", server_default="paper"
     )

@@ -227,6 +227,7 @@ def _make_user(
     hashed_password: str,
     is_active: bool = True,
     is_2fa_enabled: bool = False,
+    is_admin: bool = False,
     totp_secret: str | None = None,
     trading_mode: str = TradingMode.PAPER.value,
 ) -> dict:
@@ -236,6 +237,7 @@ def _make_user(
         "hashed_password": hashed_password,
         "is_active": is_active,
         "is_2fa_enabled": is_2fa_enabled,
+        "is_admin": is_admin,
         "totp_secret": totp_secret,
         "trading_mode": trading_mode,
     }
@@ -282,6 +284,49 @@ class TestLogin:
 
         assert result["user_id"] == "user-1"
         repos.users.update_last_login.assert_awaited_once_with("user-1")
+
+    async def test_login_token_carries_is_admin_true_from_db(self, auth: AuthService) -> None:
+        """is_admin existierte frueher nur als hartcodierter False-Default -
+        dieser Test verifiziert, dass login() das DB-Feld tatsaechlich
+        durchreicht (siehe alembic/versions/0004_user_is_admin.py)."""
+        from jose import jwt
+
+        hashed = auth.hash_password("CorrectPass123!")
+        repos = MagicMock()
+        repos.users.get_by_email = AsyncMock(
+            return_value=_make_user(hashed_password=hashed, is_admin=True)
+        )
+        repos.users.update_last_login = AsyncMock()
+
+        with patch("sgr.core.repositories.get_repositories", return_value=repos):
+            result = await auth.login("trader@example.com", "CorrectPass123!")
+
+        payload = jwt.decode(
+            result["access_token"],
+            auth._config.api.secret_key.get_secret_value(),
+            algorithms=[auth._config.api.algorithm],
+        )
+        assert payload["is_admin"] is True
+
+    async def test_login_token_carries_is_admin_false_from_db(self, auth: AuthService) -> None:
+        from jose import jwt
+
+        hashed = auth.hash_password("CorrectPass123!")
+        repos = MagicMock()
+        repos.users.get_by_email = AsyncMock(
+            return_value=_make_user(hashed_password=hashed, is_admin=False)
+        )
+        repos.users.update_last_login = AsyncMock()
+
+        with patch("sgr.core.repositories.get_repositories", return_value=repos):
+            result = await auth.login("trader@example.com", "CorrectPass123!")
+
+        payload = jwt.decode(
+            result["access_token"],
+            auth._config.api.secret_key.get_secret_value(),
+            algorithms=[auth._config.api.algorithm],
+        )
+        assert payload["is_admin"] is False
 
     async def test_login_requires_totp_code_when_2fa_enabled(self, auth: AuthService) -> None:
         hashed = auth.hash_password("CorrectPass123!")
