@@ -51,15 +51,25 @@ log = get_logger(__name__)
 _REDIS_KEY_PREFIX = "sgr:risk:metrics"
 _METRICS_TTL_SECONDS = 120  # Grosszuegig ueber dem erwarteten evaluate()-Intervall
 
+# Tenant-Scoping (siehe Audit nach Commit 5): identisches Muster wie
+# sgr/risk/kill_switch.py - tenant_id=None ist der Single-Tenant-Fallback
+# mit byte-identischem Key wie vor diesem Scoping, tenant_id gesetzt fuegt
+# ein zusaetzliches Pfadsegment ein. Vorher (Bug): EIN globaler Redis-Key
+# pro trading_mode fuer alle Tenants - Gordon und Sumo (beide PAPER)
+# ueberschrieben sich gegenseitig alle 2s ihre RiskMetrics.
 
-def _redis_key(trading_mode: TradingMode) -> str:
-    return f"{_REDIS_KEY_PREFIX}:{trading_mode.value}"
+
+def _redis_key(trading_mode: TradingMode, tenant_id: str | None) -> str:
+    if tenant_id is None:
+        return f"{_REDIS_KEY_PREFIX}:{trading_mode.value}"
+    return f"{_REDIS_KEY_PREFIX}:{tenant_id}:{trading_mode.value}"
 
 
 async def publish_risk_metrics(
     redis_client: Redis | None,
     trading_mode: TradingMode,
     metrics: RiskMetrics,
+    tenant_id: str | None = None,
 ) -> None:
     """
     Schreibt die zuletzt berechneten RiskMetrics nach Redis (mit TTL).
@@ -69,13 +79,16 @@ async def publish_risk_metrics(
     ein no-op. Ein Fehler beim Schreiben wird geloggt, aber niemals
     nach oben geworfen - darf die eigentliche Risk-Bewertung nicht
     beeinträchtigen.
+
+    tenant_id: siehe _redis_key Docstring oben - None fuer Single-Tenant
+        (unveraendertes Verhalten), sonst die tenant_id dieses Workers.
     """
     if redis_client is None:
         return
     try:
         payload = json.dumps(metrics.model_dump(mode="json"))
         await redis_client.set(
-            _redis_key(trading_mode), payload, ex=_METRICS_TTL_SECONDS
+            _redis_key(trading_mode, tenant_id), payload, ex=_METRICS_TTL_SECONDS
         )
     except Exception as e:
         log.error("risk_metrics_cache.redis_publish_failed", error=str(e))
@@ -84,11 +97,16 @@ async def publish_risk_metrics(
 async def read_risk_metrics_from_redis(
     redis_client: Redis,
     trading_mode: TradingMode,
+    tenant_id: str | None = None,
 ) -> dict[str, Any] | None:
     """
     Rein lesender Zugriff auf die zuletzt vom Worker berechneten
     RiskMetrics - für Prozesse (z.B. sgr-api), die keinen eigenen
     RiskEngine mehr besitzen.
+
+    tenant_id: muss mit der tenant_id uebereinstimmen, unter der der
+        Worker geschrieben hat (siehe _redis_key) - None fuer
+        Single-Tenant-Deployments, sonst die betroffene Tenant-UUID.
 
     Gibt None zurück, wenn:
         - noch nie Metriken geschrieben wurden (z.B. frisches Deployment),
@@ -100,7 +118,7 @@ async def read_risk_metrics_from_redis(
     für den Aufrufer, nicht "kein Risiko vorhanden".
     """
     try:
-        raw = await redis_client.get(_redis_key(trading_mode))
+        raw = await redis_client.get(_redis_key(trading_mode, tenant_id))
         if raw is None:
             return None
         result: dict[str, Any] = json.loads(raw)

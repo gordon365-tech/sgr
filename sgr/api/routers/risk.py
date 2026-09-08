@@ -6,13 +6,22 @@ Redis (vom Worker geschrieben), nicht mehr aus einem In-Memory RiskEngine
 im API-Prozess.
 
 Trigger/Reset bleiben als echte Aktionen erhalten (Sicherheitsprinzip
-schlägt Architekturreinheit - der globale Notaus muss über die API
-auslösbar bleiben, siehe Entscheidung zu Commit 3). Sie instanziieren
-eine KillSwitch mit injiziertem Redis-Client und lösen darüber den
-Pub/Sub-Broadcast an sgr-worker aus (siehe sgr/risk/kill_switch.py,
-_publish_to_redis) - kein eigener Trading-Lifecycle-Zustand in der API,
-nur die Zustandsverbreitung über den bereits von Commit 2 vorgesehenen
-Kanal.
+schlägt Architekturreinheit - der Notaus muss über die API auslösbar
+bleiben, siehe Entscheidung zu Commit 3). Sie instanziieren eine
+KillSwitch mit injiziertem Redis-Client und lösen darüber den
+Pub/Sub-Broadcast an den zustaendigen sgr-worker-Prozess aus (siehe
+sgr/risk/kill_switch.py, _publish_to_redis) - kein eigener
+Trading-Lifecycle-Zustand in der API, nur die Zustandsverbreitung über
+den bereits von Commit 2 vorgesehenen Kanal.
+
+Tenant-Scoping (seit Audit nach Commit 5): der Kill Switch ist seit
+diesem Fix pro (tenant_id, trading_mode) getrennt, nicht mehr ein
+einziger globaler Schalter pro trading_mode. tenant_id kommt aus
+TokenData.user_id (dem authentifizierten Request) - JEDER Aufruf
+betrifft ausschliesslich den Kill Switch DIESES Users/Tenants,
+niemals andere Tenants im selben trading_mode. Vorher (Bug): ein
+einziger Redis-Key pro trading_mode fuer ALLE Tenants - Gordon haette
+mit einem Trigger auch Sumo gestoppt und umgekehrt.
 
 Symbol Kill Switch: bewusst noch NICHT auf Redis umgestellt (siehe
 Entscheidung zu Commit 3 - eigener Folge-Commit, analog zum globalen
@@ -87,8 +96,12 @@ async def get_risk_metrics(
     Felder 0/Platzhalter und dürfen NICHT als "kein Risiko" interpretiert
     werden.
     """
-    metrics = await read_risk_metrics_from_redis(redis_client, trading_mode)
-    ks_state = await read_kill_switch_state_from_redis(redis_client, trading_mode)
+    metrics = await read_risk_metrics_from_redis(
+        redis_client, trading_mode, tenant_id=user.user_id
+    )
+    ks_state = await read_kill_switch_state_from_redis(
+        redis_client, trading_mode, tenant_id=user.user_id
+    )
     kill_switch_active = bool(ks_state["is_active"]) if ks_state is not None else None
 
     if metrics is None:
@@ -163,7 +176,9 @@ async def get_kill_switch_status(
     werden, nicht als "inaktiv" (fail-safe, siehe
     read_kill_switch_state_from_redis Docstring).
     """
-    state = await read_kill_switch_state_from_redis(redis_client, trading_mode)
+    state = await read_kill_switch_state_from_redis(
+        redis_client, trading_mode, tenant_id=user.user_id
+    )
     if state is None:
         return KillSwitchResponse(
             is_active=None,
@@ -198,7 +213,7 @@ async def trigger_kill_switch(
     Redis-Write + Pub/Sub-Broadcast, den sgr-worker empfängt und lokal
     übernimmt (siehe sgr/risk/kill_switch.py).
     """
-    ks = KillSwitch(trading_mode)
+    ks = KillSwitch(trading_mode, tenant_id=user.user_id)
     ks.inject_redis(redis_client)
     await ks.trigger(
         reason=f"Manual: {body.reason}",
@@ -223,7 +238,7 @@ async def reset_kill_switch(
     Erfordert Admin-Rolle.
     Nur nach manueller Prüfung der Ursache aufrufen.
     """
-    ks = KillSwitch(trading_mode)
+    ks = KillSwitch(trading_mode, tenant_id=user.user_id)
     ks.inject_redis(redis_client)
     await ks.reset(reset_by=user.user_id)
     return {"reset": True, "reset_by": user.user_id}

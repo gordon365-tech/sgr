@@ -144,7 +144,12 @@ class PreflightValidator:
     def __init__(self, pool: ExchangePool, trading_mode: TradingMode) -> None:
         self._pool = pool
         self._trading_mode = trading_mode
-        self._kill_switch = get_kill_switch(trading_mode)
+        # Siehe Kommentar in sgr/execution/engine.py: tenant_id fuer
+        # Kill-Switch-Scoping ueber get_config(), kein neuer Konstruktor-
+        # Parameter noetig.
+        from sgr.core.config import get_config
+
+        self._kill_switch = get_kill_switch(trading_mode, tenant_id=get_config().tenant_id)
 
     async def validate(self, order: OrderRequest) -> PreflightResult:
         result = PreflightResult(order_id=str(order.id), trading_mode=self._trading_mode)

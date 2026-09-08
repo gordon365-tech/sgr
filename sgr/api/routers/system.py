@@ -79,7 +79,9 @@ async def get_system_status(
         except Exception:
             components["redis"] = "unavailable"
 
-        ks_state = await read_kill_switch_state_from_redis(redis_client, trading_mode)
+        ks_state = await read_kill_switch_state_from_redis(
+            redis_client, trading_mode, tenant_id=user.user_id
+        )
         components["kill_switch"] = (
             "unknown"
             if ks_state is None

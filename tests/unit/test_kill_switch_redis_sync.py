@@ -28,7 +28,22 @@ from unittest.mock import AsyncMock
 import pytest
 
 from sgr.core.types import TradingMode
-from sgr.risk.kill_switch import KillSwitch, read_kill_switch_state_from_redis
+from sgr.risk.kill_switch import (
+    KillSwitch,
+    _kill_switches,
+    get_kill_switch,
+    read_kill_switch_state_from_redis,
+)
+
+
+@pytest.fixture(autouse=True)
+def _clean_kill_switch_singletons():
+    """Singleton-Dict zwischen Tests zuruecksetzen - TestKillSwitchTenantScoping
+    prueft get_kill_switch()-Identitaet, das darf nicht von vorherigen
+    Tests (in dieser oder anderen Dateien) beeinflusst werden."""
+    _kill_switches.clear()
+    yield
+    _kill_switches.clear()
 
 
 @pytest.fixture
@@ -263,3 +278,105 @@ class TestReadKillSwitchStateFromRedis:
         await read_kill_switch_state_from_redis(fake_redis, TradingMode.LIVE)
 
         fake_redis.get.assert_awaited_once_with("sgr:kill_switch:state:live")
+
+
+class TestKillSwitchTenantScoping:
+    """
+    Tenant-Scoping (Audit nach Commit 5): Gordon und Sumo laufen beide mit
+    TRADING_MODE=paper - ohne tenant_id im Redis-Key haetten sie sich
+    einen einzigen globalen Kill Switch geteilt (Trigger bei Gordon haette
+    Sumo mitgestoppt und umgekehrt). tenant_id=None bleibt der
+    Single-Tenant-Fallback mit byte-identischem Key wie vor diesem Fix.
+    """
+
+    def test_get_kill_switch_none_tenant_returns_same_instance_as_before(self) -> None:
+        """Regressionsschutz: get_kill_switch(mode) ohne tenant_id-Arg
+        (Default None) muss weiterhin denselben Single-Tenant-Singleton
+        wie vor diesem Fix liefern - bestehende Call-Sites uebergeben
+        kein tenant_id-Argument."""
+        ks1 = get_kill_switch(TradingMode.PAPER)
+        ks2 = get_kill_switch(TradingMode.PAPER)
+        assert ks1 is ks2
+
+    def test_get_kill_switch_different_tenants_returns_different_instances(self) -> None:
+        gordon_ks = get_kill_switch(TradingMode.PAPER, tenant_id="gordon-uuid")
+        sumo_ks = get_kill_switch(TradingMode.PAPER, tenant_id="sumo-uuid")
+
+        assert gordon_ks is not sumo_ks
+
+    def test_get_kill_switch_same_tenant_returns_same_instance(self) -> None:
+        ks1 = get_kill_switch(TradingMode.PAPER, tenant_id="gordon-uuid")
+        ks2 = get_kill_switch(TradingMode.PAPER, tenant_id="gordon-uuid")
+        assert ks1 is ks2
+
+    def test_get_kill_switch_none_and_explicit_tenant_are_distinct(self) -> None:
+        """tenant_id=None (Single-Tenant) und ein expliziter Tenant duerfen
+        niemals dieselbe Instanz teilen, selbst im selben Prozess."""
+        default_ks = get_kill_switch(TradingMode.PAPER)
+        tenant_ks = get_kill_switch(TradingMode.PAPER, tenant_id="gordon-uuid")
+
+        assert default_ks is not tenant_ks
+
+    async def test_tenant_scoped_redis_key_includes_tenant_id(
+        self, fake_redis: AsyncMock
+    ) -> None:
+        ks = KillSwitch(TradingMode.PAPER, redis_client=fake_redis, tenant_id="gordon-uuid")
+        await ks.trigger("drawdown exceeded")
+
+        key, _payload = fake_redis.set.call_args.args
+        assert key == "sgr:kill_switch:state:gordon-uuid:paper"
+
+    async def test_none_tenant_redis_key_is_byte_identical_to_pre_scoping_format(
+        self, fake_redis: AsyncMock
+    ) -> None:
+        """Kritisch fuer Abwaertskompatibilitaet: bestehende Single-Tenant-
+        Deployments duerfen nach diesem Fix nicht ploetzlich unter einem
+        anderen Redis-Key schreiben/lesen."""
+        ks = KillSwitch(TradingMode.PAPER, redis_client=fake_redis, tenant_id=None)
+        await ks.trigger("test")
+
+        key, _payload = fake_redis.set.call_args.args
+        assert key == "sgr:kill_switch:state:paper"
+
+    async def test_tenant_scoped_pubsub_channel_includes_tenant_id(
+        self, fake_redis: AsyncMock
+    ) -> None:
+        ks = KillSwitch(TradingMode.PAPER, redis_client=fake_redis, tenant_id="sumo-uuid")
+        await ks.trigger("test")
+
+        channel, _payload = fake_redis.publish.call_args.args
+        assert channel == "sgr:kill_switch:changes:sumo-uuid:paper"
+
+    async def test_two_tenants_same_trading_mode_do_not_share_redis_state(
+        self, fake_redis: AsyncMock
+    ) -> None:
+        """Der eigentliche Kern des Audit-Fundes: Gordon triggert seinen
+        Kill Switch, Sumo (separate Instanz, separater Redis-Key) bleibt
+        davon vollstaendig unberuehrt."""
+        gordon_ks = KillSwitch(TradingMode.PAPER, redis_client=fake_redis, tenant_id="gordon")
+        sumo_ks = KillSwitch(TradingMode.PAPER, redis_client=fake_redis, tenant_id="sumo")
+
+        await gordon_ks.trigger("gordon triggered this")
+
+        assert gordon_ks.is_active
+        assert not sumo_ks.is_active  # Sumos In-Memory-State unberuehrt
+
+        gordon_key, _ = fake_redis.set.call_args.args
+        assert gordon_key == "sgr:kill_switch:state:gordon:paper"
+        assert "sumo" not in gordon_key
+
+    async def test_read_kill_switch_state_from_redis_respects_tenant_id(
+        self, fake_redis: AsyncMock
+    ) -> None:
+        await read_kill_switch_state_from_redis(
+            fake_redis, TradingMode.PAPER, tenant_id="gordon-uuid"
+        )
+
+        fake_redis.get.assert_awaited_once_with("sgr:kill_switch:state:gordon-uuid:paper")
+
+    async def test_read_kill_switch_state_from_redis_none_tenant_uses_legacy_key(
+        self, fake_redis: AsyncMock
+    ) -> None:
+        await read_kill_switch_state_from_redis(fake_redis, TradingMode.PAPER, tenant_id=None)
+
+        fake_redis.get.assert_awaited_once_with("sgr:kill_switch:state:paper")

@@ -378,13 +378,26 @@ async def lifespan(
             # Orchestrator automatisch bei jedem neuen Candle auslösen
             # (additiver Event-Trigger; run_cycle() bleibt auch direkt aufrufbar,
             # z.B. für manuelle Trigger oder Tests, ohne Redis-Abhängigkeit)
+            #
+            # Tenant-Scoping (siehe Audit nach Commit 5): consumer_group
+            # und consumer_name enthalten die tenant_id (Default "default"
+            # fuer Single-Tenant-Deployments ohne TENANT_ID). Redis Streams
+            # verteilen Nachrichten INNERHALB einer Consumer-Group per
+            # Round-Robin auf ihre Consumer - mit dem vorherigen, fuer
+            # ALLE Tenants identischen "orchestrator"/"orchestrator-1"
+            # haetten sich Gordon und Sumo CandleEvents gegenseitig
+            # weggenommen, statt dass beide JEDES Event erhalten. Getrennte
+            # Consumer-Groups pro Tenant sind bei Redis Streams die
+            # korrekte Loesung fuer "mehrere unabhaengige Konsumenten
+            # desselben Streams" - jede Gruppe sieht den vollen Stream.
             from sgr.core.types import CandleEvent
 
+            tenant_suffix = config.tenant_id or "default"
             bus.subscribe(
                 CandleEvent,
                 orchestrator.on_candle_event,
-                consumer_group="orchestrator",
-                consumer_name="orchestrator-1",
+                consumer_group=f"orchestrator:{tenant_suffix}",
+                consumer_name=f"orchestrator-{tenant_suffix}-1",
             )
         app.state.market_data_engine = md_engine
 

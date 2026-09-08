@@ -180,12 +180,30 @@ async def ws_risk(
     sgr/api/routers/risk.py). "stale=True" bedeutet: der Worker hat seit
     ueber 120s (TTL) keine neuen Metriken geschrieben, oder noch nie -
     identisch zur bestehenden REST-Semantik.
+
+    Tenant-Scoping (seit Audit nach Commit 5): tenant_id kommt aus dem
+    Query-Param token (JWT, dieselbe Validierung wie require_auth) -
+    zeigt ausschliesslich die Metriken/den Kill-Switch-Status DIESES
+    Tenants, nie eines anderen im selben trading_mode.
     """
     await websocket.accept()
 
-    from sgr.api.dependencies import get_trading_mode
+    from sgr.api.dependencies import _decode_token, get_trading_mode
     from sgr.risk.kill_switch import read_kill_switch_state_from_redis
     from sgr.risk.metrics_cache import read_risk_metrics_from_redis
+
+    # Tenant-Scoping (siehe Audit nach Commit 5): tenant_id kommt aus dem
+    # Token, nicht mehr implizit "der eine globale Kill Switch". Ohne
+    # gueltigen Token kein sinnvoller Tenant-Kontext - Verbindung wird
+    # sauber geschlossen statt eine HTTPException zu werfen (die in einem
+    # bereits akzeptierten WebSocket nicht sinnvoll propagiert).
+    try:
+        token_data = _decode_token(token)
+    except Exception:
+        await websocket.send_text(json.dumps({"error": "Invalid or missing auth token"}))
+        await websocket.close()
+        return
+    tenant_id = token_data.user_id
 
     redis_client = get_redis_client_or_none(request)
     if redis_client is None:
@@ -195,12 +213,16 @@ async def ws_risk(
 
     trading_mode = get_trading_mode()
 
-    log.info("ws.risk.connected")
+    log.info("ws.risk.connected", tenant_id=tenant_id)
 
     try:
         while True:
-            metrics = await read_risk_metrics_from_redis(redis_client, trading_mode)
-            ks_state = await read_kill_switch_state_from_redis(redis_client, trading_mode)
+            metrics = await read_risk_metrics_from_redis(
+                redis_client, trading_mode, tenant_id=tenant_id
+            )
+            ks_state = await read_kill_switch_state_from_redis(
+                redis_client, trading_mode, tenant_id=tenant_id
+            )
             kill_switch_active = bool(ks_state["is_active"]) if ks_state is not None else None
 
             if metrics is None:

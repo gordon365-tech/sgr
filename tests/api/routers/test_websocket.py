@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -249,16 +250,39 @@ class TestWsRisk:
     Liest ausschliesslich Redis (read_risk_metrics_from_redis,
     read_kill_switch_state_from_redis) statt app.state. Analog zu
     GET /api/v1/risk/metrics (siehe sgr/api/routers/risk.py).
+
+    Tenant-Scoping (Audit nach Commit 5): ws_risk dekodiert das Token
+    selbst (_decode_token), um tenant_id zu bestimmen - alle Tests unten
+    mocken das, um einen gueltigen Tenant-Kontext zu simulieren, ausser
+    den beiden expliziten Auth-Failure-Tests.
     """
+
+    _TOKEN_DATA = SimpleNamespace(user_id="tenant-abc", is_admin=False)
+
+    async def test_invalid_token_sends_error_and_closes(self):
+        """Ohne gueltigen Token gibt es keinen Tenant-Kontext - die
+        Verbindung wird sauber geschlossen statt eine HTTPException aus
+        _decode_token() unbehandelt zu propagieren."""
+        fake_ws = FakeWebSocket()
+        request = FakeRequest()
+
+        await ws_router.ws_risk(fake_ws, request, token="not-a-real-jwt")
+
+        assert fake_ws.accepted is True
+        assert fake_ws.closed is True
+        assert fake_ws.messages == [{"error": "Invalid or missing auth token"}]
 
     async def test_no_redis_connection_sends_error_and_closes(self):
         fake_ws = FakeWebSocket()
         request = FakeRequest()
 
-        with patch(
-            "sgr.api.routers.websocket.get_redis_client_or_none", return_value=None
+        with (
+            patch("sgr.api.dependencies._decode_token", return_value=self._TOKEN_DATA),
+            patch(
+                "sgr.api.routers.websocket.get_redis_client_or_none", return_value=None
+            ),
         ):
-            await ws_router.ws_risk(fake_ws, request, token="")
+            await ws_router.ws_risk(fake_ws, request, token="valid")
 
         assert fake_ws.closed is True
         assert fake_ws.messages == [{"error": "Redis connection not available"}]
@@ -281,6 +305,7 @@ class TestWsRisk:
         ks_state = {"is_active": False, "reason": None}
 
         with (
+            patch("sgr.api.dependencies._decode_token", return_value=self._TOKEN_DATA),
             patch(
                 "sgr.api.routers.websocket.get_redis_client_or_none",
                 return_value=redis_client,
@@ -289,13 +314,13 @@ class TestWsRisk:
             patch(
                 "sgr.risk.metrics_cache.read_risk_metrics_from_redis",
                 new=AsyncMock(return_value=metrics),
-            ),
+            ) as mock_metrics,
             patch(
                 "sgr.risk.kill_switch.read_kill_switch_state_from_redis",
                 new=AsyncMock(return_value=ks_state),
-            ),
+            ) as mock_ks,
         ):
-            await ws_router.ws_risk(fake_ws, request, token="")
+            await ws_router.ws_risk(fake_ws, request, token="valid")
 
         assert len(fake_ws.messages) == 2
         msg = fake_ws.messages[0]
@@ -307,6 +332,12 @@ class TestWsRisk:
         assert msg["data"]["kill_switch_active"] is False
         assert msg["data"]["kill_switch_reason"] is None
         assert msg["data"]["stale"] is False
+        # tenant_id aus dem Token muss an beide Redis-Reads durchgereicht
+        # werden - der zentrale Punkt dieses Audits.
+        mock_metrics.assert_awaited_with(
+            redis_client, TradingMode.PAPER, tenant_id="tenant-abc"
+        )
+        mock_ks.assert_awaited_with(redis_client, TradingMode.PAPER, tenant_id="tenant-abc")
 
     async def test_stale_when_no_metrics_written_yet(self):
         redis_client = AsyncMock()
@@ -314,6 +345,7 @@ class TestWsRisk:
         request = FakeRequest()
 
         with (
+            patch("sgr.api.dependencies._decode_token", return_value=self._TOKEN_DATA),
             patch(
                 "sgr.api.routers.websocket.get_redis_client_or_none",
                 return_value=redis_client,
@@ -328,7 +360,7 @@ class TestWsRisk:
                 new=AsyncMock(return_value=None),
             ),
         ):
-            await ws_router.ws_risk(fake_ws, request, token="")
+            await ws_router.ws_risk(fake_ws, request, token="valid")
 
         msg = fake_ws.messages[0]
         assert msg["data"]["stale"] is True
@@ -352,6 +384,7 @@ class TestWsRisk:
         ks_state = {"is_active": True, "reason": "max_drawdown_breached"}
 
         with (
+            patch("sgr.api.dependencies._decode_token", return_value=self._TOKEN_DATA),
             patch(
                 "sgr.api.routers.websocket.get_redis_client_or_none",
                 return_value=redis_client,
@@ -366,7 +399,7 @@ class TestWsRisk:
                 new=AsyncMock(return_value=ks_state),
             ),
         ):
-            await ws_router.ws_risk(fake_ws, request, token="")
+            await ws_router.ws_risk(fake_ws, request, token="valid")
 
         msg = fake_ws.messages[0]
         assert msg["data"]["kill_switch_active"] is True
@@ -378,6 +411,7 @@ class TestWsRisk:
         request = FakeRequest()
 
         with (
+            patch("sgr.api.dependencies._decode_token", return_value=self._TOKEN_DATA),
             patch(
                 "sgr.api.routers.websocket.get_redis_client_or_none",
                 return_value=redis_client,
@@ -388,7 +422,7 @@ class TestWsRisk:
                 new=AsyncMock(side_effect=RuntimeError("boom")),
             ),
         ):
-            await ws_router.ws_risk(fake_ws, request, token="")
+            await ws_router.ws_risk(fake_ws, request, token="valid")
         assert fake_ws.accepted is True
 
     async def test_websocket_disconnect_raised_directly_is_caught(self):
@@ -397,6 +431,7 @@ class TestWsRisk:
         request = FakeRequest()
 
         with (
+            patch("sgr.api.dependencies._decode_token", return_value=self._TOKEN_DATA),
             patch(
                 "sgr.api.routers.websocket.get_redis_client_or_none",
                 return_value=redis_client,
@@ -407,7 +442,7 @@ class TestWsRisk:
                 new=AsyncMock(side_effect=WebSocketDisconnect()),
             ),
         ):
-            await ws_router.ws_risk(fake_ws, request, token="")
+            await ws_router.ws_risk(fake_ws, request, token="valid")
         assert fake_ws.accepted is True
 
 

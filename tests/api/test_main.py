@@ -724,3 +724,56 @@ class TestLifespanTenantId:
         finally:
             for p in patchers:
                 p.stop()
+
+    async def test_candle_event_consumer_group_scoped_by_tenant_id(self) -> None:
+        """Audit-Fund (nach Commit 5): Gordon und Sumo duerfen sich
+        niemals dieselbe Redis-Consumer-Group teilen, sonst verteilt
+        Redis Streams CandleEvents per Round-Robin auf beide, statt dass
+        jeder JEDES Event erhaelt."""
+        patchers, mocks = _patch_lifespan_dependencies(
+            paper_mode=True, has_adapters=True, tenant_id="a47d994d-gordon"
+        )
+
+        app = FastAPI()
+        app.state = AppState()  # type: ignore[assignment]
+
+        for p in patchers:
+            p.start()
+        try:
+            with patch(
+                "sgr.core.tenant_credentials.load_tenant_credentials",
+                new=AsyncMock(return_value={"apiKey": "k", "secret": "s"}),
+            ):
+                async with lifespan(app):
+                    mocks["bus"].subscribe.assert_called_once()
+                    call = mocks["bus"].subscribe.call_args
+                    assert call.kwargs["consumer_group"] == "orchestrator:a47d994d-gordon"
+                    assert call.kwargs["consumer_name"] == "orchestrator-a47d994d-gordon-1"
+        finally:
+            for p in patchers:
+                p.stop()
+
+    async def test_candle_event_consumer_group_defaults_for_single_tenant(self) -> None:
+        """tenant_id=None (Single-Tenant-Deployment ohne TENANT_ID) nutzt
+        weiterhin eine feste, vorhersagbare Consumer-Group statt des
+        vorherigen "orchestrator" (Breaking Change gegenueber dem
+        Vor-Audit-Zustand ist hier bewusst in Kauf genommen - ein
+        stehender Redis-Consumer-Group-Name ohne Tenant-Bezug waere
+        inkonsistent mit dem neuen Muster, siehe Commit-Beschreibung)."""
+        patchers, mocks = _patch_lifespan_dependencies(
+            paper_mode=True, has_adapters=True, tenant_id=None
+        )
+
+        app = FastAPI()
+        app.state = AppState()  # type: ignore[assignment]
+
+        for p in patchers:
+            p.start()
+        try:
+            async with lifespan(app):
+                call = mocks["bus"].subscribe.call_args
+                assert call.kwargs["consumer_group"] == "orchestrator:default"
+                assert call.kwargs["consumer_name"] == "orchestrator-default-1"
+        finally:
+            for p in patchers:
+                p.stop()

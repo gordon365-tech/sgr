@@ -148,7 +148,9 @@ class StartupSafetyChecker:
         verwirrend und würde jeden Trade sofort ablehnen, ohne dass der
         Betreiber merkt warum.
         """
-        kill_switch = get_kill_switch(self._config.trading_mode)
+        kill_switch = get_kill_switch(
+            self._config.trading_mode, tenant_id=self._config.tenant_id
+        )
         if kill_switch.is_active:
             return StartupCheckResult(
                 name="kill_switch_not_preactivated",

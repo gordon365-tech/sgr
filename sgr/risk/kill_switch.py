@@ -69,28 +69,46 @@ log = get_logger(__name__)
 _REDIS_KEY_PREFIX = "sgr:kill_switch:state"
 _REDIS_CHANNEL_PREFIX = "sgr:kill_switch:changes"
 
+# Multi-Tenant-Scoping (siehe Audit nach Commit 5): tenant_id=None ist der
+# Single-Tenant-Fallback und erzeugt BYTE-IDENTISCHE Keys/Channels wie vor
+# diesem Scoping (sgr:kill_switch:state:paper, kein zusaetzliches Segment) -
+# bestehende Deployments ohne TENANT_ID sind dadurch unveraendert
+# kompatibel. Mit gesetzter tenant_id wird sie als eigenes Pfadsegment
+# eingefuegt (sgr:kill_switch:state:<tenant_id>:paper), damit Tenants im
+# selben trading_mode (z.B. Gordon und Sumo, beide PAPER) nicht denselben
+# Redis-Key teilen - vorher: EIN globaler Paper-Kill-Switch fuer alle
+# Tenants, Trigger bei Gordon haette Sumo mitgestoppt und umgekehrt.
 
-def _redis_key(trading_mode: TradingMode) -> str:
-    return f"{_REDIS_KEY_PREFIX}:{trading_mode.value}"
+
+def _redis_key(trading_mode: TradingMode, tenant_id: str | None) -> str:
+    if tenant_id is None:
+        return f"{_REDIS_KEY_PREFIX}:{trading_mode.value}"
+    return f"{_REDIS_KEY_PREFIX}:{tenant_id}:{trading_mode.value}"
 
 
-def _redis_channel(trading_mode: TradingMode) -> str:
-    return f"{_REDIS_CHANNEL_PREFIX}:{trading_mode.value}"
+def _redis_channel(trading_mode: TradingMode, tenant_id: str | None) -> str:
+    if tenant_id is None:
+        return f"{_REDIS_CHANNEL_PREFIX}:{trading_mode.value}"
+    return f"{_REDIS_CHANNEL_PREFIX}:{tenant_id}:{trading_mode.value}"
 
 
 class KillSwitch:
     """
-    Singleton Kill Switch pro Trading Mode.
-    Zwei Instanzen: eine für Paper, eine für Live.
-    Niemals Cross-Contamination zwischen Modi.
+    Singleton Kill Switch pro (Tenant, Trading Mode)-Kombination.
+    Single-Tenant (tenant_id=None): eine Instanz für Paper, eine für Live,
+    wie zuvor. Multi-Tenant: zusaetzlich pro tenant_id getrennt (siehe
+    _redis_key/_redis_channel und _kill_switches Docstring unten) -
+    niemals Cross-Contamination zwischen Tenants oder zwischen Modi.
     """
 
     def __init__(
         self,
         trading_mode: TradingMode,
         redis_client: Redis | None = None,
+        tenant_id: str | None = None,
     ) -> None:
         self._trading_mode = trading_mode
+        self._tenant_id = tenant_id
         self._state = KillSwitchState(trading_mode=trading_mode)
         self._lock = asyncio.Lock()
         self._exchange_pool: Any = None  # Injiziert bei Startup
@@ -128,7 +146,8 @@ class KillSwitch:
             return
 
         self._subscriber_task = asyncio.create_task(
-            self._remote_sync_loop(), name=f"kill_switch_sync_{self._trading_mode.value}"
+            self._remote_sync_loop(),
+            name=f"kill_switch_sync_{self._tenant_id or 'default'}_{self._trading_mode.value}",
         )
 
     async def stop_remote_sync(self) -> None:
@@ -144,7 +163,7 @@ class KillSwitch:
         assert self._redis is not None
         try:
             pubsub = self._redis.pubsub()
-            await pubsub.subscribe(_redis_channel(self._trading_mode))
+            await pubsub.subscribe(_redis_channel(self._trading_mode, self._tenant_id))
             async for message in pubsub.listen():
                 if message["type"] != "message":
                     continue
@@ -201,8 +220,10 @@ class KillSwitch:
             }
         )
         try:
-            await self._redis.set(_redis_key(self._trading_mode), payload)
-            await self._redis.publish(_redis_channel(self._trading_mode), payload)
+            await self._redis.set(_redis_key(self._trading_mode, self._tenant_id), payload)
+            await self._redis.publish(
+                _redis_channel(self._trading_mode, self._tenant_id), payload
+            )
         except Exception as e:
             log.error("kill_switch.redis_publish_failed", error=str(e))
 
@@ -387,21 +408,33 @@ class KillSwitch:
 
 
 # ---------------------------------------------------------------------------
-# Singletons (eine Instanz pro Trading Mode)
+# Singletons (eine Instanz pro (Tenant, Trading Mode)-Kombination)
 # ---------------------------------------------------------------------------
 
-_kill_switches: dict[TradingMode, KillSwitch] = {}
+# Dict-Key ist ein (tenant_id, trading_mode)-Tupel statt nur trading_mode
+# (siehe Audit nach Commit 5): mit reinem TradingMode-Keying haetten sich
+# Gordon und Sumo (beide PAPER) dieselbe In-Memory-KillSwitch-Instanz
+# geteilt, WENN sie im selben Prozess liefen. Sie laufen zwar in getrennten
+# Worker-Prozessen (siehe Commit 4/5), sodass dieses Dict fuer sich genommen
+# nie cross-tenant kollidierte - der eigentliche Leak war ausschliesslich
+# der gemeinsame Redis-Key (siehe _redis_key oben). Trotzdem wird das Dict
+# hier konsistent mitgescoped, damit ein einzelner Prozess (z.B. in Tests
+# oder einem zukuenftigen Multi-Tenant-API-Prozess) niemals versehentlich
+# zwei Tenants dieselbe Instanz zuweisen kann.
+_kill_switches: dict[tuple[str | None, TradingMode], KillSwitch] = {}
 
 
-def get_kill_switch(trading_mode: TradingMode) -> KillSwitch:
-    if trading_mode not in _kill_switches:
-        _kill_switches[trading_mode] = KillSwitch(trading_mode)
-    return _kill_switches[trading_mode]
+def get_kill_switch(trading_mode: TradingMode, tenant_id: str | None = None) -> KillSwitch:
+    key = (tenant_id, trading_mode)
+    if key not in _kill_switches:
+        _kill_switches[key] = KillSwitch(trading_mode, tenant_id=tenant_id)
+    return _kill_switches[key]
 
 
 async def read_kill_switch_state_from_redis(
     redis_client: Redis,
     trading_mode: TradingMode,
+    tenant_id: str | None = None,
 ) -> dict[str, Any] | None:
     """
     Rein lesender Zugriff auf den zuletzt von einem trigger()/reset()
@@ -411,13 +444,17 @@ async def read_kill_switch_state_from_redis(
     zuletzt bekannten State brauchen (keine Trigger-Faehigkeit, kein
     Exchange Pool, kein Lock).
 
+    tenant_id: muss mit der tenant_id uebereinstimmen, unter der der
+        Worker geschrieben hat (siehe _redis_key) - None fuer
+        Single-Tenant-Deployments, sonst die betroffene Tenant-UUID.
+
     Gibt None zurueck, wenn noch nie ein State geschrieben wurde (z.B.
     frisches Deployment vor dem ersten Worker-Start) oder bei Redis-
     Fehlern (fail-safe: der Aufrufer sollte das als 'Status unbekannt',
     NICHT als 'Kill Switch inaktiv' behandeln).
     """
     try:
-        raw = await redis_client.get(_redis_key(trading_mode))
+        raw = await redis_client.get(_redis_key(trading_mode, tenant_id))
         if raw is None:
             return None
         result: dict[str, Any] = json.loads(raw)

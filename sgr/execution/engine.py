@@ -76,7 +76,15 @@ class ExecutionEngine:
     ) -> None:
         self._pool = pool
         self._trading_mode = trading_mode
-        self._kill_switch = get_kill_switch(trading_mode)
+        # tenant_id fuer Kill-Switch-Scoping (siehe Audit nach Commit 5,
+        # sgr/risk/kill_switch.py): get_config() statt eines zusaetzlichen
+        # Konstruktor-Parameters, um die bestehende Aufrufstelle in
+        # lifespan() (ExecutionEngine(pool, config.trading_mode, ...))
+        # unveraendert zu lassen - tenant_id ist ohnehin nur ueber
+        # get_config() im selben Prozess verfuegbar.
+        from sgr.core.config import get_config
+
+        self._kill_switch = get_kill_switch(trading_mode, tenant_id=get_config().tenant_id)
         # Optional: OrderRepository fuer Persistenz. None = rein
         # In-Memory/Event-basiert (Tests, isolierte Nutzung) - additiv,
         # analog zu PortfolioEngine._position_repo. Ohne Injektion

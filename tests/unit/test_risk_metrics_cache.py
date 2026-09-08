@@ -133,3 +133,67 @@ class TestReadRiskMetricsFromRedis:
         await read_risk_metrics_from_redis(fake_redis, TradingMode.LIVE)
 
         fake_redis.get.assert_awaited_once_with("sgr:risk:metrics:live")
+
+
+class TestRiskMetricsCacheTenantScoping:
+    """
+    Tenant-Scoping (Audit nach Commit 5): identisches Problem wie beim
+    Kill Switch - Gordon und Sumo (beide PAPER) ueberschrieben sich vor
+    diesem Fix alle 2s gegenseitig ihre RiskMetrics unter demselben
+    Redis-Key. tenant_id=None bleibt der Single-Tenant-Fallback mit
+    byte-identischem Key wie vor diesem Fix.
+    """
+
+    async def test_tenant_scoped_key_includes_tenant_id(
+        self, fake_redis: AsyncMock, sample_metrics: RiskMetrics
+    ) -> None:
+        await publish_risk_metrics(
+            fake_redis, TradingMode.PAPER, sample_metrics, tenant_id="gordon-uuid"
+        )
+
+        key, _payload = fake_redis.set.call_args.args
+        assert key == "sgr:risk:metrics:gordon-uuid:paper"
+
+    async def test_none_tenant_key_is_byte_identical_to_pre_scoping_format(
+        self, fake_redis: AsyncMock, sample_metrics: RiskMetrics
+    ) -> None:
+        await publish_risk_metrics(
+            fake_redis, TradingMode.PAPER, sample_metrics, tenant_id=None
+        )
+
+        key, _payload = fake_redis.set.call_args.args
+        assert key == "sgr:risk:metrics:paper"
+
+    async def test_two_tenants_write_to_different_keys(
+        self, sample_metrics: RiskMetrics
+    ) -> None:
+        """Der eigentliche Kern des Audit-Fundes: Gordon und Sumo schreiben
+        gleichzeitig (beide PAPER) - keiner ueberschreibt den Wert des
+        anderen."""
+        gordon_redis = AsyncMock()
+        sumo_redis = AsyncMock()
+
+        await publish_risk_metrics(
+            gordon_redis, TradingMode.PAPER, sample_metrics, tenant_id="gordon"
+        )
+        await publish_risk_metrics(
+            sumo_redis, TradingMode.PAPER, sample_metrics, tenant_id="sumo"
+        )
+
+        gordon_key, _ = gordon_redis.set.call_args.args
+        sumo_key, _ = sumo_redis.set.call_args.args
+        assert gordon_key != sumo_key
+        assert gordon_key == "sgr:risk:metrics:gordon:paper"
+        assert sumo_key == "sgr:risk:metrics:sumo:paper"
+
+    async def test_read_respects_tenant_id(self, fake_redis: AsyncMock) -> None:
+        await read_risk_metrics_from_redis(
+            fake_redis, TradingMode.PAPER, tenant_id="gordon-uuid"
+        )
+
+        fake_redis.get.assert_awaited_once_with("sgr:risk:metrics:gordon-uuid:paper")
+
+    async def test_read_none_tenant_uses_legacy_key(self, fake_redis: AsyncMock) -> None:
+        await read_risk_metrics_from_redis(fake_redis, TradingMode.PAPER, tenant_id=None)
+
+        fake_redis.get.assert_awaited_once_with("sgr:risk:metrics:paper")

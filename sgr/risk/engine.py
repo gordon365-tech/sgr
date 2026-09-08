@@ -93,7 +93,9 @@ class RiskEngine:
         self._limits = self._config.risk_limits
         self._var_calc = VaRCalculator()
         self._sizer = PositionSizer()
-        self._kill_switch: KillSwitch = get_kill_switch(trading_mode)
+        self._kill_switch: KillSwitch = get_kill_switch(
+            trading_mode, tenant_id=self._config.tenant_id
+        )
         # Optionaler Redis-Client fuer Cross-Prozess-Sichtbarkeit der
         # RiskMetrics (sgr-api liest, kein eigener RiskEngine dort mehr).
         # Analog zum Kill-Switch-Pattern: None = reines In-Memory-Verhalten,
@@ -220,7 +222,9 @@ class RiskEngine:
         # 2b. Metriken additiv nach Redis publizieren (Cross-Prozess-Read
         # fuer sgr-api, siehe sgr/risk/metrics_cache.py). Fail-safe: ein
         # Fehler oder fehlender Redis-Client darf evaluate() nie stoeren.
-        await publish_risk_metrics(self._redis, self._trading_mode, metrics)
+        await publish_risk_metrics(
+            self._redis, self._trading_mode, metrics, tenant_id=self._config.tenant_id
+        )
 
         # 3. Alle Limit-Checks durchführen
         checks = self._run_all_checks(metrics)
