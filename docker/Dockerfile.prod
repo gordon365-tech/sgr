@@ -89,6 +89,11 @@ COPY --from=builder /install /usr/local
 COPY --from=builder /build/sgr ./sgr
 COPY --from=builder /build/alembic ./alembic
 COPY --from=builder /build/alembic.ini ./alembic.ini
+# scripts/ enthaelt Ops-CLI-Tools (z.B. grant_admin.py) - bewusst nicht
+# Teil des sgr-Pakets, aber muss im Runtime-Image liegen, damit
+# `docker compose exec api python scripts/grant_admin.py ...`
+# funktioniert, ohne das ganze Image neu zu bauen.
+COPY --from=builder /build/scripts ./scripts
 
 # Create non-root user
 RUN useradd -m -u 1000 -s /sbin/nologin sgr && \
