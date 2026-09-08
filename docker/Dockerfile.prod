@@ -95,6 +95,18 @@ COPY --from=builder /build/alembic.ini ./alembic.ini
 # funktioniert, ohne das ganze Image neu zu bauen.
 COPY --from=builder /build/scripts ./scripts
 
+# PYTHONPATH=/app: das editable install (pip install -e .) aus der
+# Builder-Stage referenziert intern /build/sgr - dieser Pfad existiert
+# in der Runtime-Stage nicht mehr (nur /app/sgr, siehe COPY oben).
+# `uvicorn sgr.api.main:app` funktionierte bisher nur zufaellig, weil
+# Python das CWD (WORKDIR /app) implizit zu sys.path hinzufuegt, wenn
+# kein expliziter Skriptpfad uebergeben wird. `python scripts/foo.py`
+# hat dagegen scripts/ (nicht /app) als sys.path[0] - sgr war dort
+# nicht importierbar (siehe Deployment-Vorfall: grant_admin.py schlug
+# mit ModuleNotFoundError: No module named 'sgr' fehl). PYTHONPATH=/app
+# macht sgr unabhaengig vom jeweils gestarteten Skript auffindbar.
+ENV PYTHONPATH=/app
+
 # Create non-root user
 RUN useradd -m -u 1000 -s /sbin/nologin sgr && \
     chown -R sgr:sgr /app
