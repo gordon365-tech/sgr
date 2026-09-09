@@ -97,10 +97,53 @@ class TickerData:
         self.timestamp = timestamp
 
 
+class SymbolLimits:
+    """
+    Pro-Symbol Order-Constraints (Precision, Min/Max-Menge, Min-Notional).
+
+    Eigener Domain-Type statt rohes ccxt market['precision']/['limits']-
+    Dict (siehe Modul-Docstring: "niemals CCXT-Rohdaten nach oben") -
+    Werte kommen aus ccxt's bereits geladenem markets-Cache (kein
+    zusaetzlicher Netzwerk-Call, siehe CCXTBaseAdapter.get_exchange_info()),
+    nicht aus einem separaten Precision-Endpoint (den es exchange-
+    uebergreifend nicht einheitlich gibt).
+
+    Felder sind optional (None), weil nicht jede Exchange/jedes Symbol
+    jeden Wert liefert - ein fehlender Wert bedeutet "von dieser Exchange
+    nicht angegeben", nicht "kein Limit". Preflight-Checks muessen das
+    entsprechend behandeln (fehlender Wert -> dieser Teilcheck wird
+    uebersprungen, nicht automatisch bestanden oder abgelehnt).
+    """
+
+    __slots__ = ("amount_precision", "price_precision", "min_amount", "max_amount", "min_notional")
+
+    def __init__(
+        self,
+        amount_precision: int | None = None,
+        price_precision: int | None = None,
+        min_amount: Decimal | None = None,
+        max_amount: Decimal | None = None,
+        min_notional: Decimal | None = None,
+    ) -> None:
+        self.amount_precision = amount_precision
+        self.price_precision = price_precision
+        self.min_amount = min_amount
+        self.max_amount = max_amount
+        self.min_notional = min_notional
+
+
 class ExchangeInfo:
     """Static exchange metadata (symbols, limits, fees)."""
 
-    __slots__ = ("exchange_id", "symbols", "timeframes", "maker_fee", "taker_fee", "fetched_at")
+    __slots__ = (
+        "exchange_id",
+        "symbols",
+        "timeframes",
+        "maker_fee",
+        "taker_fee",
+        "fetched_at",
+        "symbol_limits",
+    )
 
     def __init__(
         self,
@@ -110,6 +153,7 @@ class ExchangeInfo:
         maker_fee: Decimal,
         taker_fee: Decimal,
         fetched_at: datetime,
+        symbol_limits: dict[str, SymbolLimits] | None = None,
     ) -> None:
         self.exchange_id = exchange_id
         self.symbols = symbols
@@ -117,6 +161,12 @@ class ExchangeInfo:
         self.maker_fee = maker_fee
         self.taker_fee = taker_fee
         self.fetched_at = fetched_at
+        # Default {} statt None: Aufrufer (siehe preflight.py) sollen
+        # .get(symbol) nutzen koennen, ohne vorher auf None pruefen zu
+        # muessen - ein leeres Dict bedeutet "keine Limits-Daten fuer
+        # diese Exchange geladen", ein fehlender Symbol-Key bedeutet
+        # "kein Eintrag fuer dieses konkrete Symbol".
+        self.symbol_limits = symbol_limits if symbol_limits is not None else {}
 
 
 class OpenInterest:

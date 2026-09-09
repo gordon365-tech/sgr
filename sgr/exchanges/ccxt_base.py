@@ -69,6 +69,7 @@ from sgr.exchanges.base import (
     OpenInterest,
     OrderNotFoundError,
     RateLimitError,
+    SymbolLimits,
     SymbolNotFoundError,
     TickerData,
 )
@@ -227,6 +228,15 @@ class CCXTBaseAdapter:
             except (KeyError, InvalidOperation):
                 pass
 
+            # Pro-Symbol Precision/Limits aus bereits geladenem
+            # ccxt.markets extrahieren (kein zusaetzlicher Netzwerk-Call -
+            # load_markets() lief bereits bei connect()). Fehlende/nicht
+            # parsebare Einzelwerte werden als None belassen statt die
+            # gesamte Extraktion fuer das Symbol abzubrechen - ccxt liefert
+            # je nach Exchange nicht immer alle Felder (siehe
+            # SymbolLimits Docstring in sgr/exchanges/base.py).
+            symbol_limits = self._extract_symbol_limits(markets)
+
             self._exchange_info = ExchangeInfo(
                 exchange_id=self.exchange_id,
                 symbols=symbols,
@@ -234,9 +244,61 @@ class CCXTBaseAdapter:
                 maker_fee=maker_fee,
                 taker_fee=taker_fee,
                 fetched_at=datetime.now(tz=UTC),
+                symbol_limits=symbol_limits,
             )
 
         return self._exchange_info
+
+    def _extract_symbol_limits(self, markets: dict[str, Any]) -> dict[str, SymbolLimits]:
+        """
+        Uebersetzt ccxt's unified market['precision']/market['limits']
+        (dokumentiertes, exchange-uebergreifendes ccxt-Format) in
+        SymbolLimits-Domain-Objekte. Best-effort pro Symbol: ein
+        fehlerhafter/unvollstaendiger Eintrag fuer EIN Symbol darf nicht
+        die Extraktion fuer alle anderen Symbole verhindern.
+        """
+        result: dict[str, SymbolLimits] = {}
+        for symbol, market in markets.items():
+            if "/" not in symbol:
+                continue
+            try:
+                precision = market.get("precision") or {}
+                limits = market.get("limits") or {}
+                amount_limits = limits.get("amount") or {}
+                cost_limits = limits.get("cost") or {}
+
+                result[symbol] = SymbolLimits(
+                    amount_precision=self._safe_int(precision.get("amount")),
+                    price_precision=self._safe_int(precision.get("price")),
+                    min_amount=self._safe_decimal(amount_limits.get("min")),
+                    max_amount=self._safe_decimal(amount_limits.get("max")),
+                    min_notional=self._safe_decimal(cost_limits.get("min")),
+                )
+            except (TypeError, AttributeError):
+                # Unerwartete Struktur fuer dieses eine Symbol (z.B. ccxt
+                # liefert manchmal verschachtelte Dicts statt Skalaren
+                # bei bestimmten Exchange-Quirks) - Symbol einfach
+                # auslassen statt die gesamte Methode scheitern zu lassen.
+                continue
+        return result
+
+    @staticmethod
+    def _safe_int(value: Any) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _safe_decimal(value: Any) -> Decimal | None:
+        if value is None:
+            return None
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return None
 
     @_retryable_exchange_call(max_attempts=3)
     async def get_ticker(self, symbol: str) -> TickerData:

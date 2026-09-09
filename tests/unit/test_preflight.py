@@ -38,7 +38,7 @@ from sgr.core.types import (
     Symbol,
     TradingMode,
 )
-from sgr.exchanges.base import Balance, ExchangeError, ExchangeInfo, RateLimitError
+from sgr.exchanges.base import Balance, ExchangeError, ExchangeInfo, RateLimitError, SymbolLimits
 from sgr.execution.preflight import (
     NOT_SUPPORTED_CHECKS,
     PreflightResult,
@@ -96,7 +96,10 @@ def _make_balance(free: Decimal = Decimal("10000")) -> Balance:
     )
 
 
-def _make_exchange_info(symbols: list[str] | None = None) -> ExchangeInfo:
+def _make_exchange_info(
+    symbols: list[str] | None = None,
+    symbol_limits: dict | None = None,
+) -> ExchangeInfo:
     return ExchangeInfo(
         exchange_id=ExchangeID.BINANCE,
         symbols=symbols if symbols is not None else [str(_make_symbol())],
@@ -104,6 +107,7 @@ def _make_exchange_info(symbols: list[str] | None = None) -> ExchangeInfo:
         maker_fee=Decimal("0.001"),
         taker_fee=Decimal("0.001"),
         fetched_at=datetime.now(tz=UTC),
+        symbol_limits=symbol_limits,
     )
 
 
@@ -364,6 +368,185 @@ class TestLiveSymbolAvailability:
 
         assert result.eligible is False
         assert any(c.name == "symbol_availability" for c in result.failures)
+
+
+# ---------------------------------------------------------------------------
+# LIVE Mode: Exchange Precision / Tick Size / Min-Max-Order-Limits
+# ---------------------------------------------------------------------------
+
+
+class TestSymbolPrecisionAndLimits:
+    async def test_within_limits_passes(
+        self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
+    ) -> None:
+        _pool, adapter = mock_pool
+        adapter.get_exchange_info = AsyncMock(
+            return_value=_make_exchange_info(
+                symbol_limits={
+                    str(_make_symbol()): SymbolLimits(
+                        amount_precision=6,
+                        min_amount=Decimal("0.0001"),
+                        max_amount=Decimal("1000"),
+                        min_notional=Decimal("10"),
+                    )
+                }
+            )
+        )
+        validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
+
+        result = await validator.validate(
+            _make_order(
+                trading_mode=TradingMode.LIVE,
+                quantity=Decimal("0.1"),
+                limit_price=Decimal("50000"),
+            )
+        )
+
+        assert result.eligible is True
+        check = next(c for c in result.checks if c.name == "symbol_precision_and_limits")
+        assert check.passed is True
+        assert check.supported is True
+
+    async def test_quantity_below_min_amount_fails(
+        self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
+    ) -> None:
+        _pool, adapter = mock_pool
+        adapter.get_exchange_info = AsyncMock(
+            return_value=_make_exchange_info(
+                symbol_limits={
+                    str(_make_symbol()): SymbolLimits(min_amount=Decimal("1.0"))
+                }
+            )
+        )
+        validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
+
+        result = await validator.validate(
+            _make_order(trading_mode=TradingMode.LIVE, quantity=Decimal("0.1"))
+        )
+
+        assert result.eligible is False
+        failure = next(c for c in result.failures if c.name == "symbol_precision_and_limits")
+        assert "min_amount" in failure.detail
+
+    async def test_quantity_above_max_amount_fails(
+        self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
+    ) -> None:
+        _pool, adapter = mock_pool
+        adapter.get_exchange_info = AsyncMock(
+            return_value=_make_exchange_info(
+                symbol_limits={
+                    str(_make_symbol()): SymbolLimits(max_amount=Decimal("1.0"))
+                }
+            )
+        )
+        validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
+
+        result = await validator.validate(
+            _make_order(trading_mode=TradingMode.LIVE, quantity=Decimal("5.0"))
+        )
+
+        assert result.eligible is False
+        failure = next(c for c in result.failures if c.name == "symbol_precision_and_limits")
+        assert "max_amount" in failure.detail
+
+    async def test_notional_below_min_notional_fails(
+        self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
+    ) -> None:
+        _pool, adapter = mock_pool
+        adapter.get_exchange_info = AsyncMock(
+            return_value=_make_exchange_info(
+                symbol_limits={
+                    str(_make_symbol()): SymbolLimits(min_notional=Decimal("100"))
+                }
+            )
+        )
+        validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
+
+        result = await validator.validate(
+            _make_order(
+                trading_mode=TradingMode.LIVE,
+                quantity=Decimal("0.001"),
+                limit_price=Decimal("50000"),  # notional = 50, unter min_notional=100
+            )
+        )
+
+        assert result.eligible is False
+        failure = next(c for c in result.failures if c.name == "symbol_precision_and_limits")
+        assert "min_notional" in failure.detail
+
+    async def test_market_order_skips_notional_check_no_limit_price(
+        self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
+    ) -> None:
+        """Ohne limit_price (Market Order) ist der Notional vor Fill nicht
+        bekannt - analog zur bestehenden Balance-Check-Grenze
+        (_check_balance_and_capital Docstring)."""
+        _pool, adapter = mock_pool
+        adapter.get_exchange_info = AsyncMock(
+            return_value=_make_exchange_info(
+                symbol_limits={
+                    str(_make_symbol()): SymbolLimits(min_notional=Decimal("999999"))
+                }
+            )
+        )
+        validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
+
+        result = await validator.validate(
+            _make_order(trading_mode=TradingMode.LIVE, quantity=Decimal("0.1"))
+        )
+
+        assert result.eligible is True
+
+    async def test_no_limits_for_symbol_marked_not_supported(
+        self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
+    ) -> None:
+        """Kein Eintrag fuer dieses Symbol in symbol_limits (Exchange
+        liefert keine Daten) - darf NICHT als Fehlschlag zaehlen,
+        sondern als supported=False, analog zu NOT_SUPPORTED_CHECKS."""
+        validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
+
+        result = await validator.validate(_make_order(trading_mode=TradingMode.LIVE))
+
+        check = next(c for c in result.checks if c.name == "symbol_precision_and_limits")
+        assert check.supported is False
+        assert result.eligible is True
+
+    async def test_all_fields_none_marked_not_supported(
+        self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
+    ) -> None:
+        """Symbol-Eintrag existiert, aber alle Einzelwerte sind None -
+        gleiche 'nicht pruefbar'-Semantik wie ein komplett fehlender
+        Symbol-Eintrag."""
+        _pool, adapter = mock_pool
+        adapter.get_exchange_info = AsyncMock(
+            return_value=_make_exchange_info(
+                symbol_limits={str(_make_symbol()): SymbolLimits()}
+            )
+        )
+        validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
+
+        result = await validator.validate(_make_order(trading_mode=TradingMode.LIVE))
+
+        check = next(c for c in result.checks if c.name == "symbol_precision_and_limits")
+        assert check.supported is False
+        assert result.eligible is True
+
+    async def test_exchange_info_fetch_failure_blocks(
+        self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
+    ) -> None:
+        _pool, adapter = mock_pool
+        adapter.get_exchange_info = AsyncMock(
+            side_effect=ExchangeError("down", exchange="binance")
+        )
+        validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
+
+        result = await validator.validate(_make_order(trading_mode=TradingMode.LIVE))
+
+        assert result.eligible is False
+        # symbol_availability schlaegt bereits fehl und bricht die Kette
+        # nicht ab (im Gegensatz zum fehlenden Adapter) - beide Checks,
+        # die adapter.get_exchange_info() nutzen, werden ausgefuehrt und
+        # schlagen konsistent fehl.
+        assert any(c.name == "symbol_precision_and_limits" for c in result.failures)
 
 
 # ---------------------------------------------------------------------------

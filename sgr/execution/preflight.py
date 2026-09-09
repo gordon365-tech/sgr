@@ -54,10 +54,13 @@ nicht liefert - siehe sgr/exchanges/base.py ExchangeAdapter Protocol):
     - Position Mode (Hedge vs. One-Way): kein entsprechendes Feld in
       Position oder im Adapter-Interface.
     - Exchange Precision / Tick Size / exchangeseitige Min-Max-Order-
-      Limits: ExchangeInfo trägt nur symbols/timeframes/fees, keine
-      Pro-Symbol-Precision- oder Limit-Daten. CCXT selbst hat diese
-      Daten intern (exchange.markets[symbol]['precision']/['limits']),
-      aber der SGR-Adapter exponiert sie aktuell nicht.
+      Limits: SEIT diesem Commit implementiert (siehe
+      _check_symbol_precision_and_limits unten) - ccxt's bereits
+      geladenes markets-Dict enthaelt precision/limits pro Symbol
+      (kein zusaetzlicher Netzwerk-Call), diese werden jetzt ueber
+      ExchangeInfo.symbol_limits (sgr/exchanges/base.py SymbolLimits)
+      exponiert statt verworfen. Nicht mehr Teil von
+      NOT_SUPPORTED_CHECKS.
     - Proaktives Rate-Limit-Budget (verbleibende Requests/Fenster):
       kein entsprechender Endpoint. RateLimitError wird reaktiv über
       ping() erkannt, nicht proaktiv vor dem Call abgefragt.
@@ -88,7 +91,6 @@ NOT_SUPPORTED_CHECKS: tuple[str, ...] = (
     "api_permissions",
     "market_status",
     "position_mode",
-    "exchange_precision_and_limits",
     "rate_limit_budget",
 )
 
@@ -201,6 +203,7 @@ class PreflightValidator:
 
         result.checks.append(await self._check_connection_and_clock(adapter))
         result.checks.append(await self._check_symbol_availability(adapter, order))
+        result.checks.append(await self._check_symbol_precision_and_limits(adapter, order))
         result.checks.append(await self._check_balance_and_capital(adapter, order))
         result.checks.append(await self._check_leverage(adapter, order))
         result.checks.append(await self._check_reduce_only_against_position(adapter, order))
@@ -322,6 +325,97 @@ class PreflightValidator:
             name="symbol_availability",
             passed=True,
             detail=f"{symbol_str} available",
+        )
+
+    # ------------------------------------------------------------------
+    # Checks - Exchange Precision / Tick Size / Min-Max-Order-Limits
+    # ------------------------------------------------------------------
+
+    async def _check_symbol_precision_and_limits(
+        self, adapter: ExchangeAdapter, order: OrderRequest
+    ) -> PreflightCheckResult:
+        """
+        Prueft order.quantity gegen die von der Exchange fuer dieses
+        Symbol gemeldeten Min/Max-Order-Groessen und Mengen-Praezision
+        (SymbolLimits, aus ccxt's bereits geladenem markets-Dict - siehe
+        CCXTBaseAdapter._extract_symbol_limits). Faengt Order-Ablehnungen
+        durch die Exchange selbst (z.B. Binance "LOT_SIZE"/"MIN_NOTIONAL"
+        Filter) VOR dem Senden ab, statt sie erst als ExchangeError beim
+        tatsaechlichen place_order()-Call zu erleben.
+
+        Fail-closed heisst hier NICHT "fehlende Daten = Fehlschlag": wenn
+        die Exchange fuer dieses Symbol keine Limits liefert (SymbolLimits
+        mit lauter None-Feldern, oder Symbol fehlt komplett in
+        symbol_limits), wird der Check als supported=False markiert -
+        analog zu den weiterhin echten NOT_SUPPORTED_CHECKS, aber pro
+        Symbol statt global, weil manche Exchanges/Symbole diese Daten
+        schlicht nicht liefern. Ein tatsaechlich ermittelter
+        Grenzwertverstoss (z.B. quantity < min_amount) zaehlt dagegen als
+        echter, blockierender Fehlschlag.
+        """
+        symbol_str = str(order.symbol)
+        try:
+            info = await adapter.get_exchange_info()
+        except ExchangeError as e:
+            return PreflightCheckResult(
+                name="symbol_precision_and_limits",
+                passed=False,
+                detail=f"Could not fetch exchange info: {e}",
+            )
+
+        limits = info.symbol_limits.get(symbol_str)
+        if limits is None:
+            return PreflightCheckResult(
+                name="symbol_precision_and_limits",
+                passed=False,
+                detail=f"No precision/limits data available for {symbol_str}",
+                supported=False,
+            )
+
+        violations: list[str] = []
+
+        if limits.min_amount is not None and order.quantity < limits.min_amount:
+            violations.append(f"quantity {order.quantity} < min_amount {limits.min_amount}")
+
+        if limits.max_amount is not None and order.quantity > limits.max_amount:
+            violations.append(f"quantity {order.quantity} > max_amount {limits.max_amount}")
+
+        if limits.min_notional is not None and order.limit_price is not None:
+            notional = order.quantity * order.limit_price
+            if notional < limits.min_notional:
+                violations.append(f"notional~{notional} < min_notional {limits.min_notional}")
+
+        if violations:
+            return PreflightCheckResult(
+                name="symbol_precision_and_limits",
+                passed=False,
+                detail="; ".join(violations),
+            )
+
+        checked = [
+            n
+            for n, v in (
+                ("min_amount", limits.min_amount),
+                ("max_amount", limits.max_amount),
+                ("min_notional", limits.min_notional),
+            )
+            if v is not None
+        ]
+        if not checked:
+            # Symbol-Eintrag existiert, aber alle relevanten Einzelwerte
+            # sind None (Exchange liefert precision, aber keine Limits,
+            # o.ae.) - dieselbe "nicht pruefbar"-Semantik wie beim
+            # komplett fehlenden Symbol-Eintrag oben.
+            return PreflightCheckResult(
+                name="symbol_precision_and_limits",
+                passed=False,
+                detail=f"Exchange reports no usable limits for {symbol_str}",
+                supported=False,
+            )
+        return PreflightCheckResult(
+            name="symbol_precision_and_limits",
+            passed=True,
+            detail=f"quantity={order.quantity} within limits ({', '.join(checked)} checked)",
         )
 
     # ------------------------------------------------------------------

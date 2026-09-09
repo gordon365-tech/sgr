@@ -43,7 +43,17 @@ class FakeCCXTExchange:
 
     def __init__(self, options: dict | None = None) -> None:
         self.options = options or {}
-        self.markets = {"BTC/USDT": {"maker": 0.0008, "taker": 0.001}}
+        self.markets = {
+            "BTC/USDT": {
+                "maker": 0.0008,
+                "taker": 0.001,
+                "precision": {"amount": 6, "price": 2},
+                "limits": {
+                    "amount": {"min": "0.0001", "max": "1000"},
+                    "cost": {"min": "10"},
+                },
+            }
+        }
         self.symbols = ["BTC/USDT", "ETH/USDT"]
         self.timeframes = {"1m": "1m", "1h": "1h"}
         self.has: dict[str, bool] = {}
@@ -296,6 +306,99 @@ class TestMarketData:
         await adapter.connect()
         info = await adapter.get_exchange_info()
         assert info.maker_fee == Decimal("0.001")
+
+    async def test_get_exchange_info_extracts_symbol_limits(self, adapter, monkeypatch):
+        install_fake_ccxt(monkeypatch)
+        await adapter.connect()
+        info = await adapter.get_exchange_info()
+
+        limits = info.symbol_limits["BTC/USDT"]
+        assert limits.amount_precision == 6
+        assert limits.price_precision == 2
+        assert limits.min_amount == Decimal("0.0001")
+        assert limits.max_amount == Decimal("1000")
+        assert limits.min_notional == Decimal("10")
+
+    async def test_get_exchange_info_symbol_limits_empty_dict_for_no_markets(
+        self, adapter, monkeypatch
+    ):
+        fake = FakeCCXTExchange()
+        fake.markets = {}
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+        info = await adapter.get_exchange_info()
+        assert info.symbol_limits == {}
+
+    async def test_get_exchange_info_symbol_limits_missing_fields_stay_none(
+        self, adapter, monkeypatch
+    ):
+        """Nicht jede Exchange/jedes Symbol liefert alle Precision/Limits-
+        Felder - fehlende Einzelwerte muessen None bleiben statt zu
+        einem Fehler zu fuehren oder das Symbol ganz auszulassen."""
+        fake = FakeCCXTExchange()
+        fake.markets = {"ETH/USDT": {"maker": 0.001, "taker": 0.001}}
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+        info = await adapter.get_exchange_info()
+
+        limits = info.symbol_limits["ETH/USDT"]
+        assert limits.amount_precision is None
+        assert limits.price_precision is None
+        assert limits.min_amount is None
+        assert limits.max_amount is None
+        assert limits.min_notional is None
+
+    async def test_get_exchange_info_symbol_limits_non_pair_symbols_skipped(
+        self, adapter, monkeypatch
+    ):
+        fake = FakeCCXTExchange()
+        fake.markets = {
+            "BTC/USDT": {"precision": {"amount": 6}},
+            "SOME_INDEX": {"precision": {"amount": 2}},  # kein "/" - kein handelbares Paar
+        }
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+        info = await adapter.get_exchange_info()
+
+        assert "BTC/USDT" in info.symbol_limits
+        assert "SOME_INDEX" not in info.symbol_limits
+
+    async def test_get_exchange_info_symbol_limits_malformed_entry_is_skipped(
+        self, adapter, monkeypatch
+    ):
+        """Eine unerwartete Struktur fuer EIN Symbol (z.B. limits ist ein
+        String statt ein Dict, seltener aber realer ccxt-Exchange-Quirk)
+        darf die Extraktion fuer alle anderen Symbole nicht verhindern."""
+        fake = FakeCCXTExchange()
+        fake.markets = {
+            "BTC/USDT": {
+                "precision": {"amount": 6, "price": 2},
+                "limits": {"amount": {"min": "0.0001"}},
+            },
+            "ETH/USDT": {"precision": "not-a-dict"},  # bricht .get() Aufruf
+        }
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+        info = await adapter.get_exchange_info()
+
+        assert "BTC/USDT" in info.symbol_limits
+        assert "ETH/USDT" not in info.symbol_limits
+
+    async def test_get_exchange_info_symbol_limits_bad_decimal_value_stays_none(
+        self, adapter, monkeypatch
+    ):
+        fake = FakeCCXTExchange()
+        fake.markets = {
+            "BTC/USDT": {
+                "precision": {"amount": 6},
+                "limits": {"amount": {"min": "not-a-number"}},
+            },
+        }
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+        info = await adapter.get_exchange_info()
+
+        assert info.symbol_limits["BTC/USDT"].min_amount is None
 
     async def test_get_exchange_info_bad_fee_value_uses_defaults(self, adapter, monkeypatch):
         fake = FakeCCXTExchange()
