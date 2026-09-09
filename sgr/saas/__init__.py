@@ -3,7 +3,7 @@
 from sgr.saas.auth import AuthService
 from sgr.saas.fees import PerformanceFeeEngine
 from sgr.saas.routers import apikey_router, auth_router, billing_router
-from sgr.saas.tenant import TenantManager, TenantSession, get_tenant_manager
+from sgr.saas.tenant import TenantManager, get_tenant_manager
 from sgr.saas.types import (
     BillingStatus,
     FeeStatus,
@@ -19,7 +19,6 @@ __all__ = [
     "AuthService",
     "PerformanceFeeEngine",
     "TenantManager",
-    "TenantSession",
     "get_tenant_manager",
     "SubscriptionTier",
     "BillingStatus",

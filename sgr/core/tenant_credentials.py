@@ -11,11 +11,12 @@ entsteht durch OS-Prozesstrennung (jeder Worker ist ein eigener
 Prozess mit eigener RiskEngine/PortfolioEngine/KillSwitch-Instanz),
 nicht durch In-Memory-Multiplexing im API-Prozess.
 
-Wiederverwendet dieselbe Entschluesselungslogik wie
-sgr.saas.tenant.TenantManager.get_exchange_adapter() (dort fuer den
-inzwischen nicht mehr zum Worker-Modell passenden Pro-Request-Ansatz
-in der API gedacht) - dieses Modul ist der worker-seitige Nachfolger
-fuer den lifespan()-Startup-Pfad, siehe sgr/api/main.py.
+Wiederverwendet dieselbe Entschluesselungslogik, die urspruenglich in
+sgr.saas.tenant.TenantManager.get_exchange_adapter() lag (dort fuer
+den inzwischen entfernten Pro-Request-Ansatz in der API, siehe
+sgr/saas/tenant.py Modul-Docstring) - dieses Modul ist der worker-
+seitige Nachfolger fuer den lifespan()-Startup-Pfad, siehe
+sgr/api/main.py.
 
 Der bestehende single-tenant .env-Pfad (config.credentials,
 config.tenant_id is None) bleibt unveraendert unberuehrt.

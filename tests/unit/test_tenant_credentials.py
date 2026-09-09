@@ -1,11 +1,12 @@
 """
 Tests für sgr.core.tenant_credentials.load_tenant_credentials().
 
-Mock-Muster analog zu tests/unit/test_tenant.py
-(TenantManager.get_exchange_adapter) - dieselbe DB-Read +
-get_cipher()-Entschlüsselungslogik, hier fuer den worker-seitigen
-lifespan()-Startup-Pfad (Commit 5, Option A) statt den Pro-Request-Pfad
-im API-Prozess.
+Mock-Muster analog zu tests/unit/test_tenant.py (verwendete urspruenglich
+dieselbe DB-Read + get_cipher()-Entschluesselungslogik wie
+TenantManager.get_exchange_adapter(), inzwischen entfernt, siehe
+sgr/saas/tenant.py Modul-Docstring) - hier fuer den worker-seitigen
+lifespan()-Startup-Pfad (Commit 5, Option A) statt den ehemaligen
+Pro-Request-Pfad im API-Prozess.
 """
 
 from __future__ import annotations
