@@ -717,6 +717,47 @@ class TestRiskEngineLimits:
         # Cleanup
         await risk_engine._kill_switch.reset("cleanup")
 
+    async def test_reject_close_signal_when_kill_switch_active(
+        self,
+        risk_engine: RiskEngine,
+        btc_symbol: Symbol,
+    ) -> None:
+        """Bewusste Design-Entscheidung (siehe Kommentar in
+        RiskEngine._evaluate_internal Schritt 1, 'Option A'): ein aktiver
+        Kill Switch blockiert AUSNAHMSLOS jedes Signal, auch
+        SignalDirection.CLOSE (reduzierende/schliessende Signale). Es gibt
+        bewusst KEINE Sonderbehandlung fuer reduzierende Signale in der
+        automatisierten Strategy-Pipeline - Positionsmanagement im Notfall
+        laeuft ausschliesslich ueber den separaten
+        KillSwitch.trigger(close_positions=True)-Pfad, nicht ueber diese
+        Pipeline. Dieser Test dokumentiert das Verhalten als beabsichtigt,
+        nicht als Luecke."""
+        close_signal = Signal(
+            timestamp=datetime.now(tz=UTC),
+            strategy_name="trend_v1",
+            symbol=btc_symbol,
+            direction=SignalDirection.CLOSE,
+            confidence=0.90,
+            regime=MarketRegime.TRENDING_UP,
+            size_hint=1.0,
+        )
+
+        await risk_engine.initialize()
+        await risk_engine._kill_switch.trigger("manual test")
+
+        assessment = await risk_engine.evaluate(
+            signal=close_signal,
+            open_positions=[],
+            portfolio_value=Decimal("100000"),
+            available_capital=Decimal("90000"),
+            current_price=Decimal("50000"),
+        )
+        assert assessment.decision == RiskDecision.REJECTED
+        assert "Kill switch" in (assessment.rejection_reason or "")
+
+        # Cleanup
+        await risk_engine._kill_switch.reset("cleanup")
+
     async def test_hard_limit_drawdown_triggers_kill_switch(
         self,
         risk_engine: RiskEngine,

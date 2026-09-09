@@ -195,6 +195,20 @@ class RiskEngine:
     ) -> RiskAssessment:
 
         # 1. Kill Switch Check (synchron, sofort)
+        #
+        # Bewusst KEINE Ausnahme fuer reduzierende/schliessende Signale
+        # (signal.direction == SignalDirection.CLOSE) - siehe Audit-
+        # Entscheidung (Option A): ein aktiver Kill Switch stoppt
+        # JEDE automatisierte Order-Erzeugung durch die Strategy-Pipeline,
+        # ausnahmslos. Positionsmanagement im Notfall laeuft ausschliesslich
+        # ueber den separaten, explizit ausgeloesten Pfad
+        # KillSwitch.trigger(close_positions=True) - siehe
+        # sgr/risk/kill_switch.py _close_all_positions() - nicht ueber
+        # diese automatisierte Signal-Pipeline. Ein reduzierendes Signal,
+        # das trotz aktivem Kill Switch durchkommt, waere ein Fall von
+        # "die Strategie-Logik entscheidet weiter", genau das soll ein
+        # Kill Switch verhindern, auch wenn die Intention (Risiko
+        # reduzieren) gutartig erscheint.
         if self._kill_switch.is_active:
             return self._reject(
                 signal.id,
