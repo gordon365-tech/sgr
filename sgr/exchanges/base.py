@@ -132,6 +132,68 @@ class SymbolLimits:
         self.min_notional = min_notional
 
 
+class MarketStatus:
+    """
+    Aktueller operativer Zustand einer Exchange (nicht statisch wie
+    ExchangeInfo - Status kann sich jederzeit aendern, z.B. waehrend
+    Wartungsfenstern).
+
+    is_online: True nur bei explizit von der Exchange gemeldetem "ok"-
+    Status. Ein unbekannter/fehlender Status-String gilt NICHT als
+    online (fail-closed fuer LIVE-Preflight-Zwecke) - siehe
+    _check_market_status in preflight.py.
+    """
+
+    __slots__ = ("exchange_id", "is_online", "raw_status", "fetched_at")
+
+    def __init__(
+        self,
+        exchange_id: ExchangeID,
+        is_online: bool,
+        raw_status: str | None,
+        fetched_at: datetime,
+    ) -> None:
+        self.exchange_id = exchange_id
+        self.is_online = is_online
+        self.raw_status = raw_status
+        self.fetched_at = fetched_at
+
+    def __repr__(self) -> str:
+        return (
+            f"MarketStatus({self.exchange_id.value}, "
+            f"online={self.is_online}, raw={self.raw_status!r})"
+        )
+
+
+class PositionModeInfo:
+    """
+    Hedge- vs. One-Way-Modus des verbundenen Trading-Accounts auf der
+    Exchange (z.B. Binance Futures dualSidePosition-Setting).
+
+    hedged=True bedeutet: Long und Short auf demselben Symbol koennen
+    gleichzeitig offen sein (getrennte Positionen). hedged=False (One-
+    Way) bedeutet: nur eine Netto-Position pro Symbol - eine Order in
+    Gegenrichtung reduziert/schliesst die bestehende Position, statt
+    eine zweite zu eroeffnen. Relevant fuer reduce_only-Order-Sicherheit
+    (siehe _check_position_mode_consistency in preflight.py).
+    """
+
+    __slots__ = ("exchange_id", "hedged", "fetched_at")
+
+    def __init__(
+        self,
+        exchange_id: ExchangeID,
+        hedged: bool,
+        fetched_at: datetime,
+    ) -> None:
+        self.exchange_id = exchange_id
+        self.hedged = hedged
+        self.fetched_at = fetched_at
+
+    def __repr__(self) -> str:
+        return f"PositionModeInfo({self.exchange_id.value}, hedged={self.hedged})"
+
+
 class ExchangeInfo:
     """Static exchange metadata (symbols, limits, fees)."""
 
@@ -347,6 +409,28 @@ class ExchangeAdapter(Protocol):
         """
         Fetch supported symbols, timeframes, fee structure.
         Cached internally – not fetched on every call.
+        """
+        ...
+
+    @abstractmethod
+    async def get_market_status(self) -> MarketStatus:
+        """
+        Aktueller operativer Zustand der Exchange (online/Wartung/Halt).
+        NICHT gecached (anders als get_exchange_info) - der Status kann
+        sich kurzfristig aendern, jeder Aufruf ist ein frischer Check.
+        Raises ExchangeError wenn der Status nicht ermittelt werden kann
+        (z.B. Exchange nicht erreichbar) - vom Aufrufer wie jeder andere
+        ExchangeError zu behandeln.
+        """
+        ...
+
+    @abstractmethod
+    async def get_position_mode(self) -> PositionModeInfo:
+        """
+        Hedge- vs. One-Way-Modus des verbundenen Trading-Accounts.
+        Raises NotSupportedFeatureError bei Spot-only Exchanges ohne
+        Positions-Konzept (z.B. Pionex) - analog zu get_positions() bei
+        Spot-Adaptern. Raises ExchangeError bei anderen Fehlern.
         """
         ...
 

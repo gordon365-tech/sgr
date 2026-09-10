@@ -38,7 +38,16 @@ from sgr.core.types import (
     Symbol,
     TradingMode,
 )
-from sgr.exchanges.base import Balance, ExchangeError, ExchangeInfo, RateLimitError, SymbolLimits
+from sgr.exchanges.base import (
+    Balance,
+    ExchangeError,
+    ExchangeInfo,
+    MarketStatus,
+    NotSupportedFeatureError,
+    PositionModeInfo,
+    RateLimitError,
+    SymbolLimits,
+)
 from sgr.execution.preflight import (
     NOT_SUPPORTED_CHECKS,
     PreflightResult,
@@ -111,6 +120,23 @@ def _make_exchange_info(
     )
 
 
+def _make_market_status(is_online: bool = True, raw_status: str | None = "ok") -> MarketStatus:
+    return MarketStatus(
+        exchange_id=ExchangeID.BINANCE,
+        is_online=is_online,
+        raw_status=raw_status,
+        fetched_at=datetime.now(tz=UTC),
+    )
+
+
+def _make_position_mode_info(hedged: bool = False) -> PositionModeInfo:
+    return PositionModeInfo(
+        exchange_id=ExchangeID.BINANCE,
+        hedged=hedged,
+        fetched_at=datetime.now(tz=UTC),
+    )
+
+
 @pytest.fixture
 def fake_kill_switch() -> MagicMock:
     ks = MagicMock()
@@ -124,8 +150,10 @@ def mock_pool() -> tuple[MagicMock, AsyncMock]:
     adapter = AsyncMock()
     adapter.ping = AsyncMock(return_value=12.5)
     adapter.get_exchange_info = AsyncMock(return_value=_make_exchange_info())
+    adapter.get_market_status = AsyncMock(return_value=_make_market_status())
     adapter.get_balance = AsyncMock(return_value=_make_balance())
     adapter.get_positions = AsyncMock(return_value=[])
+    adapter.get_position_mode = AsyncMock(return_value=_make_position_mode_info())
     pool.get = MagicMock(return_value=adapter)
     return pool, adapter
 
@@ -257,9 +285,11 @@ class TestLiveModeHappyPath:
             "reduce_only_flag_present",
             "kill_switch_inactive",
             "connection_and_clock",
+            "market_status",
             "symbol_availability",
             "balance_and_available_capital",
             "leverage_within_limit",
+            "position_mode_consistency",
             "reduce_only_position_safety",
             "max_order_notional_double_check",
         }
@@ -333,6 +363,177 @@ class TestLiveCredentialsAndConnection:
 
         assert result.eligible is False
         assert any(c.name == "connection_and_clock" for c in result.failures)
+
+
+# ---------------------------------------------------------------------------
+# LIVE Mode: Market Status
+# ---------------------------------------------------------------------------
+
+
+class TestLiveMarketStatus:
+    async def test_market_online_passes(
+        self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
+    ) -> None:
+        _pool, adapter = mock_pool
+        adapter.get_market_status = AsyncMock(return_value=_make_market_status(is_online=True))
+        validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
+
+        result = await validator.validate(_make_order(trading_mode=TradingMode.LIVE))
+
+        assert result.eligible is True
+        assert any(c.name == "market_status" and c.passed for c in result.checks)
+
+    async def test_market_under_maintenance_blocks(
+        self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
+    ) -> None:
+        _pool, adapter = mock_pool
+        adapter.get_market_status = AsyncMock(
+            return_value=_make_market_status(is_online=False, raw_status="maintenance")
+        )
+        validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
+
+        result = await validator.validate(_make_order(trading_mode=TradingMode.LIVE))
+
+        assert result.eligible is False
+        failure = next(c for c in result.failures if c.name == "market_status")
+        assert "maintenance" in failure.detail
+
+    async def test_unknown_status_string_is_treated_as_offline(
+        self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
+    ) -> None:
+        """Fail-closed: nur ein explizites 'ok' zaehlt als online, siehe
+        MarketStatus Docstring."""
+        _pool, adapter = mock_pool
+        adapter.get_market_status = AsyncMock(
+            return_value=_make_market_status(is_online=False, raw_status="unknown_state")
+        )
+        validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
+
+        result = await validator.validate(_make_order(trading_mode=TradingMode.LIVE))
+
+        assert result.eligible is False
+
+    async def test_fetch_failure_blocks(
+        self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
+    ) -> None:
+        _pool, adapter = mock_pool
+        adapter.get_market_status = AsyncMock(
+            side_effect=ExchangeError("down", exchange="binance")
+        )
+        validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
+
+        result = await validator.validate(_make_order(trading_mode=TradingMode.LIVE))
+
+        assert result.eligible is False
+        assert any(c.name == "market_status" for c in result.failures)
+
+    async def test_not_supported_feature_marks_supported_false_not_a_failure(
+        self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
+    ) -> None:
+        """Exchange ohne fetchStatus-Unterstuetzung (z.B. manche Spot-only
+        Exchanges) blockiert die Order NICHT - analog zu
+        symbol_precision_and_limits bei fehlenden Limits-Daten."""
+        _pool, adapter = mock_pool
+        adapter.get_market_status = AsyncMock(
+            side_effect=NotSupportedFeatureError("pionex", "fetchStatus")
+        )
+        validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
+
+        result = await validator.validate(_make_order(trading_mode=TradingMode.LIVE))
+
+        market_status_check = next(c for c in result.checks if c.name == "market_status")
+        assert market_status_check.supported is False
+        assert market_status_check not in result.failures
+
+
+# ---------------------------------------------------------------------------
+# LIVE Mode: Position Mode Consistency
+# ---------------------------------------------------------------------------
+
+
+class TestLivePositionModeConsistency:
+    async def test_non_reduce_only_order_skips_position_mode_fetch(
+        self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
+    ) -> None:
+        """Unnoetige Exchange-Calls vermeiden: position_mode wird nur bei
+        reduce_only=True tatsaechlich abgefragt."""
+        _pool, adapter = mock_pool
+        validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
+
+        result = await validator.validate(
+            _make_order(trading_mode=TradingMode.LIVE, reduce_only=False)
+        )
+
+        assert result.eligible is True
+        adapter.get_position_mode.assert_not_awaited()
+        check = next(c for c in result.checks if c.name == "position_mode_consistency")
+        assert check.passed is True
+
+    async def test_reduce_only_order_fetches_position_mode(
+        self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
+    ) -> None:
+        _pool, adapter = mock_pool
+        adapter.positions = [_make_position(quantity=Decimal("1.0"))]
+        adapter.get_positions = AsyncMock(return_value=adapter.positions)
+        adapter.get_position_mode = AsyncMock(
+            return_value=_make_position_mode_info(hedged=True)
+        )
+        validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
+
+        result = await validator.validate(
+            _make_order(
+                trading_mode=TradingMode.LIVE, reduce_only=True, quantity=Decimal("0.5")
+            )
+        )
+
+        adapter.get_position_mode.assert_awaited_once()
+        check = next(c for c in result.checks if c.name == "position_mode_consistency")
+        assert check.passed is True
+        assert "hedged=True" in check.detail
+
+    async def test_fetch_failure_blocks(
+        self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
+    ) -> None:
+        _pool, adapter = mock_pool
+        adapter.positions = [_make_position(quantity=Decimal("1.0"))]
+        adapter.get_positions = AsyncMock(return_value=adapter.positions)
+        adapter.get_position_mode = AsyncMock(
+            side_effect=ExchangeError("down", exchange="binance")
+        )
+        validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
+
+        result = await validator.validate(
+            _make_order(
+                trading_mode=TradingMode.LIVE, reduce_only=True, quantity=Decimal("0.5")
+            )
+        )
+
+        assert result.eligible is False
+        assert any(c.name == "position_mode_consistency" for c in result.failures)
+
+    async def test_not_supported_feature_marks_supported_false_not_a_failure(
+        self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
+    ) -> None:
+        """Spot-only Exchange (z.B. Pionex) ohne Positions-Konzept
+        blockiert reduce_only-Orders nicht ueber diesen Check - analog
+        zu market_status."""
+        _pool, adapter = mock_pool
+        adapter.positions = [_make_position(quantity=Decimal("1.0"))]
+        adapter.get_positions = AsyncMock(return_value=adapter.positions)
+        adapter.get_position_mode = AsyncMock(
+            side_effect=NotSupportedFeatureError("pionex", "fetchPositionMode")
+        )
+        validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
+
+        result = await validator.validate(
+            _make_order(
+                trading_mode=TradingMode.LIVE, reduce_only=True, quantity=Decimal("0.5")
+            )
+        )
+
+        check = next(c for c in result.checks if c.name == "position_mode_consistency")
+        assert check.supported is False
+        assert check not in result.failures
 
 
 # ---------------------------------------------------------------------------

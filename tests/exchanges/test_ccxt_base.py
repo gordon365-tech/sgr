@@ -108,6 +108,8 @@ class FakeCCXTExchange:
             }
         )
         self.fetch_positions = AsyncMock(return_value=[])
+        self.fetch_status = AsyncMock(return_value={"status": "ok"})
+        self.fetch_position_mode = AsyncMock(return_value={"hedged": False})
         self.create_order = AsyncMock(
             return_value={
                 "id": "12345",
@@ -635,6 +637,100 @@ class TestAccount:
         await adapter.connect()
         with pytest.raises(Exception):  # noqa: B017
             await adapter.get_positions()
+
+    async def test_get_market_status_returns_online(self, adapter, monkeypatch):
+        fake = FakeCCXTExchange()
+        fake.has = {"fetchStatus": True}
+        fake.fetch_status = AsyncMock(return_value={"status": "ok"})
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+        status = await adapter.get_market_status()
+        assert status.is_online is True
+        assert status.raw_status == "ok"
+
+    async def test_get_market_status_returns_offline_on_maintenance(
+        self, adapter, monkeypatch
+    ):
+        fake = FakeCCXTExchange()
+        fake.has = {"fetchStatus": True}
+        fake.fetch_status = AsyncMock(return_value={"status": "maintenance"})
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+        status = await adapter.get_market_status()
+        assert status.is_online is False
+        assert status.raw_status == "maintenance"
+
+    async def test_get_market_status_not_supported_raises(self, adapter, monkeypatch):
+        fake = FakeCCXTExchange()
+        fake.has = {"fetchStatus": False}
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+        with pytest.raises(NotSupportedFeatureError):
+            await adapter.get_market_status()
+        fake.fetch_status.assert_not_called()
+
+    async def test_get_market_status_maps_error(self, adapter, monkeypatch):
+        fake = FakeCCXTExchange()
+        fake.has = {"fetchStatus": True}
+        fake.fetch_status = AsyncMock(side_effect=ccxt.NetworkError("x"))
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+        with pytest.raises(ExchangeConnectionError):
+            await adapter.get_market_status()
+
+    async def test_get_market_status_maps_generic_error(self, adapter, monkeypatch):
+        fake = FakeCCXTExchange()
+        fake.has = {"fetchStatus": True}
+        fake.fetch_status = AsyncMock(side_effect=TypeError("weird"))
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+        with pytest.raises(Exception):  # noqa: B017
+            await adapter.get_market_status()
+
+    async def test_get_position_mode_returns_hedged(self, adapter, monkeypatch):
+        fake = FakeCCXTExchange()
+        fake.has = {"fetchPositionMode": True}
+        fake.fetch_position_mode = AsyncMock(return_value={"hedged": True})
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+        mode = await adapter.get_position_mode()
+        assert mode.hedged is True
+
+    async def test_get_position_mode_returns_one_way(self, adapter, monkeypatch):
+        fake = FakeCCXTExchange()
+        fake.has = {"fetchPositionMode": True}
+        fake.fetch_position_mode = AsyncMock(return_value={"hedged": False})
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+        mode = await adapter.get_position_mode()
+        assert mode.hedged is False
+
+    async def test_get_position_mode_not_supported_raises(self, adapter, monkeypatch):
+        fake = FakeCCXTExchange()
+        fake.has = {"fetchPositionMode": False}
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+        with pytest.raises(NotSupportedFeatureError):
+            await adapter.get_position_mode()
+        fake.fetch_position_mode.assert_not_called()
+
+    async def test_get_position_mode_maps_error(self, adapter, monkeypatch):
+        fake = FakeCCXTExchange()
+        fake.has = {"fetchPositionMode": True}
+        fake.fetch_position_mode = AsyncMock(side_effect=ccxt.NetworkError("x"))
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+        with pytest.raises(ExchangeConnectionError):
+            await adapter.get_position_mode()
+
+    async def test_get_position_mode_maps_generic_error(self, adapter, monkeypatch):
+        fake = FakeCCXTExchange()
+        fake.has = {"fetchPositionMode": True}
+        fake.fetch_position_mode = AsyncMock(side_effect=TypeError("weird"))
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+        with pytest.raises(Exception):  # noqa: B017
+            await adapter.get_position_mode()
 
 
 # ---------------------------------------------------------------------

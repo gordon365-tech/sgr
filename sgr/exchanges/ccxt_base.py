@@ -65,9 +65,11 @@ from sgr.exchanges.base import (
     ExchangeInfo,
     ExchangeMaintenanceError,
     InsufficientFundsError,
+    MarketStatus,
     NotSupportedFeatureError,
     OpenInterest,
     OrderNotFoundError,
+    PositionModeInfo,
     RateLimitError,
     SymbolLimits,
     SymbolNotFoundError,
@@ -498,6 +500,61 @@ class CCXTBaseAdapter:
                 )
 
             return positions
+        except ExchangeError:
+            raise
+        except Exception as e:
+            raise self._map_error(e) from e
+
+    async def get_market_status(self) -> MarketStatus:
+        """
+        Fragt ccxt's fetch_status() ab (kein Cache - anders als
+        get_exchange_info, siehe Protocol-Docstring in base.py). Nicht
+        jede Exchange unterstuetzt fetchStatus; wird das ueber ccxt's
+        has-Dict signalisiert, wirft dieser Adapter NotSupportedFeatureError
+        statt einen erfundenen "online"-Status vorzutaeuschen - der
+        Preflight-Check behandelt das analog zu Spot-only-Luecken bei
+        get_positions() als supported=False, nicht als Fehlschlag.
+        """
+        self._require_connected()
+        has = getattr(self._ccxt, "has", {}) or {}
+        if has.get("fetchStatus") is False:
+            raise NotSupportedFeatureError(self.exchange_id.value, "fetchStatus")
+        try:
+            raw = await self._ccxt.fetch_status()
+            status_str = raw.get("status")
+            return MarketStatus(
+                exchange_id=self.exchange_id,
+                is_online=status_str == "ok",
+                raw_status=status_str,
+                fetched_at=datetime.now(tz=UTC),
+            )
+        except ExchangeError:
+            raise
+        except Exception as e:
+            raise self._map_error(e) from e
+
+    async def get_position_mode(self) -> PositionModeInfo:
+        """
+        Fragt ccxt's fetch_position_mode() ab - Hedge- vs. One-Way-Modus
+        des Accounts (z.B. Binance Futures dualSidePosition). Spot-only
+        Exchanges (z.B. Pionex) kennen dieses Konzept nicht: analog zu
+        get_positions() wird das ueber ccxt's has-Dict erkannt, hier
+        aber als NotSupportedFeatureError geworfen statt einer leeren
+        Liste - Hedge/One-Way ist eine binaere Account-Eigenschaft, ein
+        "leeres" Ergebnis waere nicht sinnvoll interpretierbar (anders
+        als "keine offenen Positionen").
+        """
+        self._require_connected()
+        has = getattr(self._ccxt, "has", {}) or {}
+        if has.get("fetchPositionMode") is False:
+            raise NotSupportedFeatureError(self.exchange_id.value, "fetchPositionMode")
+        try:
+            raw = await self._ccxt.fetch_position_mode()
+            return PositionModeInfo(
+                exchange_id=self.exchange_id,
+                hedged=bool(raw.get("hedged", False)),
+                fetched_at=datetime.now(tz=UTC),
+            )
         except ExchangeError:
             raise
         except Exception as e:

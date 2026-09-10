@@ -47,28 +47,37 @@ Fail-Closed vs. Fail-Open:
 Bekannte, bewusst nicht implementierte Prüfpunkte (Architektur-Lücke,
 kein Vortäuschen von Daten, die die bestehende Exchange-Abstraktion
 nicht liefert - siehe sgr/exchanges/base.py ExchangeAdapter Protocol):
-    - API Permissions (z.B. "kann dieser Key Orders platzieren"): kein
-      Permissions-Introspektions-Endpoint im Adapter-Interface.
-    - Market Status (offen/pausiert/Halt): kein Status-Feld in
-      ExchangeInfo oder TickerData.
-    - Position Mode (Hedge vs. One-Way): kein entsprechendes Feld in
-      Position oder im Adapter-Interface.
+    - API Permissions (z.B. "kann dieser Key Orders platzieren"): ccxt
+      bietet keinen einheitlichen fetchPermissions-Endpoint (weder
+      generisch noch Binance-spezifisch - verifiziert gegen ccxt
+      has-Dict). Kein Permissions-Introspektions-Endpoint im
+      Adapter-Interface möglich, ohne Daten zu erfinden.
+    - Market Status (offen/pausiert/Halt): SEIT diesem Commit
+      implementiert (siehe _check_market_status unten) - ccxt's
+      fetch_status() liefert einen echten, ungecachten Live-Status pro
+      Exchange (verifiziert: von Binance unterstützt). Nicht mehr Teil
+      von NOT_SUPPORTED_CHECKS.
+    - Position Mode (Hedge vs. One-Way): SEIT diesem Commit implementiert
+      (siehe _check_position_mode_consistency unten) - ccxt's
+      fetch_position_mode() liefert den echten Account-Modus
+      (verifiziert: von Binance unterstützt, Spot-only Exchanges wie
+      Pionex werfen NotSupportedFeatureError statt eines erfundenen
+      Werts). Nicht mehr Teil von NOT_SUPPORTED_CHECKS.
     - Exchange Precision / Tick Size / exchangeseitige Min-Max-Order-
-      Limits: SEIT diesem Commit implementiert (siehe
-      _check_symbol_precision_and_limits unten) - ccxt's bereits
-      geladenes markets-Dict enthaelt precision/limits pro Symbol
-      (kein zusaetzlicher Netzwerk-Call), diese werden jetzt ueber
-      ExchangeInfo.symbol_limits (sgr/exchanges/base.py SymbolLimits)
-      exponiert statt verworfen. Nicht mehr Teil von
-      NOT_SUPPORTED_CHECKS.
+      Limits: implementiert (siehe _check_symbol_precision_and_limits
+      unten) - ccxt's bereits geladenes markets-Dict enthaelt
+      precision/limits pro Symbol (kein zusaetzlicher Netzwerk-Call),
+      diese werden ueber ExchangeInfo.symbol_limits (sgr/exchanges/
+      base.py SymbolLimits) exponiert statt verworfen. Nicht mehr Teil
+      von NOT_SUPPORTED_CHECKS.
     - Proaktives Rate-Limit-Budget (verbleibende Requests/Fenster):
-      kein entsprechender Endpoint. RateLimitError wird reaktiv über
-      ping() erkannt, nicht proaktiv vor dem Call abgefragt.
-    Diese Punkte sind hier absichtlich als "not_supported" markiert statt
-    grün simuliert zu werden - siehe _NOT_SUPPORTED_CHECKS. Eine spätere
-    Erweiterung des ExchangeAdapter-Interface (analog zu einer Deferred-
-    Findings-Entscheidung) ist die richtige Stelle dafür, nicht diese
-    Preflight-Validierung.
+      kein entsprechender Endpoint in ccxt. RateLimitError wird reaktiv
+      über ping() erkannt, nicht proaktiv vor dem Call abgefragt.
+    Diese verbleibenden zwei Punkte sind hier absichtlich als
+    "not_supported" markiert statt grün simuliert zu werden - siehe
+    NOT_SUPPORTED_CHECKS. Eine spätere Erweiterung des ExchangeAdapter-
+    Interface (analog zu einer Deferred-Findings-Entscheidung) ist die
+    richtige Stelle dafür, nicht diese Preflight-Validierung.
 """
 
 from __future__ import annotations
@@ -78,7 +87,7 @@ from dataclasses import dataclass, field
 from sgr.core.config import get_config
 from sgr.core.logging import get_logger
 from sgr.core.types import OrderRequest, Position, TradingMode
-from sgr.exchanges.base import ExchangeAdapter, ExchangeError
+from sgr.exchanges.base import ExchangeAdapter, ExchangeError, NotSupportedFeatureError
 from sgr.exchanges.factory import ExchangePool
 from sgr.risk.kill_switch import get_kill_switch
 
@@ -89,8 +98,6 @@ log = get_logger(__name__)
 # ausgewiesen - siehe Modul-Docstring für Begründung je Punkt.
 NOT_SUPPORTED_CHECKS: tuple[str, ...] = (
     "api_permissions",
-    "market_status",
-    "position_mode",
     "rate_limit_budget",
 )
 
@@ -202,10 +209,12 @@ class PreflightValidator:
             return result
 
         result.checks.append(await self._check_connection_and_clock(adapter))
+        result.checks.append(await self._check_market_status(adapter))
         result.checks.append(await self._check_symbol_availability(adapter, order))
         result.checks.append(await self._check_symbol_precision_and_limits(adapter, order))
         result.checks.append(await self._check_balance_and_capital(adapter, order))
         result.checks.append(await self._check_leverage(adapter, order))
+        result.checks.append(await self._check_position_mode_consistency(adapter, order))
         result.checks.append(await self._check_reduce_only_against_position(adapter, order))
         result.checks.append(self._check_max_order_notional(order))
 
@@ -297,6 +306,51 @@ class PreflightValidator:
             name="connection_and_clock",
             passed=True,
             detail=f"latency={latency_ms:.1f}ms",
+        )
+
+    # ------------------------------------------------------------------
+    # Checks - Market Status (offen/pausiert/Halt)
+    # ------------------------------------------------------------------
+
+    async def _check_market_status(self, adapter: ExchangeAdapter) -> PreflightCheckResult:
+        """
+        Prueft den aktuellen, ungecachten operativen Zustand der Exchange
+        (siehe MarketStatus in sgr/exchanges/base.py). Faengt Wartungs-
+        fenster/Ausfaelle ab, BEVOR eine Order gesendet wird, statt sie
+        erst als ExchangeMaintenanceError beim tatsaechlichen
+        place_order()-Call zu erleben.
+
+        Analog zu _check_symbol_precision_and_limits: fehlende
+        Unterstuetzung (NotSupportedFeatureError, z.B. Exchange ohne
+        fetchStatus) wird als supported=False markiert, nicht als
+        Fehlschlag - eine Exchange, die diese Information schlicht
+        nicht liefert, ist kein Grund, die Order zu blockieren.
+        """
+        try:
+            status = await adapter.get_market_status()
+        except NotSupportedFeatureError:
+            return PreflightCheckResult(
+                name="market_status",
+                passed=False,
+                detail="Exchange does not support market status introspection",
+                supported=False,
+            )
+        except ExchangeError as e:
+            return PreflightCheckResult(
+                name="market_status",
+                passed=False,
+                detail=f"Could not fetch market status: {e}",
+            )
+        if not status.is_online:
+            return PreflightCheckResult(
+                name="market_status",
+                passed=False,
+                detail=f"Exchange not online (status={status.raw_status!r})",
+            )
+        return PreflightCheckResult(
+            name="market_status",
+            passed=True,
+            detail=f"status={status.raw_status!r}",
         )
 
     # ------------------------------------------------------------------
@@ -507,6 +561,60 @@ class PreflightValidator:
             name="leverage_within_limit",
             passed=True,
             detail=f"leverage={existing.leverage} <= max {max_leverage}",
+        )
+
+    # ------------------------------------------------------------------
+    # Checks - Punkt 22: Reduce Only gegen tatsächliche Position
+    # ------------------------------------------------------------------
+
+    async def _check_position_mode_consistency(
+        self, adapter: ExchangeAdapter, order: OrderRequest
+    ) -> PreflightCheckResult:
+        """
+        Prueft, dass reduce_only-Orders nur in einem Kontext gesendet
+        werden, in dem "reduce" ueberhaupt eindeutig definiert ist.
+
+        In Hedge-Mode (hedged=True) kann eine Exchange gleichzeitig eine
+        Long- UND eine Short-Position auf demselben Symbol fuehren -
+        reduce_only ist dort nur sicher interpretierbar, wenn zusaetzlich
+        die Order-Seite (order.side) gegen die jeweils passende Position
+        geprueft wird (das macht bereits _check_reduce_only_against_position
+        nachgelagert). Dieser Check hier stellt NUR sicher, dass der
+        Position-Mode selbst ermittelbar ist, bevor reduce_only vertraut
+        wird - in One-Way-Mode (hedged=False) ist "reduce" eindeutig
+        (es gibt nur eine Netto-Position pro Symbol), daher wird dort
+        nichts weiter geprueft.
+
+        Analog zu den anderen neuen Checks: NotSupportedFeatureError
+        (z.B. Pionex Spot-only) wird als supported=False markiert, kein
+        Fehlschlag - und laeuft nur fuer reduce_only-Orders ueberhaupt,
+        um unnoetige Exchange-Calls bei regulaeren Orders zu vermeiden.
+        """
+        if not order.reduce_only:
+            return PreflightCheckResult(
+                name="position_mode_consistency",
+                passed=True,
+                detail="Not a reduce-only order - position mode irrelevant",
+            )
+        try:
+            mode = await adapter.get_position_mode()
+        except NotSupportedFeatureError:
+            return PreflightCheckResult(
+                name="position_mode_consistency",
+                passed=False,
+                detail="Exchange does not support position mode introspection",
+                supported=False,
+            )
+        except ExchangeError as e:
+            return PreflightCheckResult(
+                name="position_mode_consistency",
+                passed=False,
+                detail=f"Could not fetch position mode: {e}",
+            )
+        return PreflightCheckResult(
+            name="position_mode_consistency",
+            passed=True,
+            detail=f"hedged={mode.hedged} (reduce_only validated per-position downstream)",
         )
 
     # ------------------------------------------------------------------

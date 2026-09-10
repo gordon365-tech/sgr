@@ -36,7 +36,9 @@ from sgr.exchanges.base import (
     Balance,
     ExchangeError,
     ExchangeInfo,
+    MarketStatus,
     OpenInterest,
+    PositionModeInfo,
     TickerData,
 )
 from sgr.exchanges.ccxt_base import CCXTBaseAdapter
@@ -81,6 +83,8 @@ class MockExchangeAdapter(CCXTBaseAdapter):
         self.balance_usdt: Decimal = Decimal("10000")
         self.positions: list[Position] = []
         self.order_fill_status: OrderStatus = OrderStatus.FILLED
+        self.market_is_online: bool = True
+        self.position_mode_hedged: bool = False
 
         # Error injection
         self._next_error: ExchangeError | None = None
@@ -130,6 +134,34 @@ class MockExchangeAdapter(CCXTBaseAdapter):
             timeframes=["1m", "5m", "15m", "1h", "4h", "1d"],
             maker_fee=Decimal("0.001"),
             taker_fee=Decimal("0.001"),
+            fetched_at=datetime.now(tz=UTC),
+        )
+
+    async def get_market_status(self) -> MarketStatus:
+        """
+        Konfigurierbar ueber self.market_is_online (Default True) fuer
+        Tests, die Wartungsfenster/Ausfaelle simulieren wollen - siehe
+        tests/unit/test_preflight.py _check_market_status Tests.
+        """
+        await self._maybe_raise()
+        return MarketStatus(
+            exchange_id=self.exchange_id,
+            is_online=self.market_is_online,
+            raw_status="ok" if self.market_is_online else "maintenance",
+            fetched_at=datetime.now(tz=UTC),
+        )
+
+    async def get_position_mode(self) -> PositionModeInfo:
+        """
+        Konfigurierbar ueber self.position_mode_hedged (Default False,
+        One-Way - der ueberwiegend genutzte Modus) - siehe
+        tests/unit/test_preflight.py _check_position_mode_consistency
+        Tests.
+        """
+        await self._maybe_raise()
+        return PositionModeInfo(
+            exchange_id=self.exchange_id,
+            hedged=self.position_mode_hedged,
             fetched_at=datetime.now(tz=UTC),
         )
 
