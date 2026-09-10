@@ -47,6 +47,7 @@ from sgr.exchanges.factory import ExchangePool
 from sgr.market_data.feature_engineering import FeatureEngineer
 from sgr.market_data.feature_store import FeatureStore
 from sgr.market_data.gap_detector import GapDetector
+from sgr.market_data.ticker_cache import publish_ticker
 from sgr.market_data.types import DataGap
 
 log = get_logger(__name__)
@@ -193,6 +194,16 @@ class SymbolFeed:
                 features = self._engineer.compute(self._candle_buffer)
                 await self._store.save(features)
 
+                # Ticker-Cache aktualisieren (siehe ticker_cache.py
+                # Modul-Docstring: best-effort, teilt sich die Redis-
+                # Verbindung des FeatureStore statt einer eigenen
+                # Verbindung/Poll-Schleife). Ein Fehlschlag hier darf
+                # den bereits erfolgreichen Feature-Update-Pfad nicht
+                # beeinträchtigen - publish_ticker() ist selbst
+                # fail-safe, zusätzlich hier noch defensiv umschlossen,
+                # falls get_ticker() selbst wirft (z.B. Rate Limit).
+                await self._update_ticker_cache(pool)
+
                 log.debug(
                     "market_data.feed.updated",
                     symbol=self.symbol,
@@ -217,6 +228,35 @@ class SymbolFeed:
                 )
 
         return False
+
+    async def _update_ticker_cache(self, pool: ExchangePool) -> None:
+        """
+        Holt den aktuellen Ticker (bid/ask/last/volume_24h) und schreibt
+        ihn best-effort in den Redis-Ticker-Cache (siehe
+        sgr/market_data/ticker_cache.py Modul-Docstring).
+
+        Bewusst getrennt von der eigentlichen Candle/Feature-Logik in
+        update(): ein Fehler hier (Exchange-Error, Rate Limit, Redis
+        down) darf niemals dazu führen, dass ein bereits erfolgreiches
+        Candle-Update als fehlgeschlagen gilt oder der Poll-Loop
+        eskaliert - lediglich der Ticker-Cache bleibt dann veraltet
+        (TTL-Ablauf macht das für Leser sichtbar, siehe
+        read_ticker_from_redis Docstring).
+        """
+        redis_client = self._store.redis_client
+        if redis_client is None:
+            return
+        try:
+            adapter = pool.get(self.exchange_id, self.trading_mode)
+            ticker = await adapter.get_ticker(self.symbol)
+            await publish_ticker(redis_client, ticker)
+        except Exception as e:
+            log.warning(
+                "market_data.feed.ticker_cache_update_failed",
+                symbol=self.symbol,
+                timeframe=self.timeframe,
+                error=str(e),
+            )
 
     async def _handle_gaps(self, gaps: list[DataGap], pool: ExchangePool) -> None:
         """

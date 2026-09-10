@@ -4,16 +4,17 @@ SGR Market Data Router
 /features/{symbol}: bereits Redis-nativ (FeatureStore), keine Änderung
 nötig für die sgr-api Read-Only-Zielarchitektur.
 
-/ticker/{symbol}: TEMPORÄR AUSSER BETRIEB (501). Der bisherige Code rief
-einen Live-Exchange-Adapter direkt aus dem API-Prozess auf (echter
-Netzwerk-Call zu Pionex/Binance) - das ist kein bloßes app.state-
-Lesbarkeitsproblem, sondern ein Architekturbruch: die API darf laut
-Zielbild keine Live-Exchange-Calls mehr machen. Es existiert noch kein
-Redis-Cache für rohe Ticker-Daten (nur FeatureStore für BERECHNETE
-Features, keine Rohdaten wie bid/ask/volume_24h). Ein FeatureSet.close
-als Ersatz auszugeben wäre ein stiller Contract-Bruch (bid/ask/volume
-könnten nicht befüllt werden). Der Ticker-Cache im Worker ist daher ein
-eigener, fokussierter Folge-Commit - siehe Gap-Analyse zu Commit 3.
+/ticker/{symbol}: liest aus dem Redis-Ticker-Cache (sgr/market_data/
+ticker_cache.py), geschrieben von sgr-worker (SymbolFeed._update_ticker_cache,
+siehe sgr/market_data/engine.py). Vor diesem Cache rief der Endpunkt einen
+Live-Exchange-Adapter direkt aus dem API-Prozess auf - seit der
+sgr-api/sgr-worker-Trennung (Commit 4) nicht mehr erlaubt (die API besitzt
+keinen eigenen ExchangePool mehr). Liefert 404, wenn noch kein Ticker
+für dieses Symbol im Cache liegt (z.B. Symbol nicht subscribed, oder der
+Worker hat seit über 60s keinen neuen Ticker geschrieben - TTL-Ablauf,
+siehe read_ticker_from_redis Docstring) - NICHT 501, da die Funktionalität
+jetzt existiert, nur eben (noch) keine Daten für dieses spezifische Symbol
+vorliegen.
 """
 
 from __future__ import annotations
@@ -21,9 +22,16 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from redis.asyncio import Redis
 
-from sgr.api.dependencies import TokenData, get_feature_store_connection, require_auth
+from sgr.api.dependencies import (
+    TokenData,
+    get_feature_store_connection,
+    get_redis_client,
+    require_auth,
+)
 from sgr.market_data.feature_store import FeatureStore
+from sgr.market_data.ticker_cache import read_ticker_from_redis
 
 router = APIRouter()
 
@@ -32,24 +40,26 @@ router = APIRouter()
 async def get_ticker(
     symbol: str,
     user: Annotated[TokenData, Depends(require_auth)],
+    redis_client: Annotated[Redis, Depends(get_redis_client)],
 ) -> dict:
     """
-    Aktueller Ticker für ein Symbol.
-
-    Noch nicht auf die sgr-api Read-Only-Zielarchitektur migriert (siehe
-    Modul-Docstring) - liefert bewusst 501 statt live einen Exchange-
-    Adapter aus der API heraus aufzurufen oder erfundene/unvollständige
-    Daten zurückzugeben.
+    Aktueller Ticker für ein Symbol, aus dem Redis-Cache (siehe
+    Modul-Docstring). symbol wird wie bei /features/{symbol} normalisiert
+    (z.B. "btc-usdt" -> "BTC/USDT"), da SymbolFeed intern mit dem
+    ccxt-Symbolformat schreibt (siehe engine.py: get_ticker(self.symbol)).
     """
-    raise HTTPException(
-        status_code=501,
-        detail=(
-            "Ticker endpoint not yet migrated to the read-only API "
-            "architecture. Live exchange calls from the API process are "
-            "no longer permitted; a Redis-backed ticker cache written by "
-            "sgr-worker is planned as a follow-up."
-        ),
-    )
+    normalized_symbol = symbol.upper().replace("-", "/")
+    ticker = await read_ticker_from_redis(redis_client, normalized_symbol)
+    if ticker is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "No ticker available for this symbol yet. Either the symbol "
+                "is not subscribed by sgr-worker, or the cached value has "
+                "expired (worker may be down)."
+            ),
+        )
+    return ticker
 
 
 @router.get("/features/{symbol}")

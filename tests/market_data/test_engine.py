@@ -43,10 +43,19 @@ def make_candles(n: int, start: datetime | None = None, step_minutes: int = 60) 
 
 
 class FakeAdapter:
-    def __init__(self, ohlcv_responses: list | None = None, raises: Exception | None = None):
+    def __init__(
+        self,
+        ohlcv_responses: list | None = None,
+        raises: Exception | None = None,
+        ticker: object | None = None,
+        ticker_raises: Exception | None = None,
+    ):
         self._responses = ohlcv_responses or []
         self._raises = raises
         self.calls: list[dict] = []
+        self._ticker = ticker
+        self._ticker_raises = ticker_raises
+        self.ticker_calls: list[str] = []
 
     async def get_ohlcv(self, symbol, timeframe, since=None, limit=None):
         self.calls.append(
@@ -58,6 +67,12 @@ class FakeAdapter:
             return self._responses.pop(0)
         return []
 
+    async def get_ticker(self, symbol):
+        self.ticker_calls.append(symbol)
+        if self._ticker_raises:
+            raise self._ticker_raises
+        return self._ticker
+
 
 class FakePool:
     def __init__(self, adapter: FakeAdapter):
@@ -68,8 +83,9 @@ class FakePool:
 
 
 class FakeFeatureStore:
-    def __init__(self):
+    def __init__(self, redis_client: object | None = None):
         self._redis = None
+        self._injected_redis_client = redis_client
         self.saved: list[FeatureSet] = []
         self.connected = False
         self.closed = False
@@ -83,6 +99,13 @@ class FakeFeatureStore:
 
     async def save(self, features: FeatureSet):
         self.saved.append(features)
+
+    @property
+    def redis_client(self):
+        # Erlaubt Tests, gezielt einen Fake-Redis-Client zu injizieren
+        # (fuer _update_ticker_cache), unabhaengig vom connect()-Status
+        # der Candle/Feature-Seite dieses Fakes.
+        return self._injected_redis_client
 
 
 class FakeEngineer:
@@ -105,9 +128,16 @@ class FakeEngineer:
 
 
 def make_feed(
-    adapter_responses=None, adapter_raises=None, engineer=None
+    adapter_responses=None,
+    adapter_raises=None,
+    engineer=None,
+    ticker=None,
+    ticker_raises=None,
+    redis_client=None,
 ) -> tuple[SymbolFeed, FakePool]:
-    adapter = FakeAdapter(adapter_responses, adapter_raises)
+    adapter = FakeAdapter(
+        adapter_responses, adapter_raises, ticker=ticker, ticker_raises=ticker_raises
+    )
     pool = FakePool(adapter)
     feed = SymbolFeed(
         symbol=SYMBOL_STR,
@@ -115,7 +145,7 @@ def make_feed(
         exchange_id=ExchangeID.BINANCE,
         trading_mode=TradingMode.PAPER,
         feature_engineer=engineer or FakeEngineer(),
-        feature_store=FakeFeatureStore(),
+        feature_store=FakeFeatureStore(redis_client=redis_client),
     )
     return feed, pool
 
@@ -299,6 +329,137 @@ class TestSymbolFeedUpdate:
         # Gap-fill error is swallowed inside _handle_gaps; update still
         # proceeds and computes features from the buffer it already has.
         assert result is True
+
+
+# ---------------------------------------------------------------------
+# SymbolFeed._update_ticker_cache (Schritt 6: ws_market + Redis-Ticker-
+# Cache, siehe sgr/market_data/ticker_cache.py)
+# ---------------------------------------------------------------------
+
+
+class TestUpdateTickerCache:
+    async def test_happy_path_publishes_ticker_after_feature_update(self, monkeypatch):
+        """Nach einem erfolgreichen Candle/Feature-Update wird zusaetzlich
+        best-effort ein Ticker geholt und in Redis geschrieben."""
+        from unittest.mock import AsyncMock
+
+        import sgr.market_data.engine as engine_module
+
+        initial = make_candles(3)
+        new = make_candles(2, start=initial[-1].timestamp + timedelta(hours=1))
+        fake_ticker = object()
+        redis_client = object()
+        feed, pool = make_feed(
+            adapter_responses=[initial, new],
+            ticker=fake_ticker,
+            redis_client=redis_client,
+        )
+        publish_mock = AsyncMock()
+        monkeypatch.setattr(engine_module, "publish_ticker", publish_mock)
+
+        await feed.initialize(pool)
+        result = await feed.update(pool)
+
+        assert result is True
+        adapter = pool._adapter
+        assert adapter.ticker_calls == [SYMBOL_STR]
+        publish_mock.assert_awaited_once_with(redis_client, fake_ticker)
+
+    async def test_no_redis_client_skips_ticker_fetch_entirely(self, monkeypatch):
+        """Ohne Redis-Verbindung (FeatureStore.redis_client is None) wird
+        get_ticker() gar nicht erst aufgerufen - kein unnoetiger
+        Exchange-Call, wenn ohnehin niemand den Cache lesen kann."""
+        from unittest.mock import AsyncMock
+
+        import sgr.market_data.engine as engine_module
+
+        initial = make_candles(3)
+        new = make_candles(2, start=initial[-1].timestamp + timedelta(hours=1))
+        feed, pool = make_feed(
+            adapter_responses=[initial, new],
+            ticker=object(),
+            redis_client=None,
+        )
+        publish_mock = AsyncMock()
+        monkeypatch.setattr(engine_module, "publish_ticker", publish_mock)
+
+        await feed.initialize(pool)
+        result = await feed.update(pool)
+
+        assert result is True
+        assert pool._adapter.ticker_calls == []
+        publish_mock.assert_not_awaited()
+
+    async def test_ticker_fetch_error_does_not_fail_update(self, monkeypatch):
+        """Ein Fehler beim get_ticker()-Call (z.B. Rate Limit, Exchange
+        down) darf den bereits erfolgreichen Feature-Update-Pfad nicht
+        beeintraechtigen - update() liefert weiterhin True."""
+        from unittest.mock import AsyncMock
+
+        import sgr.market_data.engine as engine_module
+
+        initial = make_candles(3)
+        new = make_candles(2, start=initial[-1].timestamp + timedelta(hours=1))
+        feed, pool = make_feed(
+            adapter_responses=[initial, new],
+            ticker_raises=RuntimeError("rate limited"),
+            redis_client=object(),
+        )
+        publish_mock = AsyncMock()
+        monkeypatch.setattr(engine_module, "publish_ticker", publish_mock)
+
+        await feed.initialize(pool)
+        result = await feed.update(pool)
+
+        assert result is True
+        assert feed._store.saved  # Feature-Update ist trotzdem durchgelaufen
+        publish_mock.assert_not_awaited()
+
+    async def test_publish_ticker_error_does_not_fail_update(self, monkeypatch):
+        """Ein Fehler beim eigentlichen Redis-Schreiben (publish_ticker
+        selbst ist fail-safe, aber der Aufruf hier ist zusaetzlich
+        defensiv umschlossen) darf ebenfalls nicht durchschlagen."""
+        from unittest.mock import AsyncMock
+
+        import sgr.market_data.engine as engine_module
+
+        initial = make_candles(3)
+        new = make_candles(2, start=initial[-1].timestamp + timedelta(hours=1))
+        feed, pool = make_feed(
+            adapter_responses=[initial, new],
+            ticker=object(),
+            redis_client=object(),
+        )
+        publish_mock = AsyncMock(side_effect=RuntimeError("redis down"))
+        monkeypatch.setattr(engine_module, "publish_ticker", publish_mock)
+
+        await feed.initialize(pool)
+        result = await feed.update(pool)
+
+        assert result is True
+
+    async def test_ticker_fetch_uses_symbol_not_ccxt_symbol(self, monkeypatch):
+        """get_ticker() wird mit dem internen SymbolFeed.symbol
+        aufgerufen (z.B. 'BTC/USDT'), nicht mit einem abweichend
+        formatierten Exchange-Symbol - identisch zum Aufruf in
+        _simulate_order (ccxt_base.py)."""
+        from unittest.mock import AsyncMock
+
+        import sgr.market_data.engine as engine_module
+
+        initial = make_candles(3)
+        new = make_candles(2, start=initial[-1].timestamp + timedelta(hours=1))
+        feed, pool = make_feed(
+            adapter_responses=[initial, new],
+            ticker=object(),
+            redis_client=object(),
+        )
+        monkeypatch.setattr(engine_module, "publish_ticker", AsyncMock())
+
+        await feed.initialize(pool)
+        await feed.update(pool)
+
+        assert pool._adapter.ticker_calls == [feed.symbol]
 
 
 # ---------------------------------------------------------------------

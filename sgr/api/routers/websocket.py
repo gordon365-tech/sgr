@@ -6,9 +6,10 @@ Echtzeit-Streams für das Dashboard.
 Streams:
     /ws/portfolio    → Portfolio-Updates (PnL, Positionen) alle 2s
     /ws/risk         → Risk-Metriken alle 5s
-    /ws/market/{sym} → Preis-Ticks für ein Symbol (TEMPORÄR AUSSER BETRIEB,
-                        siehe ws_market Docstring - identisches Muster wie
-                        GET /api/v1/market/ticker/{symbol})
+    /ws/market/{sym} → Preis-Ticks für ein Symbol, aus dem Redis-Ticker-
+                        Cache (identisches Muster wie
+                        GET /api/v1/market/ticker/{symbol}, siehe
+                        sgr/market_data/ticker_cache.py)
     /ws/alerts       → System-Alerts und Kill-Switch-Events
 
 Read-Only Architektur (sgr-api Zielarchitektur, Commit 4)
@@ -280,38 +281,72 @@ async def ws_market(
     token: str = Query(default=""),
 ) -> None:
     """
-    Live-Preis-Ticks für ein Symbol.
+    Live-Preis-Ticks für ein Symbol, alle 2 Sekunden aus dem Redis-
+    Ticker-Cache gelesen (siehe sgr/market_data/ticker_cache.py,
+    geschrieben von sgr-worker/SymbolFeed._update_ticker_cache).
 
-    TEMPORÄR AUSSER BETRIEB - identisches, bewusstes Muster wie
-    GET /api/v1/market/ticker/{symbol} (siehe sgr/api/routers/market.py
-    Modul-Docstring): der bisherige Code rief einen Live-Exchange-Adapter
-    direkt aus dem API-Prozess auf. Seit der sgr-api/sgr-worker-Trennung
-    (Commit 4) darf die API keine Live-Exchange-Calls mehr machen, und es
-    existiert noch kein Redis-Cache fuer rohe Ticker-Daten (nur
-    FeatureStore fuer berechnete Features, keine Rohdaten wie bid/ask/
-    volume_24h). Ein Ersatz ueber FeatureSet.close waere ein stiller
-    Contract-Bruch. Der Ticker-Cache im Worker bleibt bewusst ein eigener,
-    fokussierter Folge-Commit (siehe Gap-Analyse zu Commit 3/4) - dieser
-    Stream sendet stattdessen eine explizite "not yet available"-Meldung
-    und schliesst die Verbindung, statt stillschweigend zu haengen oder
-    falsche Daten zu liefern.
+    Identisches Read-Only-Muster wie ws_portfolio/ws_risk: kein Zugriff
+    auf einen Live-Exchange-Adapter im API-Prozess. Ohne verfügbaren
+    Redis-Client (z.B. Verbindung down) wird die Verbindung sauber mit
+    einer Fehlermeldung geschlossen statt zu haengen. Ist noch kein
+    Ticker fuer dieses Symbol gecacht (Symbol nicht subscribed, oder
+    Worker schreibt seit >60s nichts mehr - TTL-Ablauf), wird das pro
+    Tick als "stale"-Flag signalisiert, NICHT als Verbindungsabbruch -
+    der Cache kann jederzeit wieder befuellt werden (z.B. wenn der
+    Worker neu startet), ohne dass der Client neu verbinden muss.
     """
     await websocket.accept()
-    log.info("ws.market.not_yet_available", symbol=symbol)
-    await _send_json(
-        websocket,
-        {
-            "type": "error",
-            "code": 501,
-            "message": (
-                "Market tick stream not yet migrated to the read-only API "
-                "architecture. Live exchange calls from the API process are "
-                "no longer permitted; a Redis-backed ticker cache written by "
-                "sgr-worker is planned as a follow-up."
-            ),
-        },
-    )
-    await websocket.close()
+
+    normalized_symbol = symbol.upper().replace("-", "/")
+
+    redis_client = get_redis_client_or_none(request)
+    if redis_client is None:
+        await websocket.send_text(json.dumps({"error": "Redis connection not available"}))
+        await websocket.close()
+        return
+
+    from sgr.market_data.ticker_cache import read_ticker_from_redis
+
+    log.info("ws.market.connected", symbol=normalized_symbol)
+
+    try:
+        heartbeat_counter = 0
+        while True:
+            ticker = await read_ticker_from_redis(redis_client, normalized_symbol)
+
+            if ticker is None:
+                msg: dict[str, Any] = {
+                    "type": "market_tick",
+                    "timestamp": datetime.now(tz=UTC).isoformat(),
+                    "symbol": normalized_symbol,
+                    "stale": True,
+                    "data": None,
+                }
+            else:
+                msg = {
+                    "type": "market_tick",
+                    "timestamp": datetime.now(tz=UTC).isoformat(),
+                    "symbol": normalized_symbol,
+                    "stale": False,
+                    "data": ticker,
+                }
+
+            if not await _send_json(websocket, msg):
+                break
+
+            # Heartbeat alle 15 Updates (30s)
+            heartbeat_counter += 1
+            if heartbeat_counter % 15 == 0:
+                await _send_json(
+                    websocket, {"type": "heartbeat", "ts": datetime.now(tz=UTC).isoformat()}
+                )
+
+            await asyncio.sleep(2.0)
+
+    except WebSocketDisconnect:
+        log.info("ws.market.disconnected", symbol=normalized_symbol)
+    except Exception as e:
+        log.error("ws.market.error", symbol=normalized_symbol, error=str(e))
 
 
 # ---------------------------------------------------------------------------

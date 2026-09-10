@@ -453,23 +453,112 @@ class TestWsRisk:
 
 class TestWsMarket:
     """
-    Temporaer ausser Betrieb (bewusster Platzhalter, identisches Muster
-    wie GET /api/v1/market/ticker/{symbol}, siehe ws_market Docstring).
-    Kein Live-Exchange-Call mehr aus dem API-Prozess.
+    Liest aus dem Redis-Ticker-Cache (identisches Read-Only-Muster wie
+    ws_risk, siehe sgr/market_data/ticker_cache.py). Kein Live-Exchange-
+    Call mehr aus dem API-Prozess.
     """
 
-    async def test_sends_not_available_error_and_closes(self):
+    async def test_no_redis_sends_error_and_closes(self):
+        """Ohne Redis-Verbindung: sauberer Abbruch, identisches Muster
+        wie ws_risk.test_no_redis_..."""
         fake_ws = FakeWebSocket()
         request = FakeRequest()
 
-        await ws_router.ws_market(fake_ws, "btc-usdt", request, token="")
+        with patch(
+            "sgr.api.routers.websocket.get_redis_client_or_none",
+            return_value=None,
+        ):
+            await ws_router.ws_market(fake_ws, "btc-usdt", request, token="")
 
         assert fake_ws.accepted is True
         assert fake_ws.closed is True
         assert len(fake_ws.messages) == 1
-        assert fake_ws.messages[0]["type"] == "error"
-        assert fake_ws.messages[0]["code"] == 501
-        assert "not yet migrated" in fake_ws.messages[0]["message"]
+        assert "error" in fake_ws.messages[0]
+
+    async def test_ticker_available_sends_normalized_tick(self):
+        """Symbol wird normalisiert ('btc-usdt' -> 'BTC/USDT'), Cache-Wert
+        wird unveraendert unter 'data' durchgereicht."""
+        fake_ws = FakeWebSocket(disconnect_after=1)
+        request = FakeRequest()
+        redis_client = MagicMock()
+        cached_ticker = {
+            "symbol": "BTC/USDT",
+            "bid": "50000",
+            "ask": "50010",
+            "last": "50005",
+            "volume_24h": "1234.5",
+            "change_24h_pct": 1.2,
+            "timestamp": "2026-01-01T00:00:00+00:00",
+        }
+
+        with (
+            patch(
+                "sgr.api.routers.websocket.get_redis_client_or_none",
+                return_value=redis_client,
+            ),
+            patch(
+                "sgr.market_data.ticker_cache.read_ticker_from_redis",
+                new=AsyncMock(return_value=cached_ticker),
+            ),
+        ):
+            await ws_router.ws_market(fake_ws, "btc-usdt", request, token="")
+
+        assert fake_ws.accepted is True
+        assert len(fake_ws.messages) == 1
+        msg = fake_ws.messages[0]
+        assert msg["type"] == "market_tick"
+        assert msg["symbol"] == "BTC/USDT"
+        assert msg["stale"] is False
+        assert msg["data"] == cached_ticker
+
+    async def test_no_cached_ticker_marks_stale_without_closing(self):
+        """Kein TTL-gueltiger Cache-Eintrag (noch nie geschrieben oder
+        abgelaufen) darf die Verbindung NICHT beenden - nur stale=True
+        signalisieren, siehe ws_market Docstring."""
+        fake_ws = FakeWebSocket(disconnect_after=1)
+        request = FakeRequest()
+        redis_client = MagicMock()
+
+        with (
+            patch(
+                "sgr.api.routers.websocket.get_redis_client_or_none",
+                return_value=redis_client,
+            ),
+            patch(
+                "sgr.market_data.ticker_cache.read_ticker_from_redis",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
+            await ws_router.ws_market(fake_ws, "eth-usdt", request, token="")
+
+        assert len(fake_ws.messages) == 1
+        msg = fake_ws.messages[0]
+        assert msg["stale"] is True
+        assert msg["data"] is None
+        # Kein Fehler, kein direktes close() durch die Fehlerbehandlung -
+        # die Loop wurde nur durch den simulierten Disconnect beim
+        # zweiten send beendet (siehe disconnect_after=0), nicht durch
+        # aktives Schliessen wegen "stale".
+        assert fake_ws.closed is False
+
+    async def test_disconnect_ends_loop_cleanly(self):
+        fake_ws = FakeWebSocket(disconnect_after=1)
+        request = FakeRequest()
+        redis_client = MagicMock()
+
+        with (
+            patch(
+                "sgr.api.routers.websocket.get_redis_client_or_none",
+                return_value=redis_client,
+            ),
+            patch(
+                "sgr.market_data.ticker_cache.read_ticker_from_redis",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
+            await ws_router.ws_market(fake_ws, "btc-usdt", request, token="")
+
+        assert len(fake_ws.messages) == 1
 
 
 # ---------------------------------------------------------------------------
