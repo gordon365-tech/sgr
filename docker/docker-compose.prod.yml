@@ -204,6 +204,19 @@ services:
       - "--web.console.templates=/usr/share/prometheus/consoles"
       - "--web.enable-lifecycle"  # Allow config reload via HTTP
       
+    healthcheck:
+      # prom/prometheus ist busybox-basiert und bringt wget mit (kein
+      # curl). /-/healthy ist Prometheus' eingebauter Liveness-Endpoint.
+      # Ohne diesen Healthcheck bleibt der Container-Status dauerhaft
+      # "running" ohne Health-Wert (siehe docker inspect), wodurch
+      # grafana's depends_on: prometheus: condition: service_healthy
+      # nie erfuellt werden kann und docker compose up fehlschlaegt.
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
     restart: unless-stopped
     
     # Security
