@@ -292,6 +292,28 @@ async def lifespan(
         registry.inject_repository(repos.strategies)
         await registry.sync_registrations_to_db()
 
+        # Go-Live-Gate 1 (Backtest + Walk-Forward): schliesst die Lücke,
+        # die zuvor dazu führte, dass is_validated nie produktiv True
+        # wurde (siehe sgr/strategy/validation_runner.py Modul-Docstring
+        # für die vollständige Herleitung). Fail-safe: läuft nur, wenn
+        # ein Exchange Pool verbunden ist; Fehler pro Strategie blockieren
+        # nicht den Startup der übrigen Strategien oder der API selbst.
+        from sgr.strategy.validation_runner import StrategyValidationRunner
+
+        try:
+            validation_runner = StrategyValidationRunner(
+                exchange_pool=pool, exchange_id=primary_exchange
+            )
+            validation_summary = await validation_runner.validate_pending_strategies()
+            log.info(
+                "sgr.api.strategy_validation_completed",
+                validated=validation_summary.validated,
+                skipped=validation_summary.skipped,
+                failed=list(validation_summary.failed.keys()),
+            )
+        except Exception as e:
+            log.error("sgr.api.strategy_validation_runner_failed", error=str(e))
+
         # Aktiviere alle validierten Strategien für das Paper Trading.
         # Default: Strategien starten deaktiviert, müssen explizit aktiviert werden.
         # Hier aktivieren wir nur die, die bereits validiert sind (is_validated=True
