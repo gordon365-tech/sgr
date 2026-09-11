@@ -116,6 +116,17 @@ class KillSwitch:
         self._redis: Redis | None = redis_client
         self._subscriber_task: asyncio.Task[None] | None = None
 
+        # Initialisiert die Prometheus-Gauge sofort mit dem tatsaechlichen
+        # Ist-Zustand (0 = inactive, da KillSwitchState frisch erstellt
+        # wird) statt erst beim ersten trigger()/reset()-Aufruf. Ohne
+        # dies fehlt die Zeitreihe komplett in /metrics, solange der
+        # Kill Switch seit Prozessstart nie ausgeloest wurde - fuer ein
+        # sicherheitskritisches Signal ("ist der Kill Switch aktiv?")
+        # ist "keine Daten" in Grafana irrefuehrend, nicht neutral.
+        record_kill_switch_activation(
+            trading_mode=trading_mode.value, active=self._state.is_active
+        )
+
     def inject_exchange_pool(self, pool: Any) -> None:
         """Injiziert Exchange Pool für Order-Cancellation."""
         self._exchange_pool = pool

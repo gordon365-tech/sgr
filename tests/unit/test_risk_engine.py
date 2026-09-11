@@ -533,6 +533,18 @@ class TestKillSwitch:
         assert not kill_switch.is_active
         assert kill_switch.trading_allowed
 
+    def test_construction_initializes_prometheus_gauge_to_zero(self) -> None:
+        """Regressionsschutz: ohne diese Initialisierung fehlt die
+        Zeitreihe komplett in /metrics, solange der Kill Switch seit
+        Prozessstart nie ausgeloest wurde - siehe Grafana-Verifikation
+        auf dem Server (sgr_kill_switch_active zeigte nur HELP/TYPE,
+        keine Werte-Zeile, bis der erste trigger()-Call erfolgte)."""
+        from sgr.monitoring.trading_metrics import kill_switch_active
+
+        KillSwitch(TradingMode.LIVE)
+
+        assert kill_switch_active.labels(trading_mode="live")._value.get() == 0
+
     async def test_trigger_activates(self, kill_switch: KillSwitch) -> None:
         await kill_switch.trigger("Test reason", triggered_by="test")
         assert kill_switch.is_active
