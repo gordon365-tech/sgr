@@ -2,6 +2,14 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+# Scrapt bewusst nur sgr-api, nicht die Worker-Container direkt: die
+# Worker (worker-gordon, worker-sumo) besitzen aus Architekturgruenden
+# keinen eigenen HTTP-Port (siehe sgr/worker/main.py). Die tatsaechlich
+# im Worker-Prozess erzeugten Trading-Metriken werden stattdessen per
+# Redis-Push in den /metrics-Endpunkt der API eingespeist (siehe
+# sgr/monitoring/worker_metrics_bridge.py) - ein einziger Scrape-
+# Endpunkt liefert dadurch sowohl die (wenigen) API-eigenen als auch
+# alle Worker-Metriken ueber alle Tenants hinweg.
 scrape_configs:
   - job_name: 'sgr-api'
     static_configs:

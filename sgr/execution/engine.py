@@ -50,6 +50,12 @@ from sgr.exchanges.base import ExchangeError
 from sgr.exchanges.factory import ExchangePool
 from sgr.execution.order_safety import SafeOrderExecutor
 from sgr.execution.preflight import PreflightValidator
+from sgr.monitoring.trading_metrics import (
+    record_duplicate_blocked,
+    record_order_filled,
+    record_order_rejected,
+    record_order_submitted,
+)
 from sgr.risk.kill_switch import get_kill_switch
 
 log = get_logger(__name__)
@@ -122,6 +128,11 @@ class ExecutionEngine:
                 "execution_engine.blocked_by_kill_switch",
                 order_id=str(order.id),
             )
+            record_order_rejected(
+                exchange=order.symbol.exchange.value,
+                symbol=str(order.symbol),
+                reason="kill_switch_active",
+            )
             return self._rejected_result(order, "Kill switch active")
 
         # Preflight Validation (Baustein 6): letzte technische Prüfung
@@ -136,6 +147,11 @@ class ExecutionEngine:
                 "execution_engine.blocked_by_preflight",
                 order_id=str(order.id),
                 reason=preflight_result.rejection_summary,
+            )
+            record_order_rejected(
+                exchange=order.symbol.exchange.value,
+                symbol=str(order.symbol),
+                reason="preflight_failed",
             )
             return self._rejected_result(
                 order, f"Preflight validation failed: {preflight_result.rejection_summary}"
@@ -190,6 +206,11 @@ class ExecutionEngine:
                 duplicate=result.raw_response.get("duplicate", False),
                 unknown=result.raw_response.get("unknown", False),
             )
+            if result.raw_response.get("duplicate"):
+                record_duplicate_blocked(
+                    exchange=order.symbol.exchange.value,
+                    reason="in_process_duplicate_order_id",
+                )
             return result
 
         log.info(
@@ -203,11 +224,18 @@ class ExecutionEngine:
             mode=self._trading_mode.value,
         )
 
+        record_order_submitted(
+            exchange=order.symbol.exchange.value,
+            symbol=str(order.symbol),
+            side=order.side.value,
+            trading_mode=self._trading_mode.value,
+        )
+
         await self._persist_order_create(order, result)
 
         # Falls sofort filled (Market Order, Paper Mode)
         if result.status == OrderStatus.FILLED:
-            await self._on_fill(result)
+            await self._on_fill(result, side=order.side.value)
             return result
 
         # Fill Monitoring für nicht sofort gefüllte Orders
@@ -345,7 +373,7 @@ class ExecutionEngine:
             await self._persist_order_status(str(order.id), current)
 
         if current.status == OrderStatus.FILLED:
-            await self._on_fill(current)
+            await self._on_fill(current, side=order.side.value)
 
         return current
 
@@ -373,7 +401,7 @@ class ExecutionEngine:
                 error=str(e),
             )
 
-    async def _on_fill(self, result: OrderResult) -> None:
+    async def _on_fill(self, result: OrderResult, side: str) -> None:
         """
         Wird aufgerufen wenn Order vollständig gefüllt.
         1. Slippage berechnen + loggen
@@ -401,6 +429,17 @@ class ExecutionEngine:
             qty=str(result.filled_quantity),
             price=str(result.average_fill_price),
             fees=str(result.fees),
+        )
+
+        latency_seconds = max(
+            0.0, (datetime.now(tz=UTC) - result.submitted_at).total_seconds()
+        )
+        record_order_filled(
+            exchange=result.symbol.exchange.value,
+            symbol=str(result.symbol),
+            side=side,
+            trading_mode=result.trading_mode.value,
+            latency_seconds=latency_seconds,
         )
 
         # Event publizieren → Portfolio Engine updated State

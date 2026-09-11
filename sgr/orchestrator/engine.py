@@ -61,6 +61,7 @@ from sgr.core.types import (
     TradingCycleStatus,
     TradingMode,
 )
+from sgr.monitoring.trading_metrics import record_trading_cycle_complete
 from sgr.risk.symbol_kill_switch import get_symbol_kill_switch
 
 log = get_logger(__name__)
@@ -132,9 +133,19 @@ class TradingOrchestrator:
                 timeframe=timeframe,
                 error=f"Orchestrator error: {e}",
             )
+            record_trading_cycle_complete(
+                symbol=symbol_key,
+                status=TradingCycleStatus.FAILED.value,
+                duration_seconds=(result.completed_at - started_at).total_seconds(),
+            )
             await self._publish_cycle_failed(symbol_key, timeframe, str(e))
             return result
 
+        record_trading_cycle_complete(
+            symbol=symbol_key,
+            status=result.status.value,
+            duration_seconds=(result.completed_at - started_at).total_seconds(),
+        )
         await self._publish_cycle_completed(result)
         return result
 

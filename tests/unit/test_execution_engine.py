@@ -856,3 +856,118 @@ class TestShutdownSafety:
 
         assert adapter.cancel_order.await_count == 2
         assert engine._safety.all_inflight() == {}
+
+
+# ---------------------------------------------------------------------------
+# Prometheus-Metriken-Verdrahtung (Schritt: Grafana-Dashboard-Werte)
+# ---------------------------------------------------------------------------
+#
+# Diese Tests pruefen NICHT nur, dass der Code-Pfad durchlaeuft (das
+# deckt bereits die bestehende 100%-Coverage ab), sondern dass die
+# tatsaechlichen Prometheus-Metrikwerte danach korrekt gesetzt sind -
+# die eigentliche Grafana-Luecke war "Metriken existieren, werden aber
+# nie inkrementiert", nicht "Code stuerzt ab".
+
+
+class TestMetricsRecording:
+    async def test_order_submitted_increments_counter(
+        self,
+        engine: ExecutionEngine,
+        mock_pool: tuple[MagicMock, AsyncMock],
+        mocker: pytest_mock.MockerFixture,
+    ) -> None:
+        from sgr.monitoring.trading_metrics import orders_submitted_total
+
+        _pool, adapter = mock_pool
+        order = _make_order_request()
+        filled = _make_order_result(order, status=OrderStatus.FILLED)
+        adapter.place_order = AsyncMock(return_value=filled)
+        mocker.patch("sgr.core.event_bus.get_event_bus")
+
+        before = orders_submitted_total.labels(
+            exchange="binance", symbol="BTC/USDT:binance", side="buy", trading_mode="paper"
+        )._value.get()
+
+        await engine.execute(order)
+
+        after = orders_submitted_total.labels(
+            exchange="binance", symbol="BTC/USDT:binance", side="buy", trading_mode="paper"
+        )._value.get()
+        assert after == before + 1
+
+    async def test_order_filled_increments_counter_and_observes_latency(
+        self,
+        engine: ExecutionEngine,
+        mock_pool: tuple[MagicMock, AsyncMock],
+        mocker: pytest_mock.MockerFixture,
+    ) -> None:
+        from sgr.monitoring.trading_metrics import orders_filled_total
+
+        _pool, adapter = mock_pool
+        order = _make_order_request()
+        filled = _make_order_result(order, status=OrderStatus.FILLED)
+        adapter.place_order = AsyncMock(return_value=filled)
+        mocker.patch("sgr.core.event_bus.get_event_bus")
+
+        before = orders_filled_total.labels(
+            exchange="binance", symbol="BTC/USDT:binance", side="buy", trading_mode="paper"
+        )._value.get()
+
+        await engine.execute(order)
+
+        after = orders_filled_total.labels(
+            exchange="binance", symbol="BTC/USDT:binance", side="buy", trading_mode="paper"
+        )._value.get()
+        assert after == before + 1
+
+    async def test_kill_switch_rejection_increments_rejected_counter(
+        self, engine: ExecutionEngine
+    ) -> None:
+        from sgr.monitoring.trading_metrics import orders_rejected_total
+
+        engine._kill_switch.is_active = True  # type: ignore[misc]
+        order = _make_order_request()
+
+        before = orders_rejected_total.labels(
+            exchange="binance", symbol="BTC/USDT:binance", reason="kill_switch_active"
+        )._value.get()
+
+        await engine.execute(order)
+
+        after = orders_rejected_total.labels(
+            exchange="binance", symbol="BTC/USDT:binance", reason="kill_switch_active"
+        )._value.get()
+        assert after == before + 1
+
+    async def test_preflight_rejection_increments_rejected_counter(
+        self,
+        engine: ExecutionEngine,
+        mocker: pytest_mock.MockerFixture,
+    ) -> None:
+        from sgr.monitoring.trading_metrics import orders_rejected_total
+
+        fake_preflight = mocker.Mock()
+        fake_preflight.validate = AsyncMock(
+            return_value=PreflightResult(
+                order_id="x",
+                trading_mode=TradingMode.PAPER,
+                checks=[
+                    PreflightCheckResult(
+                        name="order_quantity_positive", passed=False, detail="qty<=0"
+                    )
+                ],
+            )
+        )
+        engine._preflight = fake_preflight
+        order = _make_order_request()
+
+        before = orders_rejected_total.labels(
+            exchange="binance", symbol="BTC/USDT:binance", reason="preflight_failed"
+        )._value.get()
+
+        await engine.execute(order)
+
+        after = orders_rejected_total.labels(
+            exchange="binance", symbol="BTC/USDT:binance", reason="preflight_failed"
+        )._value.get()
+        assert after == before + 1

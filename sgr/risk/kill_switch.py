@@ -59,6 +59,7 @@ from typing import TYPE_CHECKING, Any
 from sgr.core.event_bus import get_event_bus
 from sgr.core.logging import audit_log, get_logger
 from sgr.core.types import AlertSeverity, KillSwitchEvent, TradingMode
+from sgr.monitoring.trading_metrics import record_kill_switch_activation
 from sgr.risk.types import KillSwitchState
 
 if TYPE_CHECKING:
@@ -192,6 +193,9 @@ class KillSwitch:
                 self._state.trigger(
                     payload.get("reason") or "remote_trigger", self._trading_mode
                 )
+                record_kill_switch_activation(
+                    trading_mode=self._trading_mode.value, active=True
+                )
                 log.warning(
                     "kill_switch.remote_state_applied",
                     is_active=True,
@@ -199,6 +203,9 @@ class KillSwitch:
                 )
             else:
                 self._state.reset()
+                record_kill_switch_activation(
+                    trading_mode=self._trading_mode.value, active=False
+                )
                 log.warning("kill_switch.remote_state_applied", is_active=False)
 
     async def _publish_to_redis(self) -> None:
@@ -276,6 +283,7 @@ class KillSwitch:
 
             # 1. State sofort setzen (synchron)
             self._state.trigger(reason, self._trading_mode)
+            record_kill_switch_activation(trading_mode=self._trading_mode.value, active=True)
 
             log.critical(
                 "kill_switch.triggered",
@@ -388,6 +396,7 @@ class KillSwitch:
 
             previous_reason = self._state.reason
             self._state.reset()
+            record_kill_switch_activation(trading_mode=self._trading_mode.value, active=False)
 
             log.warning(
                 "kill_switch.reset",

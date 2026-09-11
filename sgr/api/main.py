@@ -401,6 +401,44 @@ async def lifespan(
             )
         app.state.market_data_engine = md_engine
 
+        # 10. Monitoring Engine
+        # Liest periodisch (alle 10s) State aus RiskEngine/PortfolioEngine/
+        # StrategyRegistry und schreibt ihn ueber die OTel-Metrik-API
+        # (sgr/monitoring/metrics.py SGRMetrics) - dieselbe REGISTRY, die
+        # setup_observability() bereits als PrometheusMetricReader-Ziel
+        # konfiguriert hat (siehe oben), landet also automatisch im
+        # bestehenden /metrics-Endpoint ohne weitere Verdrahtung.
+        # Bisher (dokumentierter Bestandsbefund) wurde diese Klasse nie
+        # instanziiert - Portfolio/Risk/Strategy-Gauges blieben dauerhaft
+        # auf ihrem Initialwert 0, unabhaengig vom tatsaechlichen State.
+        from sgr.monitoring.engine import MonitoringEngine
+
+        monitoring_engine = MonitoringEngine(
+            risk_engine=risk_engine,
+            portfolio_engine=portfolio_engine,
+            strategy_registry=registry,
+            trading_mode=config.trading_mode.value,
+        )
+        await monitoring_engine.start()
+        app.state.monitoring_engine = monitoring_engine
+
+        # 11. Worker Metrics Publisher (siehe sgr/monitoring/
+        # worker_metrics_bridge.py Modul-Docstring): macht die gerade
+        # aktivierten Metriken (MonitoringEngine + trading_metrics.py)
+        # fuer Prometheus sichtbar, OHNE dass der Worker einen eigenen
+        # HTTP-Port oeffnen muss (bewusstes Architekturprinzip, siehe
+        # sgr/worker/main.py). Push statt Pull, analog zum Redis-Ticker-
+        # Cache-Muster aus Schritt 6.
+        from sgr.monitoring.worker_metrics_bridge import WorkerMetricsPublisher
+
+        worker_metrics_publisher = WorkerMetricsPublisher(
+            redis_client=feature_store.redis_client,
+            tenant_id=config.tenant_id or "default",
+            trading_mode=config.trading_mode.value,
+        )
+        await worker_metrics_publisher.start()
+        app.state.worker_metrics_publisher = worker_metrics_publisher
+
     log.info(
         "sgr.api.ready",
         role=role,
@@ -415,6 +453,8 @@ async def lifespan(
     log.info("sgr.api.shutting_down", role=role)
 
     if role == "worker":
+        await worker_metrics_publisher.stop()
+        await monitoring_engine.stop()
         await strategy_engine.stop()
         if md_engine.is_running:
             await md_engine.stop()
@@ -513,8 +553,6 @@ def create_app() -> FastAPI:
         )
 
     # Mount Routers
-    from prometheus_client import REGISTRY, generate_latest
-
     from sgr.api.routers import (
         health,
         market,
@@ -550,8 +588,31 @@ def create_app() -> FastAPI:
     # Prometheus Metrics Endpoint
     @app.get("/metrics", include_in_schema=False)
     async def metrics() -> Any:
-        """Prometheus metrics endpoint."""
-        return Response(generate_latest(REGISTRY), media_type="text/plain; charset=utf-8")
+        """
+        Prometheus metrics endpoint.
+
+        Kombiniert die lokale REGISTRY dieses Prozesses (in role="api"
+        praktisch leer, da die API seit der Rollentrennung keine
+        Trading-Engines mehr besitzt) mit den per Redis gepushten
+        Snapshots aller sgr-worker-Prozesse (siehe sgr/monitoring/
+        worker_metrics_bridge.py) - Prometheus muss dadurch nur diesen
+        einen Endpunkt scrapen, obwohl die eigentlichen Trading-
+        Metriken im Worker-Prozess entstehen, der selbst keinen HTTP-
+        Port besitzt.
+        """
+        from prometheus_client import REGISTRY, generate_latest
+
+        body = generate_latest(REGISTRY)
+
+        redis_client = getattr(app.state.feature_store, "redis_client", None)
+        if redis_client is not None:
+            from sgr.monitoring.worker_metrics_bridge import collect_worker_metrics
+
+            worker_body = await collect_worker_metrics(redis_client)
+            if worker_body:
+                body = body + b"\n" + worker_body
+
+        return Response(body, media_type="text/plain; charset=utf-8")
 
     return app
 

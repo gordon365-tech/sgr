@@ -552,6 +552,21 @@ class TestKillSwitch:
         assert not kill_switch.is_active
         assert kill_switch.trading_allowed
 
+    async def test_trigger_sets_prometheus_gauge(self, kill_switch: KillSwitch) -> None:
+        from sgr.monitoring.trading_metrics import kill_switch_active
+
+        await kill_switch.trigger("Test reason")
+
+        assert kill_switch_active.labels(trading_mode="paper")._value.get() == 1
+
+    async def test_reset_clears_prometheus_gauge(self, kill_switch: KillSwitch) -> None:
+        from sgr.monitoring.trading_metrics import kill_switch_active
+
+        await kill_switch.trigger("Test reason")
+        await kill_switch.reset(reset_by="test_user")
+
+        assert kill_switch_active.labels(trading_mode="paper")._value.get() == 0
+
     async def test_trigger_without_exchange_pool_does_not_crash(
         self, kill_switch: KillSwitch
     ) -> None:
@@ -713,6 +728,36 @@ class TestRiskEngineLimits:
         )
         assert assessment.decision == RiskDecision.REJECTED
         assert "Kill switch" in (assessment.rejection_reason or "")
+
+        # Cleanup
+        await risk_engine._kill_switch.reset("cleanup")
+
+    async def test_rejection_increments_prometheus_counter(
+        self,
+        risk_engine: RiskEngine,
+        sample_signal: Signal,
+    ) -> None:
+        from sgr.monitoring.trading_metrics import risk_rejected_total
+
+        await risk_engine.initialize()
+        await risk_engine._kill_switch.trigger("manual test")
+
+        before = risk_rejected_total.labels(
+            trading_mode="paper", reason="Kill switch is active"
+        )._value.get()
+
+        await risk_engine.evaluate(
+            signal=sample_signal,
+            open_positions=[],
+            portfolio_value=Decimal("100000"),
+            available_capital=Decimal("90000"),
+            current_price=Decimal("50000"),
+        )
+
+        after = risk_rejected_total.labels(
+            trading_mode="paper", reason="Kill switch is active"
+        )._value.get()
+        assert after == before + 1
 
         # Cleanup
         await risk_engine._kill_switch.reset("cleanup")

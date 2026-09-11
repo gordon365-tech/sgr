@@ -57,6 +57,7 @@ from sgr.core.types import (
     Signal,
     TradingMode,
 )
+from sgr.monitoring.trading_metrics import record_risk_rejection
 from sgr.risk.kill_switch import KillSwitch, get_kill_switch
 from sgr.risk.metrics_cache import publish_risk_metrics
 from sgr.risk.position_sizer import PositionSizer
@@ -613,6 +614,7 @@ class RiskEngine:
             signal_id=str(signal_id),
             reason=reason,
         )
+        record_risk_rejection(trading_mode=self._trading_mode.value, reason=reason)
 
         return RiskAssessment(
             signal_id=signal_id,

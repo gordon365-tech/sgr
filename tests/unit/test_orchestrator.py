@@ -307,6 +307,54 @@ async def test_unexpected_exception_yields_failed_status_not_raised(
     assert "boom" in result.error
 
 
+# ---------------------------------------------------------------------------
+# 5b. Prometheus-Metriken-Verdrahtung (Schritt: Grafana-Dashboard-Werte)
+# ---------------------------------------------------------------------------
+
+
+async def test_successful_cycle_increments_trading_cycles_counter() -> None:
+    from sgr.monitoring.trading_metrics import trading_cycles_total
+
+    e = _Engines()
+    e.strategy_engine.process.return_value = None
+    orchestrator = e.orchestrator()
+
+    before = trading_cycles_total.labels(
+        status=TradingCycleStatus.NO_SIGNAL.value, symbol="pionex:BTC/USDT"
+    )._value.get()
+
+    await orchestrator.run_cycle("pionex:BTC/USDT", "1h")
+
+    after = trading_cycles_total.labels(
+        status=TradingCycleStatus.NO_SIGNAL.value, symbol="pionex:BTC/USDT"
+    )._value.get()
+    assert after == before + 1
+
+
+async def test_unexpected_exception_still_increments_failed_cycles_counter(
+    sample_signal: Signal,
+) -> None:
+    """Auch der Fail-Safe-Pfad (Exception ausserhalb _run_cycle_internal)
+    muss die Metrik inkrementieren - sonst fehlen genau die interessantesten
+    Zyklen (die fehlgeschlagenen) in Grafana."""
+    from sgr.monitoring.trading_metrics import trading_cycles_total
+
+    e = _Engines()
+    e.strategy_engine.process.side_effect = RuntimeError("boom")
+    orchestrator = e.orchestrator()
+
+    before = trading_cycles_total.labels(
+        status=TradingCycleStatus.FAILED.value, symbol="pionex:BTC/USDT"
+    )._value.get()
+
+    await orchestrator.run_cycle("pionex:BTC/USDT", "1h")
+
+    after = trading_cycles_total.labels(
+        status=TradingCycleStatus.FAILED.value, symbol="pionex:BTC/USDT"
+    )._value.get()
+    assert after == before + 1
+
+
 async def test_missing_features_after_signal_is_failed_not_market_order(
     sample_signal: Signal,
 ) -> None:
