@@ -39,7 +39,7 @@ Getestet:
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -390,13 +390,16 @@ class TestRecoveryManager:
     async def test_restore_strategies_reactivates_previously_active(self) -> None:
         registry = AsyncMock()
         registry.get_active_names_from_db.return_value = ["trend_following_v1"]
-        registry.get_entry = lambda name: object()  # synchron auf echter Registry, existiert
+        validated_entry = MagicMock()
+        validated_entry.is_validated = True
+        registry.get_entry = lambda name: validated_entry  # synchron auf echter Registry
         mgr = self._make_manager(strategy_registry=registry)
 
         result = await mgr._restore_strategies()
 
         assert result is True
         registry.activate.assert_called_once_with("trend_following_v1")
+        registry.deactivate.assert_not_called()
 
     async def test_restore_strategies_skips_no_longer_registered(self) -> None:
         """
@@ -413,6 +416,32 @@ class TestRecoveryManager:
 
         assert result is True
         registry.activate.assert_not_called()
+
+    async def test_restore_strategies_skips_and_deactivates_when_not_validated(
+        self,
+    ) -> None:
+        """
+        Regression: eine Strategie, die vor dem letzten Neustart aktiv
+        war, aber deren aktueller StrategyValidationRunner-Lauf (laeuft
+        VOR Recovery im Lifespan, siehe main.py) kein GO ergeben hat,
+        darf das Go-Live-Gate nicht umgehen. Reproduziert das auf dem
+        Server beobachtete 'active_strategies: 2' trotz NO-GO-Backtest.
+        """
+        registry = AsyncMock()
+        registry.get_active_names_from_db.return_value = ["mean_reversion_v1"]
+        unvalidated_entry = MagicMock()
+        unvalidated_entry.is_validated = False
+        registry.get_entry = lambda name: unvalidated_entry
+        mgr = self._make_manager(strategy_registry=registry)
+
+        result = await mgr._restore_strategies()
+
+        assert result is True
+        registry.activate.assert_not_called()
+        registry.deactivate.assert_called_once_with(
+            "mean_reversion_v1",
+            reason="recovery: validation gate failed on restart",
+        )
 
     async def test_restore_strategies_failure_returns_false_not_raises(self) -> None:
         registry = AsyncMock()

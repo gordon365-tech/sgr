@@ -298,19 +298,50 @@ class RecoveryManager:
         Strategien, die vor dem Crash aktiv waren, aber inzwischen nicht
         mehr registriert sind (z.B. Code-Deploy hat sie entfernt), werden
         uebersprungen und geloggt statt einen Fehler zu werfen.
+
+        Wichtig: Recovery darf das Go-Live-Gate nicht umgehen. Der
+        StrategyValidationRunner (siehe main.py Lifespan) laeuft VOR
+        diesem Schritt und setzt entry.is_validated fuer jede
+        registrierte Strategie neu, basierend auf einem frischen
+        Backtest+Walk-Forward. Ein "war vor dem letzten Neustart aktiv"
+        Zustand in der DB ist kein Ersatz fuer eine bestandene
+        Validierung - andernfalls koennte ein einmal (fehlerhaft oder
+        veraltet) aktivierter Zustand das Gate dauerhaft umgehen, selbst
+        wenn ein aktueller Backtest NO-GO ergibt. Uebersprungene
+        Strategien werden hier explizit deaktiviert (nicht nur
+        ignoriert), damit is_active und is_validated konsistent bleiben
+        und die naechste Persistenz keinen stillen Widerspruch schreibt.
         """
         log.info("recovery.restoring_strategies")
         try:
             active_names = await self._registry.get_active_names_from_db()
+            restored = 0
             for name in active_names:
-                if self._registry.get_entry(name) is None:
+                entry = self._registry.get_entry(name)
+                if entry is None:
                     log.warning(
                         "recovery.strategy_no_longer_registered",
                         name=name,
                     )
                     continue
+                if not entry.is_validated:
+                    log.warning(
+                        "recovery.strategy_not_validated_skipped",
+                        name=name,
+                        note="War vor Neustart aktiv, aktueller Validation-Run "
+                        "ergab jedoch kein GO - Go-Live-Gate hat Vorrang.",
+                    )
+                    await self._registry.deactivate(
+                        name, reason="recovery: validation gate failed on restart"
+                    )
+                    continue
                 await self._registry.activate(name)
-            log.info("recovery.strategies_restored", count=len(active_names))
+                restored += 1
+            log.info(
+                "recovery.strategies_restored",
+                count=restored,
+                skipped=len(active_names) - restored,
+            )
             return True
         except Exception as e:
             log.error("recovery.restore_strategies_failed", error=str(e))
