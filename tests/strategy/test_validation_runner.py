@@ -127,8 +127,10 @@ def clean_registry():
 
 @pytest.fixture
 def fake_pool():
+    from sgr.core.types import ExchangeID, TradingMode
+
     pool = MagicMock()
-    pool._adapters = {"pionex": object()}
+    pool._adapters = {(ExchangeID.PIONEX, TradingMode.PAPER): object()}
     return pool
 
 
@@ -161,6 +163,56 @@ class TestNoExchangePool:
         summary = await runner.validate_pending_strategies()
 
         assert summary.skipped == ["s1"]
+
+    async def test_pool_connected_for_different_exchange_skips_all_pending(self) -> None:
+        """
+        Regression: Multi-Tenant-Worker, der z.B. für Binance statt Pionex
+        initialisiert ist (siehe main.py primary_exchange). Ein nicht-leeres
+        _adapters-dict darf NICHT automatisch als 'Exchange verfügbar'
+        gewertet werden - der spezifische (exchange_id, PAPER)-Key muss
+        existieren. Reproduziert den auf dem Server beobachteten Fehler
+        'Exchange pionex (paper) not in pool' vor diesem Fix.
+        """
+        from sgr.core.types import ExchangeID, TradingMode
+
+        registry = StrategyRegistry.get()
+        registry.register_instance(FakeStrategy("s1"))
+
+        pool = MagicMock()
+        pool._adapters = {(ExchangeID.BINANCE, TradingMode.PAPER): object()}
+        runner = StrategyValidationRunner(exchange_pool=pool, exchange_id=ExchangeID.PIONEX)
+        runner._engine.run_full_validation = AsyncMock()
+
+        summary = await runner.validate_pending_strategies()
+
+        assert summary.skipped == ["s1"]
+        runner._engine.run_full_validation.assert_not_awaited()
+
+    async def test_pool_connected_for_matching_non_pionex_exchange_proceeds(
+        self, monkeypatch
+    ) -> None:
+        """Gegenprobe: Binance-Worker MIT exchange_id=BINANCE validiert korrekt."""
+        from sgr.core.types import ExchangeID, TradingMode
+
+        registry = StrategyRegistry.get()
+        registry.register_instance(FakeStrategy("s1"))
+
+        pool = MagicMock()
+        pool._adapters = {(ExchangeID.BINANCE, TradingMode.PAPER): object()}
+
+        report = make_report(
+            backtest=make_backtest_result(acceptable=True),
+            walk_forward=make_walk_forward_result(is_consistent=True),
+        )
+        runner = StrategyValidationRunner(exchange_pool=pool, exchange_id=ExchangeID.BINANCE)
+        runner._engine.run_full_validation = AsyncMock(return_value=report)
+
+        summary = await runner.validate_pending_strategies()
+
+        runner._engine.run_full_validation.assert_awaited_once()
+        call_kwargs = runner._engine.run_full_validation.call_args.kwargs
+        assert call_kwargs["exchange_id"] == ExchangeID.BINANCE
+        assert summary.validated == ["s1"]
 
 
 # ---------------------------------------------------------------------

@@ -108,10 +108,27 @@ class StrategyValidationRunner:
         registry = StrategyRegistry.get()
         summary = ValidationRunSummary(validated=[], skipped=[], failed={})
 
-        if self._pool is None or not getattr(self._pool, "_adapters", None):
+        # Wichtig: _adapters ist ein dict, keyed by (ExchangeID, TradingMode)
+        # (siehe ExchangePool). Ein nicht-leeres _adapters-dict bedeutet
+        # NICHT automatisch, dass der hier angefragte (self._exchange_id,
+        # PAPER)-Key existiert - ein Multi-Tenant-Worker kann z.B. für
+        # Binance statt Pionex initialisiert sein (siehe main.py
+        # primary_exchange). BacktestDataLoader.load_from_exchange() fragt
+        # den Pool immer mit TradingMode.PAPER an (Backtests laufen stets
+        # gegen öffentliche Marktdaten, auch im LIVE-Betrieb - siehe
+        # data_loader.py Docstring), deshalb wird exakt dieser Key geprüft.
+        from sgr.core.types import TradingMode
+
+        pool_has_exchange = self._pool is not None and (
+            (self._exchange_id, TradingMode.PAPER) in getattr(self._pool, "_adapters", {})
+        )
+
+        if not pool_has_exchange:
             log.warning(
                 "strategy_validation_runner.no_exchange_pool",
-                note="Kein verbundener Exchange Pool - Strategien bleiben unvalidiert.",
+                exchange_id=self._exchange_id.value,
+                note="Angefragte Exchange nicht im Pool verbunden - "
+                "Strategien bleiben unvalidiert.",
             )
             summary.skipped = [
                 name for name, entry in registry.get_all().items() if not entry.is_validated
@@ -137,6 +154,7 @@ class StrategyValidationRunner:
                     start_date=start_date,
                     end_date=end_date,
                     exchange_pool=self._pool,
+                    exchange_id=self._exchange_id,
                     initial_capital=Decimal("10000"),
                     run_walk_forward=True,
                     run_monte_carlo=False,

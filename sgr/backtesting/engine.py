@@ -39,6 +39,7 @@ from sgr.backtesting.types import (
 )
 from sgr.backtesting.validation import MonteCarloAnalyzer, WalkForwardAnalyzer
 from sgr.core.logging import get_logger
+from sgr.core.types import ExchangeID
 from sgr.strategy.registry import StrategyRegistry
 
 log = get_logger(__name__)
@@ -132,6 +133,7 @@ class BacktestingEngine:
         start_date: datetime,
         end_date: datetime,
         exchange_pool: Any,
+        exchange_id: ExchangeID = ExchangeID.PIONEX,
         initial_capital: Decimal = Decimal("10000"),
         run_walk_forward: bool = True,
         run_monte_carlo: bool = True,
@@ -146,6 +148,14 @@ class BacktestingEngine:
             timeframe: OHLCV-Timeframe
             start_date / end_date: Backtest-Zeitraum
             exchange_pool: Verbundener Exchange Pool für Daten-Abruf
+            exchange_id: Welche Exchange im exchange_pool angefragt wird
+                (muss zu einem Key passen, mit dem exchange_pool.initialize()
+                aufgerufen wurde - siehe ExchangePool._adapters, keyed by
+                (ExchangeID, TradingMode)). Default PIONEX bleibt aus
+                Abwärtskompatibilität bestehen, ist aber nur korrekt, wenn
+                der Pool tatsächlich für Pionex initialisiert wurde -
+                Multi-Tenant-Worker (siehe main.py primary_exchange) können
+                z.B. auf Binance laufen und müssen dies explizit übergeben.
             run_walk_forward: Walk-Forward Analyse durchführen?
             run_monte_carlo: Monte Carlo Simulation durchführen?
         """
@@ -172,6 +182,7 @@ class BacktestingEngine:
                 start=start_date,
                 end=end_date,
                 exchange_pool=exchange_pool,
+                exchange_id=exchange_id,
             )
             candles_by_symbol[symbol] = candles
 
