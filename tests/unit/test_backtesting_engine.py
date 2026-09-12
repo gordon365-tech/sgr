@@ -170,6 +170,7 @@ class TestRunFullValidation:
         mock_registry = MagicMock()
         mock_registry.is_active.return_value = registry_is_active
         mock_registry.activate = AsyncMock()
+        mock_registry.deactivate = AsyncMock()
 
         engine._loader = AsyncMock()
         engine._loader.load_from_exchange = AsyncMock(
@@ -221,6 +222,95 @@ class TestRunFullValidation:
             )
 
         mocks["registry"].activate.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_previously_inactive_strategy_is_deactivated_after_no_go(self) -> None:
+        """
+        Regression: eine fuer den Backtest hier neu aktivierte Strategie
+        muss danach wieder deaktiviert werden - is_active ist ein
+        Implementierungsdetail des Backtest-Laufs, nicht das Ergebnis
+        der Validierung (siehe run_full_validation() Kommentar). Ohne
+        dieses Aufraeumen blieb is_active=True auch nach einem NO-GO
+        bestehen (beobachteter Server-Bug: active_strategies: 2 trotz
+        can_go_live: false fuer beide Strategien).
+        """
+        engine, mocks = self._build_engine_with_mocks(
+            registry_is_active=False, candles_by_symbol={"BTC/USDT": []}
+        )
+        engine._analyzer._empty_result.return_value = make_backtest_result(total_trades=0)
+
+        with patch("sgr.backtesting.engine.StrategyRegistry.get", return_value=mocks["registry"]):
+            await engine.run_full_validation(
+                strategy_names=["trend_v1"],
+                symbols=["BTC/USDT"],
+                timeframe="1h",
+                start_date=datetime(2022, 1, 1),
+                end_date=datetime(2023, 1, 1),
+                exchange_pool=MagicMock(),
+            )
+
+        mocks["registry"].activate.assert_awaited_once_with("trend_v1")
+        mocks["registry"].deactivate.assert_awaited_once_with(
+            "trend_v1", reason="backtest validation run completed"
+        )
+
+    @pytest.mark.asyncio
+    async def test_previously_active_strategy_stays_active_after_validation(self) -> None:
+        """
+        Gegenprobe: eine Strategie, die bereits VOR diesem Aufruf aktiv
+        war (z.B. bereits live im Paper-Betrieb), darf durch einen
+        erneuten Validierungslauf nicht deaktiviert werden.
+        """
+        engine, mocks = self._build_engine_with_mocks(
+            registry_is_active=True, candles_by_symbol={"BTC/USDT": []}
+        )
+        engine._analyzer._empty_result.return_value = make_backtest_result(total_trades=0)
+
+        with patch("sgr.backtesting.engine.StrategyRegistry.get", return_value=mocks["registry"]):
+            await engine.run_full_validation(
+                strategy_names=["trend_v1"],
+                symbols=["BTC/USDT"],
+                timeframe="1h",
+                start_date=datetime(2022, 1, 1),
+                end_date=datetime(2023, 1, 1),
+                exchange_pool=MagicMock(),
+            )
+
+        mocks["registry"].activate.assert_not_awaited()
+        mocks["registry"].deactivate.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_runs_even_when_body_raises(self) -> None:
+        """
+        Regression: das Aufraeumen (deactivate der hier aktivierten
+        Strategien) muss auch dann laufen, wenn der eigentliche
+        Validierungsablauf eine Exception wirft - via finally, nicht nur
+        im Erfolgsfall. Sonst bliebe is_active=True nach einem Crash
+        haengen, was fuer den naechsten Lifespan-Start denselben Bug
+        reproduzieren wuerde.
+        """
+        engine, mocks = self._build_engine_with_mocks(
+            registry_is_active=False, candles_by_symbol={"BTC/USDT": []}
+        )
+        engine._loader.load_from_exchange = AsyncMock(side_effect=RuntimeError("boom"))
+
+        with (
+            patch("sgr.backtesting.engine.StrategyRegistry.get", return_value=mocks["registry"]),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            await engine.run_full_validation(
+                strategy_names=["trend_v1"],
+                symbols=["BTC/USDT"],
+                timeframe="1h",
+                start_date=datetime(2022, 1, 1),
+                end_date=datetime(2023, 1, 1),
+                exchange_pool=MagicMock(),
+            )
+
+        mocks["registry"].activate.assert_awaited_once_with("trend_v1")
+        mocks["registry"].deactivate.assert_awaited_once_with(
+            "trend_v1", reason="backtest validation run completed"
+        )
 
     @pytest.mark.asyncio
     async def test_full_path_go_decision_with_wf_and_mc(self) -> None:
@@ -388,6 +478,7 @@ class TestRunQuickBacktest:
         mock_registry = MagicMock()
         mock_registry.is_active.return_value = False
         mock_registry.activate = AsyncMock()
+        mock_registry.deactivate = AsyncMock()
         engine._analyzer = MagicMock()
         empty_result = make_backtest_result(total_trades=0)
         engine._analyzer._empty_result.return_value = empty_result
@@ -402,6 +493,33 @@ class TestRunQuickBacktest:
 
         assert result is empty_result
         mock_registry.activate.assert_awaited_once_with("trend_v1")
+        mock_registry.deactivate.assert_awaited_once_with(
+            "trend_v1", reason="backtest validation run completed"
+        )
+
+    @pytest.mark.asyncio
+    async def test_previously_active_strategy_not_deactivated(self) -> None:
+        """Gegenprobe fuer run_quick_backtest, analog zu
+        test_previously_active_strategy_stays_active_after_validation."""
+        engine = BacktestingEngine()
+        mock_registry = MagicMock()
+        mock_registry.is_active.return_value = True
+        mock_registry.activate = AsyncMock()
+        mock_registry.deactivate = AsyncMock()
+        engine._analyzer = MagicMock()
+        empty_result = make_backtest_result(total_trades=0)
+        engine._analyzer._empty_result.return_value = empty_result
+
+        with patch("sgr.backtesting.engine.StrategyRegistry.get", return_value=mock_registry):
+            await engine.run_quick_backtest(
+                strategy_names=["trend_v1"],
+                candles=[],
+                symbol="BTC/USDT",
+                timeframe="1h",
+            )
+
+        mock_registry.activate.assert_not_awaited()
+        mock_registry.deactivate.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_with_candles_runs_simulator_and_analyzer(self) -> None:

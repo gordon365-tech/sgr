@@ -168,10 +168,71 @@ class BacktestingEngine:
         )
 
         # 1. Registry vorbereiten
+        # Merken, welche Strategien HIER neu aktiviert werden (waren vorher
+        # inaktiv) - nur diese werden am Ende wieder deaktiviert, siehe
+        # finally-Block unten. Eine Strategie, die bereits vor diesem Aufruf
+        # aktiv war, bleibt es auch danach unabhaengig vom Backtest-Ergebnis.
         registry = StrategyRegistry.get()
+        activated_here: list[str] = []
         for name in strategy_names:
             if not registry.is_active(name):
                 await registry.activate(name)
+                activated_here.append(name)
+
+        try:
+            return await self._run_full_validation_body(
+                strategy_names=strategy_names,
+                symbols=symbols,
+                timeframe=timeframe,
+                start_date=start_date,
+                end_date=end_date,
+                exchange_pool=exchange_pool,
+                exchange_id=exchange_id,
+                initial_capital=initial_capital,
+                run_walk_forward=run_walk_forward,
+                run_monte_carlo=run_monte_carlo,
+                monte_carlo_runs=monte_carlo_runs,
+                registry=registry,
+            )
+        finally:
+            # Aufräumen: is_active ist ein Implementierungsdetail des
+            # Backtest-Laufs (der Simulator braucht aktive Strategien, um
+            # Signale zu generieren - siehe BacktestSimulator), nicht das
+            # Ergebnis dieser Validierung. Ob eine Strategie danach
+            # tatsaechlich live gehen darf, entscheidet ausschliesslich
+            # is_validated (siehe StrategyValidationRunner.mark_validated),
+            # nicht is_active. Ohne dieses Aufraeumen blieb is_active=True
+            # auch nach einem NO-GO-Ergebnis bestehen (siehe worker-gordon
+            # Log vom 2026-09-12: active_strategies: 2 trotz can_go_live:
+            # false fuer beide Strategien) und wurde erst durch den
+            # nachgelagerten RecoveryManager-Fix wieder korrigiert, statt
+            # gar nicht erst falsch gesetzt zu sein.
+            for name in activated_here:
+                await registry.deactivate(
+                    name, reason="backtest validation run completed"
+                )
+
+    async def _run_full_validation_body(
+        self,
+        *,
+        strategy_names: list[str],
+        symbols: list[str],
+        timeframe: str,
+        start_date: datetime,
+        end_date: datetime,
+        exchange_pool: Any,
+        exchange_id: ExchangeID,
+        initial_capital: Decimal,
+        run_walk_forward: bool,
+        run_monte_carlo: bool,
+        monte_carlo_runs: int,
+        registry: StrategyRegistry,
+    ) -> FullValidationReport:
+        """Eigentlicher Validierungsablauf, siehe run_full_validation()
+        Docstring. Ausgelagert, damit das activated_here-Aufraeumen in
+        run_full_validation() als finally garantiert laeuft, unabhaengig
+        davon an welcher Stelle hier ein Fehler oder ein frühes return
+        auftritt."""
 
         # 2. Daten laden
         candles_by_symbol: dict[str, Any] = {}
@@ -278,33 +339,43 @@ class BacktestingEngine:
         Nimmt Candles direkt entgegen.
         """
         registry = StrategyRegistry.get()
+        activated_here: list[str] = []
         for name in strategy_names:
             if not registry.is_active(name):
                 await registry.activate(name)
+                activated_here.append(name)
 
-        if not candles:
-            log.warning("backtesting_engine.quick.no_candles")
+        try:
+            if not candles:
+                log.warning("backtesting_engine.quick.no_candles")
+                config = BacktestConfig(
+                    start_date=datetime.now(),
+                    end_date=datetime.now(),
+                    symbols=[symbol],
+                    timeframe=timeframe,
+                    initial_capital=initial_capital,
+                )
+                return self._analyzer._empty_result(config)
+
             config = BacktestConfig(
-                start_date=datetime.now(),
-                end_date=datetime.now(),
+                start_date=candles[0].timestamp,
+                end_date=candles[-1].timestamp,
                 symbols=[symbol],
                 timeframe=timeframe,
                 initial_capital=initial_capital,
+                strategy_names=strategy_names,
             )
-            return self._analyzer._empty_result(config)
 
-        config = BacktestConfig(
-            start_date=candles[0].timestamp,
-            end_date=candles[-1].timestamp,
-            symbols=[symbol],
-            timeframe=timeframe,
-            initial_capital=initial_capital,
-            strategy_names=strategy_names,
-        )
-
-        simulator = BacktestSimulator(config)
-        trades, equity_curve = await simulator.run({symbol: candles}, registry)
-        return self._analyzer.analyze(trades, equity_curve, config)
+            simulator = BacktestSimulator(config)
+            trades, equity_curve = await simulator.run({symbol: candles}, registry)
+            return self._analyzer.analyze(trades, equity_curve, config)
+        finally:
+            # Gleiches Aufraeumen wie in run_full_validation() - siehe
+            # dortiger Kommentar fuer die vollstaendige Begruendung.
+            for name in activated_here:
+                await registry.deactivate(
+                    name, reason="backtest validation run completed"
+                )
 
     def _make_decision(
         self,
