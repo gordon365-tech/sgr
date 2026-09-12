@@ -539,6 +539,156 @@ class TestValidate:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# load_public_history
+# ---------------------------------------------------------------------------
+
+
+class FakePublicCCXTExchange:
+    """Minimaler Stand-in fuer einen credential-losen ccxt-Client, analog
+    dem FakeCCXTExchange-Muster in tests/exchanges/test_pionex.py."""
+
+    def __init__(self, options: dict | None = None) -> None:
+        self.options = options or {}
+        self.load_markets = AsyncMock(return_value={})
+        self.close = AsyncMock()
+        self.fetch_ohlcv = AsyncMock(return_value=[])
+
+
+def install_fake_public_ccxt(monkeypatch, ccxt_id: str, fake_instance=None):
+    """Patcht ccxt.async_support.<ccxt_id> mit einer Factory fuer
+    FakePublicCCXTExchange, analog install_fake_ccxt() in test_pionex.py."""
+    import ccxt.async_support as ccxt_async
+
+    holder = {"instance": fake_instance}
+
+    def factory(options=None):
+        inst = holder["instance"] or FakePublicCCXTExchange(options)
+        holder["instance"] = inst
+        return inst
+
+    monkeypatch.setattr(ccxt_async, ccxt_id, factory, raising=False)
+    return holder
+
+
+def make_raw_ohlcv_row(ts: datetime, price: float = 100.0) -> list:
+    """CCXT-Rohformat: [timestamp_ms, open, high, low, close, volume]."""
+    return [int(ts.timestamp() * 1000), price, price + 1, price - 1, price, 10.0]
+
+
+class TestLoadPublicHistory:
+    async def test_no_credentials_required_uses_public_client(self, monkeypatch):
+        """Kernpunkt der Regression: kein exchange_pool, keine Credentials
+        notwendig - reiner oeffentlicher ccxt-Client."""
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        end = datetime(2026, 1, 1, 3, tzinfo=UTC)
+        rows = [make_raw_ohlcv_row(start + timedelta(hours=i)) for i in range(3)]
+
+        holder = install_fake_public_ccxt(monkeypatch, "binance")
+        holder["instance"] = FakePublicCCXTExchange()
+        holder["instance"].fetch_ohlcv = AsyncMock(side_effect=[rows, []])
+
+        loader = BacktestDataLoader()
+        result = await loader.load_public_history(
+            "BTC/USDT", "1h", start, end, exchange_id=ExchangeID.BINANCE
+        )
+
+        assert len(result) == 3
+        holder["instance"].load_markets.assert_awaited_once()
+        holder["instance"].close.assert_awaited_once()
+
+    async def test_client_closed_even_on_error(self, monkeypatch):
+        """finally-Block muss den temporaeren Client auch bei einem Fehler
+        schliessen - kein haengender Client/Socket."""
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        end = datetime(2026, 1, 1, 3, tzinfo=UTC)
+
+        holder = install_fake_public_ccxt(monkeypatch, "binance")
+        holder["instance"] = FakePublicCCXTExchange()
+        holder["instance"].fetch_ohlcv = AsyncMock(side_effect=RuntimeError("network down"))
+
+        loader = BacktestDataLoader()
+        with pytest.raises(RuntimeError, match="network down"):
+            await loader.load_public_history(
+                "BTC/USDT", "1h", start, end, exchange_id=ExchangeID.BINANCE
+            )
+
+        holder["instance"].close.assert_awaited_once()
+
+    async def test_unknown_ccxt_exchange_raises_runtime_error(self, monkeypatch):
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        end = datetime(2026, 1, 1, 3, tzinfo=UTC)
+
+        import ccxt.async_support as ccxt_async
+
+        monkeypatch.setattr(
+            ccxt_async, "not_a_real_exchange_xyz", None, raising=False
+        )
+        monkeypatch.delattr(ccxt_async, "not_a_real_exchange_xyz", raising=False)
+
+        loader = BacktestDataLoader()
+        with pytest.raises(RuntimeError, match="ccxt has no exchange class"):
+            # ExchangeID hat kein Member ohne ccxt-Entsprechung im Enum -
+            # daher wird der Lookup direkt ueber .value auf einen Namen
+            # geprueft, der garantiert nicht in ccxt.async_support existiert.
+            await loader._load_public_history_with_ccxt_id(
+                "not_a_real_exchange_xyz", "BTC/USDT", "1h", start, end
+            )
+
+    async def test_cache_hit_returns_cached_result_without_new_call(self, monkeypatch):
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        end = datetime(2026, 1, 1, 3, tzinfo=UTC)
+        rows = [make_raw_ohlcv_row(start + timedelta(hours=i)) for i in range(2)]
+
+        holder = install_fake_public_ccxt(monkeypatch, "binance")
+        holder["instance"] = FakePublicCCXTExchange()
+        holder["instance"].fetch_ohlcv = AsyncMock(side_effect=[rows, []])
+
+        loader = BacktestDataLoader()
+        first = await loader.load_public_history(
+            "BTC/USDT", "1h", start, end, exchange_id=ExchangeID.BINANCE
+        )
+        second = await loader.load_public_history(
+            "BTC/USDT", "1h", start, end, exchange_id=ExchangeID.BINANCE
+        )
+
+        assert first == second
+        holder["instance"].load_markets.assert_awaited_once()
+
+    async def test_parses_symbol_correctly(self, monkeypatch):
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        end = datetime(2026, 1, 1, 1, tzinfo=UTC)
+        rows = [make_raw_ohlcv_row(start)]
+
+        holder = install_fake_public_ccxt(monkeypatch, "binance")
+        holder["instance"] = FakePublicCCXTExchange()
+        holder["instance"].fetch_ohlcv = AsyncMock(side_effect=[rows, []])
+
+        loader = BacktestDataLoader()
+        result = await loader.load_public_history(
+            "ETH/USDT", "1h", start, end, exchange_id=ExchangeID.BINANCE
+        )
+
+        assert result[0].symbol.base == "ETH"
+        assert result[0].symbol.quote == "USDT"
+        assert result[0].symbol.exchange == ExchangeID.BINANCE
+
+    async def test_invalid_symbol_format_raises(self, monkeypatch):
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        end = datetime(2026, 1, 1, 1, tzinfo=UTC)
+        rows = [make_raw_ohlcv_row(start)]
+
+        holder = install_fake_public_ccxt(monkeypatch, "binance")
+        holder["instance"] = FakePublicCCXTExchange()
+        holder["instance"].fetch_ohlcv = AsyncMock(side_effect=[rows, []])
+
+        loader = BacktestDataLoader()
+        with pytest.raises(ValueError, match="Invalid symbol format"):
+            await loader.load_public_history(
+                "BTCUSDT", "1h", start, end, exchange_id=ExchangeID.BINANCE
+            )
+
+
 class TestLoadFromExchangeValidationLogging:
     async def test_few_candles_triggers_validation_warning_path(self):
         start = datetime(2026, 1, 1, tzinfo=UTC)

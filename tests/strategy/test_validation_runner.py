@@ -2,8 +2,10 @@
 Tests für sgr.strategy.validation_runner.StrategyValidationRunner.
 
 Deckt ab:
-    - Kein Exchange Pool -> alle pending Strategien bleiben unvalidiert
-      (skipped), kein Crash.
+    - exchange_pool wird für den Backtest-Datenabruf nicht mehr benötigt
+      (siehe load_public_history() in data_loader.py) - None oder ein
+      beliebiges Pool-Objekt darf übergeben werden, run_full_validation
+      wird trotzdem korrekt mit exchange_id aufgerufen.
     - Erfolgreicher Backtest + konsistenter Walk-Forward -> is_validated
       True, can_go_live True (paper_trading_passed Platzhalter greift).
     - Backtest nicht akzeptabel (is_acceptable False) -> is_validated
@@ -127,71 +129,50 @@ def clean_registry():
 
 @pytest.fixture
 def fake_pool():
-    from sgr.core.types import ExchangeID, TradingMode
-
-    pool = MagicMock()
-    pool._adapters = {(ExchangeID.PIONEX, TradingMode.PAPER): object()}
-    return pool
+    """Beliebiges Pool-Objekt - wird vom Runner seit load_public_history()
+    nicht mehr für den Datenabruf inspiziert, nur noch durchgereicht."""
+    return MagicMock()
 
 
 # ---------------------------------------------------------------------
-# No exchange pool
+# exchange_pool is not required for data loading anymore
 # ---------------------------------------------------------------------
 
 
-class TestNoExchangePool:
-    async def test_none_pool_skips_all_pending(self) -> None:
+class TestExchangePoolNotRequiredForDataLoading:
+    """
+    Regression: vor diesem Fix scheiterte die Validierung, wenn der Pool
+    nicht für die exakte (exchange_id, PAPER) Kombination initialisiert
+    war (z.B. Multi-Tenant-Worker auf Binance statt Pionex - beobachteter
+    Server-Fehler 'Exchange pionex (paper) not in pool'). Seit
+    BacktestDataLoader.load_public_history() ist der Pool für den
+    Datenabruf irrelevant - er wird nur noch an run_full_validation()
+    durchgereicht, aber dort ebenfalls nicht mehr für Daten verwendet.
+    """
+
+    async def test_none_pool_still_proceeds_with_validation(self) -> None:
         registry = StrategyRegistry.get()
         registry.register_instance(FakeStrategy("s1"))
 
+        report = make_report(
+            backtest=make_backtest_result(acceptable=True),
+            walk_forward=make_walk_forward_result(is_consistent=True),
+        )
         runner = StrategyValidationRunner(exchange_pool=None)
+        runner._engine.run_full_validation = AsyncMock(return_value=report)
+
         summary = await runner.validate_pending_strategies()
 
-        assert summary.skipped == ["s1"]
-        assert summary.validated == []
-        entry = registry.get_entry("s1")
-        assert entry is not None
-        assert entry.is_validated is False
+        runner._engine.run_full_validation.assert_awaited_once()
+        assert summary.validated == ["s1"]
 
-    async def test_pool_without_adapters_skips_all_pending(self) -> None:
-        registry = StrategyRegistry.get()
-        registry.register_instance(FakeStrategy("s1"))
-
-        pool = MagicMock()
-        pool._adapters = {}
-        runner = StrategyValidationRunner(exchange_pool=pool)
-        summary = await runner.validate_pending_strategies()
-
-        assert summary.skipped == ["s1"]
-
-    async def test_pool_connected_for_different_exchange_skips_all_pending(self) -> None:
+    async def test_pool_for_different_exchange_no_longer_blocks_validation(self) -> None:
         """
-        Regression: Multi-Tenant-Worker, der z.B. für Binance statt Pionex
-        initialisiert ist (siehe main.py primary_exchange). Ein nicht-leeres
-        _adapters-dict darf NICHT automatisch als 'Exchange verfügbar'
-        gewertet werden - der spezifische (exchange_id, PAPER)-Key muss
-        existieren. Reproduziert den auf dem Server beobachteten Fehler
-        'Exchange pionex (paper) not in pool' vor diesem Fix.
+        Vor diesem Fix wäre dies exakt der reproduzierte Server-Fehler
+        gewesen (Pool hat Binance, requested exchange_id=Pionex). Jetzt
+        läuft die Validierung trotzdem durch, weil sie öffentliche
+        Mainnet-Daten nutzt statt den Pool-Adapter abzufragen.
         """
-        from sgr.core.types import ExchangeID, TradingMode
-
-        registry = StrategyRegistry.get()
-        registry.register_instance(FakeStrategy("s1"))
-
-        pool = MagicMock()
-        pool._adapters = {(ExchangeID.BINANCE, TradingMode.PAPER): object()}
-        runner = StrategyValidationRunner(exchange_pool=pool, exchange_id=ExchangeID.PIONEX)
-        runner._engine.run_full_validation = AsyncMock()
-
-        summary = await runner.validate_pending_strategies()
-
-        assert summary.skipped == ["s1"]
-        runner._engine.run_full_validation.assert_not_awaited()
-
-    async def test_pool_connected_for_matching_non_pionex_exchange_proceeds(
-        self, monkeypatch
-    ) -> None:
-        """Gegenprobe: Binance-Worker MIT exchange_id=BINANCE validiert korrekt."""
         from sgr.core.types import ExchangeID, TradingMode
 
         registry = StrategyRegistry.get()
@@ -204,14 +185,14 @@ class TestNoExchangePool:
             backtest=make_backtest_result(acceptable=True),
             walk_forward=make_walk_forward_result(is_consistent=True),
         )
-        runner = StrategyValidationRunner(exchange_pool=pool, exchange_id=ExchangeID.BINANCE)
+        runner = StrategyValidationRunner(exchange_pool=pool, exchange_id=ExchangeID.PIONEX)
         runner._engine.run_full_validation = AsyncMock(return_value=report)
 
         summary = await runner.validate_pending_strategies()
 
         runner._engine.run_full_validation.assert_awaited_once()
         call_kwargs = runner._engine.run_full_validation.call_args.kwargs
-        assert call_kwargs["exchange_id"] == ExchangeID.BINANCE
+        assert call_kwargs["exchange_id"] == ExchangeID.PIONEX
         assert summary.validated == ["s1"]
 
 

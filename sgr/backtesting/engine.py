@@ -147,15 +147,18 @@ class BacktestingEngine:
             symbols: Trading-Symbole
             timeframe: OHLCV-Timeframe
             start_date / end_date: Backtest-Zeitraum
-            exchange_pool: Verbundener Exchange Pool für Daten-Abruf
-            exchange_id: Welche Exchange im exchange_pool angefragt wird
-                (muss zu einem Key passen, mit dem exchange_pool.initialize()
-                aufgerufen wurde - siehe ExchangePool._adapters, keyed by
-                (ExchangeID, TradingMode)). Default PIONEX bleibt aus
-                Abwärtskompatibilität bestehen, ist aber nur korrekt, wenn
-                der Pool tatsächlich für Pionex initialisiert wurde -
-                Multi-Tenant-Worker (siehe main.py primary_exchange) können
-                z.B. auf Binance laufen und müssen dies explizit übergeben.
+            exchange_pool: Verbundener Exchange Pool. Wird fuer den
+                Backtest-Datenabruf selbst NICHT mehr verwendet (siehe
+                BacktestDataLoader.load_public_history() - Testnets haben
+                zu wenig Historie fuer belastbare Backtests). Bleibt als
+                Parameter erhalten fuer Abwaertskompatibilitaet und fuer
+                potentielle zukuenftige Verwendung (z.B. Live-Account-Status
+                waehrend der Validierung); aktuell unbenutzt im Datenpfad.
+            exchange_id: Welche oeffentliche Mainnet-Exchange fuer die
+                Backtest-Historie angefragt wird (siehe
+                load_public_history() - kein Bezug mehr zu
+                exchange_pool._adapters Keys, da kein Pool-Adapter
+                verwendet wird). Default PIONEX aus Abwaertskompatibilitaet.
             run_walk_forward: Walk-Forward Analyse durchführen?
             run_monte_carlo: Monte Carlo Simulation durchführen?
         """
@@ -235,14 +238,19 @@ class BacktestingEngine:
         auftritt."""
 
         # 2. Daten laden
+        # Bewusst load_public_history() statt load_from_exchange(): Backtests
+        # brauchen lange historische Zeitreihen, Testnets (der vom
+        # exchange_pool verwaltete Adapter im PAPER-Modus) haben davon oft nur
+        # wenige Tage (siehe load_public_history() Docstring fuer den
+        # beobachteten Server-Fall). exchange_pool wird hier deshalb nicht
+        # mehr fuer den Datenabruf selbst gebraucht.
         candles_by_symbol: dict[str, Any] = {}
         for symbol in symbols:
-            candles = await self._loader.load_from_exchange(
+            candles = await self._loader.load_public_history(
                 symbol=symbol,
                 timeframe=timeframe,
                 start=start_date,
                 end=end_date,
-                exchange_pool=exchange_pool,
                 exchange_id=exchange_id,
             )
             candles_by_symbol[symbol] = candles

@@ -32,11 +32,21 @@ Session zu "active_strategies: 0"):
     über dieses Gate - Live-Trading-Gates (live_approved) sind davon
     unberührt und bleiben strenger.
 
-Fail-safe: Wenn kein Exchange Pool verbunden ist (z.B. fehlende
-Credentials) oder keine historischen Daten geladen werden können,
-bleibt die betroffene Strategie unvalidiert (is_validated=False) statt
-den Startup zu blockieren. Dies ist ein Startup-Nebenschritt, kein
-Safety-kritischer Pfad - Fehler werden geloggt, nicht propagiert.
+Fail-safe: Wenn keine historischen Daten geladen werden können (z.B.
+Netzwerkfehler beim Mainnet-Abruf), bleibt die betroffene Strategie
+unvalidiert (is_validated=False) statt den Startup zu blockieren.
+Dies ist ein Startup-Nebenschritt, kein Safety-kritischer Pfad -
+Fehler werden geloggt, nicht propagiert.
+
+Datenquelle (Update nach Beobachtung auf dem Server): Backtests laden
+historische Candles über BacktestDataLoader.load_public_history() von
+der öffentlichen Mainnet-API (kein API-Key, reine Marktdaten-Lesezugriffe),
+NICHT über den exchange_pool/Testnet-Adapter. Grund: Binance Testnet
+lieferte bei einer 180-Tage-Anfrage nur 72 Bars (3 Tage) zurück - weit
+unter dem für eine belastbare Walk-Forward-Validierung nötigen Minimum.
+exchange_pool bleibt als Konstruktor-Parameter bestehen (Abwärtskompatibilität,
+potentielle zukünftige Verwendung), wird aber im aktuellen Datenpfad nicht
+mehr benötigt und kann None sein.
 """
 
 from __future__ import annotations
@@ -91,6 +101,16 @@ class StrategyValidationRunner:
         timeframe: str = DEFAULT_TIMEFRAME,
         lookback_days: int = DEFAULT_LOOKBACK_DAYS,
     ) -> None:
+        """
+        Args:
+            exchange_pool: Nicht mehr für den Backtest-Datenabruf selbst
+                verwendet (siehe Modul-Docstring); kann None sein. Bleibt
+                als Parameter erhalten für Abwärtskompatibilität mit
+                bestehenden Aufrufern (siehe main.py).
+            exchange_id: Welche öffentliche Mainnet-Exchange für die
+                Backtest-Historie angefragt wird (siehe
+                BacktestDataLoader.load_public_history()).
+        """
         self._pool = exchange_pool
         self._exchange_id = exchange_id
         self._symbols = symbols or list(DEFAULT_SYMBOLS)
@@ -107,33 +127,6 @@ class StrategyValidationRunner:
         """
         registry = StrategyRegistry.get()
         summary = ValidationRunSummary(validated=[], skipped=[], failed={})
-
-        # Wichtig: _adapters ist ein dict, keyed by (ExchangeID, TradingMode)
-        # (siehe ExchangePool). Ein nicht-leeres _adapters-dict bedeutet
-        # NICHT automatisch, dass der hier angefragte (self._exchange_id,
-        # PAPER)-Key existiert - ein Multi-Tenant-Worker kann z.B. für
-        # Binance statt Pionex initialisiert sein (siehe main.py
-        # primary_exchange). BacktestDataLoader.load_from_exchange() fragt
-        # den Pool immer mit TradingMode.PAPER an (Backtests laufen stets
-        # gegen öffentliche Marktdaten, auch im LIVE-Betrieb - siehe
-        # data_loader.py Docstring), deshalb wird exakt dieser Key geprüft.
-        from sgr.core.types import TradingMode
-
-        pool_has_exchange = self._pool is not None and (
-            (self._exchange_id, TradingMode.PAPER) in getattr(self._pool, "_adapters", {})
-        )
-
-        if not pool_has_exchange:
-            log.warning(
-                "strategy_validation_runner.no_exchange_pool",
-                exchange_id=self._exchange_id.value,
-                note="Angefragte Exchange nicht im Pool verbunden - "
-                "Strategien bleiben unvalidiert.",
-            )
-            summary.skipped = [
-                name for name, entry in registry.get_all().items() if not entry.is_validated
-            ]
-            return summary
 
         pending = [
             name for name, entry in registry.get_all().items() if not entry.is_validated

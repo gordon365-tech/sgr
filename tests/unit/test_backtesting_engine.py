@@ -173,7 +173,7 @@ class TestRunFullValidation:
         mock_registry.deactivate = AsyncMock()
 
         engine._loader = AsyncMock()
-        engine._loader.load_from_exchange = AsyncMock(
+        engine._loader.load_public_history = AsyncMock(
             side_effect=lambda symbol, **kwargs: (candles_by_symbol or {}).get(symbol, [])
         )
 
@@ -292,7 +292,7 @@ class TestRunFullValidation:
         engine, mocks = self._build_engine_with_mocks(
             registry_is_active=False, candles_by_symbol={"BTC/USDT": []}
         )
-        engine._loader.load_from_exchange = AsyncMock(side_effect=RuntimeError("boom"))
+        engine._loader.load_public_history = AsyncMock(side_effect=RuntimeError("boom"))
 
         with (
             patch("sgr.backtesting.engine.StrategyRegistry.get", return_value=mocks["registry"]),
@@ -462,7 +462,7 @@ class TestRunFullValidation:
                 run_walk_forward=False,
             )
 
-        assert engine._loader.load_from_exchange.await_count == 2
+        assert engine._loader.load_public_history.await_count == 2
         assert report.symbols == ["BTC/USDT", "ETH/USDT"]
 
 
