@@ -46,6 +46,49 @@ async def make_pool_with_adapter(adapter) -> ExchangePool:
     return pool
 
 
+class FakeCandleRepository:
+    """Fake für CandleRepository, analog dem Muster in
+    tests/market_data/test_engine.py: hält Candles in-memory statt in
+    TimescaleDB, erlaubt gezieltes Simulieren von DB-Fehlern."""
+
+    def __init__(
+        self,
+        existing: list[Candle] | None = None,
+        get_ohlcv_raises: Exception | None = None,
+        upsert_raises: Exception | None = None,
+    ):
+        self._existing = existing or []
+        self._get_ohlcv_raises = get_ohlcv_raises
+        self._upsert_raises = upsert_raises
+        self.upsert_calls: list[list[Candle]] = []
+        self.get_ohlcv_calls: list[dict] = []
+
+    async def get_ohlcv(self, symbol, exchange, timeframe, start, end, limit=1000):
+        self.get_ohlcv_calls.append(
+            {"symbol": symbol, "exchange": exchange, "timeframe": timeframe}
+        )
+        if self._get_ohlcv_raises:
+            raise self._get_ohlcv_raises
+        rows = [c for c in self._existing if start <= c.timestamp <= end]
+        return [
+            {
+                "timestamp": c.timestamp,
+                "open": c.open,
+                "high": c.high,
+                "low": c.low,
+                "close": c.close,
+                "volume": c.volume,
+            }
+            for c in sorted(rows, key=lambda c: c.timestamp)[:limit]
+        ]
+
+    async def upsert_batch(self, candles):
+        self.upsert_calls.append(list(candles))
+        if self._upsert_raises:
+            raise self._upsert_raises
+        return len(candles)
+
+
 # ---------------------------------------------------------------------------
 # load_from_exchange
 # ---------------------------------------------------------------------------
@@ -210,6 +253,132 @@ class TestLoadFromExchange:
             exchange_id=ExchangeID.PIONEX,
         )
         assert len(result) == 3
+
+
+# ---------------------------------------------------------------------------
+# DB cache path (load_from_exchange + load_public_history):
+# einfache Cache-Variante - vollständige Deckung -> DB, sonst komplett
+# neu von der Exchange (siehe data_loader.py _load_from_db_if_complete
+# Docstring für die Begründung gegen eine Teil-Merge-Implementierung).
+# ---------------------------------------------------------------------------
+
+
+class TestLoadFromExchangeDbCache:
+    async def test_db_full_coverage_skips_exchange_call(self):
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        end = datetime(2026, 1, 1, 3, tzinfo=UTC)
+        db_candles = make_series(4, start)  # covers start..start+3h == end
+        repo = FakeCandleRepository(existing=db_candles)
+
+        adapter = AsyncMock()
+        adapter.get_ohlcv = AsyncMock(side_effect=AssertionError("should not be called"))
+        pool = await make_pool_with_adapter(adapter)
+
+        loader = BacktestDataLoader(candle_repository=repo)
+        result = await loader.load_from_exchange("BTC/USDT", "1h", start, end, pool)
+
+        assert len(result) == 4
+        adapter.get_ohlcv.assert_not_awaited()
+
+    async def test_db_partial_coverage_falls_back_to_full_exchange_load(self):
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        end = datetime(2026, 1, 1, 5, tzinfo=UTC)
+        # DB only has the first hour - doesn't cover up to `end`.
+        db_candles = make_series(1, start)
+        repo = FakeCandleRepository(existing=db_candles)
+
+        fresh = make_series(6, start)
+        adapter = AsyncMock()
+        adapter.get_ohlcv = AsyncMock(side_effect=[fresh, []])
+        pool = await make_pool_with_adapter(adapter)
+
+        loader = BacktestDataLoader(candle_repository=repo)
+        result = await loader.load_from_exchange("BTC/USDT", "1h", start, end, pool)
+
+        assert len(result) == 6
+        adapter.get_ohlcv.assert_awaited()
+
+    async def test_no_db_history_falls_back_to_exchange(self):
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        end = datetime(2026, 1, 1, 3, tzinfo=UTC)
+        repo = FakeCandleRepository(existing=[])
+
+        candles = make_series(4, start)
+        adapter = AsyncMock()
+        adapter.get_ohlcv = AsyncMock(side_effect=[candles, []])
+        pool = await make_pool_with_adapter(adapter)
+
+        loader = BacktestDataLoader(candle_repository=repo)
+        result = await loader.load_from_exchange("BTC/USDT", "1h", start, end, pool)
+
+        assert len(result) == 4
+
+    async def test_db_read_failure_falls_back_to_exchange(self):
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        end = datetime(2026, 1, 1, 3, tzinfo=UTC)
+        repo = FakeCandleRepository(get_ohlcv_raises=RuntimeError("db down"))
+
+        candles = make_series(4, start)
+        adapter = AsyncMock()
+        adapter.get_ohlcv = AsyncMock(side_effect=[candles, []])
+        pool = await make_pool_with_adapter(adapter)
+
+        loader = BacktestDataLoader(candle_repository=repo)
+        result = await loader.load_from_exchange("BTC/USDT", "1h", start, end, pool)
+
+        assert len(result) == 4
+
+    async def test_fresh_exchange_load_is_persisted_to_db(self):
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        end = datetime(2026, 1, 1, 3, tzinfo=UTC)
+        repo = FakeCandleRepository(existing=[])
+
+        candles = make_series(4, start)
+        adapter = AsyncMock()
+        adapter.get_ohlcv = AsyncMock(side_effect=[candles, []])
+        pool = await make_pool_with_adapter(adapter)
+
+        loader = BacktestDataLoader(candle_repository=repo)
+        await loader.load_from_exchange("BTC/USDT", "1h", start, end, pool)
+
+        assert len(repo.upsert_calls) == 1
+        assert len(repo.upsert_calls[0]) == 4
+
+    async def test_persist_failure_does_not_break_load(self):
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        end = datetime(2026, 1, 1, 3, tzinfo=UTC)
+        repo = FakeCandleRepository(existing=[], upsert_raises=RuntimeError("db down"))
+
+        candles = make_series(4, start)
+        adapter = AsyncMock()
+        adapter.get_ohlcv = AsyncMock(side_effect=[candles, []])
+        pool = await make_pool_with_adapter(adapter)
+
+        loader = BacktestDataLoader(candle_repository=repo)
+        result = await loader.load_from_exchange("BTC/USDT", "1h", start, end, pool)
+
+        assert len(result) == 4
+
+    async def test_in_memory_cache_hit_skips_db_entirely(self):
+        """In-Memory-Cache (self._cache) hat weiterhin Vorrang vor dem
+        DB-Check - kein unnötiger DB-Roundtrip bei wiederholtem Aufruf
+        innerhalb derselben Loader-Instanz."""
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        end = datetime(2026, 1, 1, 3, tzinfo=UTC)
+        db_candles = make_series(4, start)
+        repo = FakeCandleRepository(existing=db_candles)
+
+        adapter = AsyncMock()
+        adapter.get_ohlcv = AsyncMock(side_effect=AssertionError("should not be called"))
+        pool = await make_pool_with_adapter(adapter)
+
+        loader = BacktestDataLoader(candle_repository=repo)
+        first = await loader.load_from_exchange("BTC/USDT", "1h", start, end, pool)
+        repo.get_ohlcv_calls.clear()
+        second = await loader.load_from_exchange("BTC/USDT", "1h", start, end, pool)
+
+        assert first == second
+        assert repo.get_ohlcv_calls == []  # zweiter Aufruf traf den In-Memory-Cache
 
 
 # ---------------------------------------------------------------------------
@@ -687,6 +856,66 @@ class TestLoadPublicHistory:
             await loader.load_public_history(
                 "BTCUSDT", "1h", start, end, exchange_id=ExchangeID.BINANCE
             )
+
+
+class TestLoadPublicHistoryDbCache:
+    async def test_db_full_coverage_skips_public_client_entirely(self, monkeypatch):
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        end = datetime(2026, 1, 1, 3, tzinfo=UTC)
+        db_candles = make_series(4, start)
+        repo = FakeCandleRepository(existing=db_candles)
+
+        holder = install_fake_public_ccxt(monkeypatch, "binance")
+        holder["instance"] = FakePublicCCXTExchange()
+        holder["instance"].fetch_ohlcv = AsyncMock(
+            side_effect=AssertionError("should not be called")
+        )
+
+        loader = BacktestDataLoader(candle_repository=repo)
+        result = await loader.load_public_history(
+            "BTC/USDT", "1h", start, end, exchange_id=ExchangeID.BINANCE
+        )
+
+        assert len(result) == 4
+        holder["instance"].fetch_ohlcv.assert_not_awaited()
+        holder["instance"].load_markets.assert_not_awaited()
+
+    async def test_db_partial_coverage_falls_back_to_public_client(self, monkeypatch):
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        end = datetime(2026, 1, 1, 3, tzinfo=UTC)
+        db_candles = make_series(1, start)  # nur 1h, deckt nicht bis `end`
+        repo = FakeCandleRepository(existing=db_candles)
+
+        rows = [make_raw_ohlcv_row(start + timedelta(hours=i)) for i in range(4)]
+        holder = install_fake_public_ccxt(monkeypatch, "binance")
+        holder["instance"] = FakePublicCCXTExchange()
+        holder["instance"].fetch_ohlcv = AsyncMock(side_effect=[rows, []])
+
+        loader = BacktestDataLoader(candle_repository=repo)
+        result = await loader.load_public_history(
+            "BTC/USDT", "1h", start, end, exchange_id=ExchangeID.BINANCE
+        )
+
+        assert len(result) == 4
+        holder["instance"].load_markets.assert_awaited_once()
+
+    async def test_fresh_public_load_is_persisted_to_db(self, monkeypatch):
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        end = datetime(2026, 1, 1, 3, tzinfo=UTC)
+        repo = FakeCandleRepository(existing=[])
+
+        rows = [make_raw_ohlcv_row(start + timedelta(hours=i)) for i in range(4)]
+        holder = install_fake_public_ccxt(monkeypatch, "binance")
+        holder["instance"] = FakePublicCCXTExchange()
+        holder["instance"].fetch_ohlcv = AsyncMock(side_effect=[rows, []])
+
+        loader = BacktestDataLoader(candle_repository=repo)
+        await loader.load_public_history(
+            "BTC/USDT", "1h", start, end, exchange_id=ExchangeID.BINANCE
+        )
+
+        assert len(repo.upsert_calls) == 1
+        assert len(repo.upsert_calls[0]) == 4
 
 
 class TestLoadFromExchangeValidationLogging:

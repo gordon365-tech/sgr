@@ -23,12 +23,13 @@ Look-Ahead-Prävention:
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from sgr.core.logging import get_logger
+from sgr.core.repositories import CandleRepository
 from sgr.core.types import Candle, ExchangeID, Symbol
 from sgr.market_data.gap_detector import GapDetector
 
@@ -50,8 +51,9 @@ class BacktestDataLoader:
         )
     """
 
-    def __init__(self) -> None:
+    def __init__(self, candle_repository: CandleRepository | None = None) -> None:
         self._cache: dict[str, list[Candle]] = {}
+        self._candles = candle_repository or CandleRepository()
 
     async def load_from_exchange(
         self,
@@ -75,6 +77,13 @@ class BacktestDataLoader:
         if cache_key in self._cache:
             log.info("backtesting.data_loader.cache_hit", symbol=symbol)
             return self._cache[cache_key]
+
+        db_candles = await self._load_from_db_if_complete(
+            symbol=symbol, exchange_id=exchange_id, timeframe=timeframe, start=start, end=end
+        )
+        if db_candles is not None:
+            self._cache[cache_key] = db_candles
+            return db_candles
 
         from sgr.core.types import TradingMode
         from sgr.exchanges.ccxt_base import CCXTBaseAdapter
@@ -103,6 +112,7 @@ class BacktestDataLoader:
             fetch_batch=fetch_batch,
         )
         self._cache[cache_key] = candles
+        await self._persist_to_db(candles, exchange_id=exchange_id)
         return candles
 
     async def load_public_history(
@@ -141,11 +151,19 @@ class BacktestDataLoader:
             log.info("backtesting.data_loader.cache_hit", symbol=symbol)
             return self._cache[cache_key]
 
+        db_candles = await self._load_from_db_if_complete(
+            symbol=symbol, exchange_id=exchange_id, timeframe=timeframe, start=start, end=end
+        )
+        if db_candles is not None:
+            self._cache[cache_key] = db_candles
+            return db_candles
+
         candles = await self._load_public_history_with_ccxt_id(
             exchange_id.value, symbol, timeframe, start, end, exchange_id=exchange_id
         )
 
         self._cache[cache_key] = candles
+        await self._persist_to_db(candles, exchange_id=exchange_id)
         return candles
 
     async def _load_public_history_with_ccxt_id(
@@ -213,6 +231,115 @@ class BacktestDataLoader:
             await public_client.close()
 
         return candles
+
+    async def _load_from_db_if_complete(
+        self,
+        *,
+        symbol: str,
+        exchange_id: ExchangeID,
+        timeframe: str,
+        start: datetime,
+        end: datetime,
+    ) -> list[Candle] | None:
+        """
+        Einfache DB-Cache-Variante (bewusst gewählt statt Teil-Deckungs-
+        Merge): liefert Candles aus CandleRepository NUR wenn die DB den
+        angeforderten Zeitraum bereits vollständig abdeckt (erster
+        Candle nahe `start`, letzter Candle nahe `end`). Andernfalls wird
+        None zurückgegeben und der Aufrufer lädt komplett neu von der
+        Exchange - keine Teil-Merge-Logik. Deckt den Hauptnutzen ab
+        (wiederholte Backtest-Läufe mit demselben Zeitraum laden nicht
+        erneut von der Exchange), ohne die zusätzliche Fehlerfläche einer
+        Rand-Merge-Implementierung.
+
+        Ein DB-Lesefehler ist fail-safe: None wird zurückgegeben, der
+        Aufrufer fällt auf den bisherigen Exchange-only Pfad zurück -
+        blockiert den Backtest nie.
+        """
+        try:
+            rows = await self._candles.get_ohlcv(
+                symbol=symbol,
+                exchange=exchange_id.value,
+                timeframe=timeframe,
+                start=start,
+                end=end,
+                limit=100_000,
+            )
+        except Exception as e:
+            log.warning(
+                "backtesting.data_loader.db_read_failed",
+                symbol=symbol,
+                timeframe=timeframe,
+                error=str(e),
+            )
+            return None
+
+        if not rows:
+            return None
+
+        bar_seconds = GapDetector.timeframe_to_seconds(timeframe)
+        tolerance = timedelta(seconds=bar_seconds)
+        first_ts = rows[0]["timestamp"]
+        last_ts = rows[-1]["timestamp"]
+        covers_start = first_ts <= start + tolerance
+        covers_end = last_ts >= end - tolerance
+        if not (covers_start and covers_end):
+            log.info(
+                "backtesting.data_loader.db_partial_coverage",
+                symbol=symbol,
+                timeframe=timeframe,
+                db_first=first_ts.isoformat(),
+                db_last=last_ts.isoformat(),
+            )
+            return None
+
+        sym = self._parse_symbol_str(symbol, exchange_id)
+        candles = [
+            Candle(
+                symbol=sym,
+                timestamp=r["timestamp"],
+                timeframe=timeframe,
+                open=Decimal(str(r["open"])),
+                high=Decimal(str(r["high"])),
+                low=Decimal(str(r["low"])),
+                close=Decimal(str(r["close"])),
+                volume=Decimal(str(r["volume"])),
+            )
+            for r in rows
+        ]
+        log.info(
+            "backtesting.data_loader.db_cache_hit",
+            symbol=symbol,
+            timeframe=timeframe,
+            count=len(candles),
+        )
+        return candles
+
+    async def _persist_to_db(self, candles: list[Candle], *, exchange_id: ExchangeID) -> None:
+        """
+        Schreibt frisch von der Exchange geladene Candles fail-safe in
+        CandleRepository, damit zukünftige Backtest-Läufe und der Live-
+        Feed (siehe SymbolFeed._persist_candles) von denselben
+        persistierten Daten profitieren. exchange_id wird nur für das
+        Logging benötigt - die Candle-Objekte tragen die Exchange-
+        Zugehörigkeit bereits über candle.symbol.exchange.
+        """
+        if not candles:
+            return
+        try:
+            inserted = await self._candles.upsert_batch(candles)
+            log.debug(
+                "backtesting.data_loader.candles_persisted",
+                exchange=exchange_id.value,
+                inserted=inserted,
+                total=len(candles),
+            )
+        except Exception as e:
+            log.warning(
+                "backtesting.data_loader.persist_failed",
+                exchange=exchange_id.value,
+                error=str(e),
+            )
 
     def _parse_symbol_str(self, symbol: str, exchange_id: ExchangeID) -> Symbol:
         """Minimaler Symbol-Parser fuer den public-history Pfad, analog
