@@ -127,6 +127,59 @@ class FakeEngineer:
         )
 
 
+class FakeCandleRepository:
+    """Fake für CandleRepository: hält DB-Candles in-memory statt in
+    TimescaleDB, erlaubt gezieltes Simulieren von DB-Lese-/Schreibfehlern
+    für die Fail-Safe-Pfade (siehe SymbolFeed._persist_candles /
+    SymbolFeed.initialize Docstrings)."""
+
+    def __init__(
+        self,
+        existing: list[Candle] | None = None,
+        get_latest_raises: Exception | None = None,
+        get_ohlcv_raises: Exception | None = None,
+        upsert_raises: Exception | None = None,
+    ):
+        self._existing = existing or []
+        self._get_latest_raises = get_latest_raises
+        self._get_ohlcv_raises = get_ohlcv_raises
+        self._upsert_raises = upsert_raises
+        self.upsert_calls: list[list[Candle]] = []
+        self.get_ohlcv_calls: list[dict] = []
+
+    async def get_latest_timestamp(self, symbol, exchange, timeframe):
+        if self._get_latest_raises:
+            raise self._get_latest_raises
+        if not self._existing:
+            return None
+        return max(c.timestamp for c in self._existing)
+
+    async def get_ohlcv(self, symbol, exchange, timeframe, start, end, limit=1000):
+        self.get_ohlcv_calls.append(
+            {"symbol": symbol, "exchange": exchange, "timeframe": timeframe}
+        )
+        if self._get_ohlcv_raises:
+            raise self._get_ohlcv_raises
+        rows = [c for c in self._existing if start <= c.timestamp <= end]
+        return [
+            {
+                "timestamp": c.timestamp,
+                "open": c.open,
+                "high": c.high,
+                "low": c.low,
+                "close": c.close,
+                "volume": c.volume,
+            }
+            for c in sorted(rows, key=lambda c: c.timestamp)[:limit]
+        ]
+
+    async def upsert_batch(self, candles):
+        self.upsert_calls.append(list(candles))
+        if self._upsert_raises:
+            raise self._upsert_raises
+        return len(candles)
+
+
 def make_feed(
     adapter_responses=None,
     adapter_raises=None,
@@ -134,6 +187,7 @@ def make_feed(
     ticker=None,
     ticker_raises=None,
     redis_client=None,
+    candle_repository=None,
 ) -> tuple[SymbolFeed, FakePool]:
     adapter = FakeAdapter(
         adapter_responses, adapter_raises, ticker=ticker, ticker_raises=ticker_raises
@@ -146,6 +200,7 @@ def make_feed(
         trading_mode=TradingMode.PAPER,
         feature_engineer=engineer or FakeEngineer(),
         feature_store=FakeFeatureStore(redis_client=redis_client),
+        candle_repository=candle_repository or FakeCandleRepository(),
     )
     return feed, pool
 
@@ -181,6 +236,142 @@ class TestSymbolFeedInitialize:
         await feed.initialize(pool)
         assert len(feed._candle_buffer) == 250
         assert feed._candle_buffer[-1] == candles[-1]
+
+
+# ---------------------------------------------------------------------
+# SymbolFeed persistence: initialize() cache-aware read path
+# ---------------------------------------------------------------------
+
+
+class TestSymbolFeedInitializeDbCache:
+    async def test_no_db_history_falls_back_to_full_exchange_load(self):
+        """Kein DB-Cache vorhanden -> Verhalten identisch zum bisherigen
+        Exchange-only Pfad (voller _max_buffer Abruf)."""
+        candles = make_candles(5)
+        repo = FakeCandleRepository(existing=[])
+        feed, pool = make_feed(adapter_responses=[candles], candle_repository=repo)
+        await feed.initialize(pool)
+        assert feed._initialized is True
+        assert len(feed._candle_buffer) == 5
+        adapter = pool._adapter
+        assert adapter.calls[0]["since"] is None  # voller Abruf, kein "since"
+
+    async def test_db_history_present_only_fetches_gap_since_last_db_ts(self):
+        """DB hat bereits Candles -> nur die Lücke seit dem letzten
+        DB-Timestamp wird von der Exchange nachgeladen, nicht die volle
+        History."""
+        db_candles = make_candles(3)
+        gap_start = db_candles[-1].timestamp
+        fresh = make_candles(2, start=gap_start + timedelta(hours=1))
+        repo = FakeCandleRepository(existing=db_candles)
+        feed, pool = make_feed(adapter_responses=[fresh], candle_repository=repo)
+
+        await feed.initialize(pool)
+
+        assert feed._initialized is True
+        adapter = pool._adapter
+        assert adapter.calls[0]["since"] == gap_start
+        # Buffer enthält DB-Candles + frische Candles, dedupliziert+sortiert
+        assert len(feed._candle_buffer) == 5
+        assert feed._last_processed_ts == fresh[-1].timestamp
+
+    async def test_db_read_failure_falls_back_to_exchange_only(self):
+        """get_latest_timestamp() wirft -> initialize() darf nicht crashen,
+        muss auf den reinen Exchange-Pfad zurückfallen (fail-safe)."""
+        candles = make_candles(5)
+        repo = FakeCandleRepository(get_latest_raises=RuntimeError("db down"))
+        feed, pool = make_feed(adapter_responses=[candles], candle_repository=repo)
+
+        await feed.initialize(pool)
+
+        assert feed._initialized is True
+        assert len(feed._candle_buffer) == 5
+
+    async def test_db_ohlcv_read_failure_falls_back_to_exchange_only(self):
+        """get_ohlcv() (nach erfolgreichem get_latest_timestamp) wirft ->
+        ebenfalls fail-safe auf Exchange-only zurückfallen."""
+        db_candles = make_candles(3)
+        candles = make_candles(5)
+        repo = FakeCandleRepository(
+            existing=db_candles, get_ohlcv_raises=RuntimeError("db down")
+        )
+        feed, pool = make_feed(adapter_responses=[candles], candle_repository=repo)
+
+        await feed.initialize(pool)
+
+        assert feed._initialized is True
+        assert len(feed._candle_buffer) == 5
+
+    async def test_successful_initialize_persists_loaded_candles(self):
+        """Nach erfolgreichem initialize() werden die geladenen Candles in
+        CandleRepository geschrieben (upsert_batch aufgerufen)."""
+        candles = make_candles(5)
+        repo = FakeCandleRepository(existing=[])
+        feed, pool = make_feed(adapter_responses=[candles], candle_repository=repo)
+
+        await feed.initialize(pool)
+
+        assert len(repo.upsert_calls) == 1
+        assert len(repo.upsert_calls[0]) == 5
+
+
+# ---------------------------------------------------------------------
+# SymbolFeed persistence: update() write path
+# ---------------------------------------------------------------------
+
+
+class TestSymbolFeedUpdateDbPersistence:
+    async def test_update_persists_new_candles_to_repository(self):
+        initial = make_candles(3)
+        new = make_candles(2, start=initial[-1].timestamp + timedelta(hours=1))
+        repo = FakeCandleRepository(existing=[])
+        feed, pool = make_feed(
+            adapter_responses=[initial, new], candle_repository=repo
+        )
+        await feed.initialize(pool)
+        repo.upsert_calls.clear()  # nur den update()-Call betrachten
+
+        result = await feed.update(pool)
+
+        assert result is True
+        assert len(repo.upsert_calls) == 1
+        assert repo.upsert_calls[0] == new
+
+    async def test_update_persist_failure_does_not_break_update(self):
+        """upsert_batch() wirft -> update() muss trotzdem normal
+        durchlaufen und True zurückgeben (fail-safe: DB-Fehler dürfen den
+        Live-Feed nie blockieren)."""
+        initial = make_candles(3)
+        new = make_candles(2, start=initial[-1].timestamp + timedelta(hours=1))
+        repo = FakeCandleRepository(upsert_raises=RuntimeError("db down"))
+        feed, pool = make_feed(
+            adapter_responses=[initial, new], candle_repository=repo
+        )
+        await feed.initialize(pool)
+
+        result = await feed.update(pool)
+
+        assert result is True
+        assert feed._store.saved  # Feature-Pfad lief trotz DB-Fehler durch
+
+    async def test_update_no_new_candles_does_not_call_upsert(self):
+        initial = make_candles(3)
+        repo = FakeCandleRepository(existing=[])
+        feed, pool = make_feed(adapter_responses=[initial, []], candle_repository=repo)
+        await feed.initialize(pool)
+        repo.upsert_calls.clear()
+
+        await feed.update(pool)
+
+        assert repo.upsert_calls == []
+
+    async def test_persist_candles_empty_list_is_noop(self):
+        repo = FakeCandleRepository()
+        feed, _pool = make_feed(candle_repository=repo)
+
+        await feed._persist_candles([])
+
+        assert repo.upsert_calls == []
 
 
 # ---------------------------------------------------------------------

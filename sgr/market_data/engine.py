@@ -33,13 +33,17 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 from sgr.core.event_bus import get_event_bus
 from sgr.core.logging import get_logger
+from sgr.core.repositories import CandleRepository
 from sgr.core.types import (
+    Candle,
     CandleEvent,
     ExchangeID,
+    Symbol,
     TradingMode,
 )
 from sgr.exchanges.base import ExchangeError
@@ -89,6 +93,7 @@ class SymbolFeed:
         trading_mode: TradingMode,
         feature_engineer: FeatureEngineer,
         feature_store: FeatureStore,
+        candle_repository: CandleRepository | None = None,
     ) -> None:
         self.symbol = symbol
         self.timeframe = timeframe
@@ -97,6 +102,7 @@ class SymbolFeed:
 
         self._engineer = feature_engineer
         self._store = feature_store
+        self._candles = candle_repository or CandleRepository()
         self._gap_detector = GapDetector(timeframe)
         self._candle_buffer: list[Any] = []  # list[Candle]
         self._max_buffer = _HISTORY_REQUIRED.get(timeframe, 250)
@@ -107,14 +113,69 @@ class SymbolFeed:
         """
         Lädt historische Candles beim Start.
         Füllt den Buffer für sofortige Feature-Berechnung.
+
+        Cache-aware: prüft zuerst CandleRepository (TimescaleDB) auf
+        bereits persistierte Candles, um nicht bei jedem Neustart die
+        volle History erneut von der Exchange zu ziehen. Nur die Lücke
+        zwischen letztem DB-Timestamp und "jetzt" wird nachgeladen.
+        Ein DB-Lesefehler ist fail-safe: fällt zurück auf den bisherigen
+        Exchange-only Pfad, blockiert den Feed nie (siehe Modul-Prinzip
+        "fail-safe over fail-closed" für Persistence-Hooks).
         """
+        db_candles: list[Candle] = []
+        try:
+            latest_db_ts = await self._candles.get_latest_timestamp(
+                symbol=self._db_symbol_str(),
+                exchange=self.exchange_id.value,
+                timeframe=self.timeframe,
+            )
+            if latest_db_ts is not None:
+                rows = await self._candles.get_ohlcv(
+                    symbol=self._db_symbol_str(),
+                    exchange=self.exchange_id.value,
+                    timeframe=self.timeframe,
+                    start=latest_db_ts - self._history_window(),
+                    end=datetime.now(tz=UTC),
+                    limit=self._max_buffer,
+                )
+                db_candles = [self._row_to_candle(r) for r in rows]
+        except Exception as e:
+            log.warning(
+                "market_data.feed.db_cache_read_failed",
+                symbol=self.symbol,
+                timeframe=self.timeframe,
+                error=str(e),
+            )
+            db_candles = []
+
         try:
             adapter = pool.get(self.exchange_id, self.trading_mode)
-            candles = await adapter.get_ohlcv(
-                self.symbol,
-                self.timeframe,
-                limit=self._max_buffer,
-            )
+
+            if db_candles:
+                # Nur die Lücke seit dem neuesten DB-Candle nachladen,
+                # statt der vollen History (_max_buffer Bars).
+                since = db_candles[-1].timestamp
+                fresh = await adapter.get_ohlcv(
+                    self.symbol,
+                    self.timeframe,
+                    since=since,
+                    limit=self._max_buffer,
+                )
+                fresh = [c for c in fresh if c.timestamp > since]
+                candles = self._merge_and_dedupe(db_candles, fresh)
+                log.info(
+                    "market_data.feed.db_cache_hit",
+                    symbol=self.symbol,
+                    timeframe=self.timeframe,
+                    from_db=len(db_candles),
+                    fresh_from_exchange=len(fresh),
+                )
+            else:
+                candles = await adapter.get_ohlcv(
+                    self.symbol,
+                    self.timeframe,
+                    limit=self._max_buffer,
+                )
 
             if not candles:
                 log.warning(
@@ -135,6 +196,8 @@ class SymbolFeed:
                 candles=len(self._candle_buffer),
                 latest=self._last_processed_ts.isoformat(),
             )
+
+            await self._persist_candles(candles)
 
         except ExchangeError as e:
             log.error(
@@ -188,6 +251,11 @@ class SymbolFeed:
             self._candle_buffer.extend(new_candles)
             self._candle_buffer = self._candle_buffer[-self._max_buffer :]
             self._last_processed_ts = new_candles[-1].timestamp
+
+            # Persistenz: neue Candles in TimescaleDB schreiben (fail-safe,
+            # siehe _persist_candles Docstring - darf den Live-Feed nie
+            # blockieren).
+            await self._persist_candles(new_candles)
 
             # Features berechnen
             if len(self._candle_buffer) >= 2:
@@ -294,6 +362,78 @@ class SymbolFeed:
                     )
             except ExchangeError as e:
                 log.error("market_data.gap_fill_failed", error=str(e))
+
+    async def _persist_candles(self, candles: list[Any]) -> None:
+        """
+        Schreibt Candles fail-safe in CandleRepository (TimescaleDB).
+
+        Fail-safe over fail-closed: ein DB-Schreibfehler (Verbindung down,
+        Constraint-Verletzung etc.) darf den Live-Feed niemals blockieren
+        oder eine Exception nach oben werfen - er wird geloggt und
+        ignoriert. upsert_batch() ist idempotent (ON CONFLICT DO NOTHING
+        über uq_candle), Retries/Doppel-Polling sind daher unkritisch.
+        """
+        if not candles:
+            return
+        try:
+            inserted = await self._candles.upsert_batch(candles)
+            log.debug(
+                "market_data.feed.candles_persisted",
+                symbol=self.symbol,
+                timeframe=self.timeframe,
+                inserted=inserted,
+                total=len(candles),
+            )
+        except Exception as e:
+            log.warning(
+                "market_data.feed.persist_failed",
+                symbol=self.symbol,
+                timeframe=self.timeframe,
+                error=str(e),
+            )
+
+    def _db_symbol_str(self) -> str:
+        """CandleRepository erwartet den ccxt-Symbol-String (z.B. 'BTC/USDT'),
+        nicht das Symbol-Objekt - SymbolFeed hält self.symbol bereits als
+        String im selben Format."""
+        return self.symbol
+
+    def _history_window(self) -> Any:
+        """Sicherheitsfenster rückwärts vom letzten DB-Timestamp, um
+        get_ohlcv() mit einer sinnvollen Startgrenze aufzurufen, statt
+        seit Unix-Epoch zu scannen. Deckt den vollen Buffer ab, auch bei
+        größeren Pollausfällen."""
+        from datetime import timedelta
+
+        bar_seconds = GapDetector.timeframe_to_seconds(self.timeframe)
+        return timedelta(seconds=bar_seconds * self._max_buffer)
+
+    def _row_to_candle(self, row: dict[str, Any]) -> Candle:
+        """Konvertiert eine CandleRepository.get_ohlcv()-Zeile (dict, ohne
+        Symbol/Exchange/Timeframe-Kontext - siehe dortige Rückgabestruktur)
+        zurück in ein Candle-Domain-Objekt."""
+        base, _, quote = self.symbol.partition("/")
+        sym = Symbol(base=base, quote=quote, exchange=self.exchange_id)
+        return Candle(
+            symbol=sym,
+            timestamp=row["timestamp"],
+            timeframe=self.timeframe,
+            open=Decimal(str(row["open"])),
+            high=Decimal(str(row["high"])),
+            low=Decimal(str(row["low"])),
+            close=Decimal(str(row["close"])),
+            volume=Decimal(str(row["volume"])),
+        )
+
+    @staticmethod
+    def _merge_and_dedupe(db_candles: list[Candle], fresh: list[Candle]) -> list[Any]:
+        """Merged DB-Candles (älter) mit frisch von der Exchange geladenen
+        Candles (neuer), dedupliziert nach Timestamp (fresh gewinnt bei
+        Überlappung) und sortiert aufsteigend."""
+        merged: dict[Any, Candle] = {c.timestamp: c for c in db_candles}
+        for c in fresh:
+            merged[c.timestamp] = c
+        return sorted(merged.values(), key=lambda c: c.timestamp)
 
 
 class MarketDataEngine:
