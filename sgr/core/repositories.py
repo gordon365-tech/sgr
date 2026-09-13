@@ -53,37 +53,58 @@ log = get_logger(__name__)
 class CandleRepository:
     """TimescaleDB-backed Candle Storage."""
 
+    # PostgreSQL/asyncpg-Grenze: maximal 32767 Query-Parameter pro
+    # Statement. Bei 9 Spalten pro Candle-Row ergibt das ein theoretisches
+    # Maximum von 32767 // 9 = 3640 Rows pro INSERT - _CHUNK_SIZE bleibt
+    # bewusst deutlich darunter als Sicherheitsmarge. Ohne dieses Chunking
+    # schlägt upsert_batch() bei großen Batches (z.B. lange Backtest-
+    # Validierungszeiträume aus BacktestDataLoader) mit
+    # "the number of query arguments cannot exceed 32767" fehl - auf dem
+    # Server durch echten Log-Fehler bestätigt (asyncpg.exceptions.
+    # _base.InterfaceError), kein theoretisches Risiko.
+    _CHUNK_SIZE = 3000
+
     async def upsert_batch(self, candles: list[Candle]) -> int:
         """
         Batch-Upsert von Candles. Ignoriert Duplikate (ON CONFLICT DO NOTHING).
         Optimiert für TimescaleDB: bulk insert > row-by-row.
-        Returns: Anzahl eingefügter (neuer) Candles.
+
+        Chunked in Gruppen von _CHUNK_SIZE, um die asyncpg-Parameterlimite
+        (32767 Query-Parameter pro Statement) nicht zu überschreiten - siehe
+        _CHUNK_SIZE Docstring. Für Aufrufer transparent: ein einziger
+        awaitbarer Call, mehrere INSERTs intern.
+
+        Returns: Anzahl eingefügter (neuer) Candles (Summe über alle Chunks).
         """
         if not candles:
             return 0
 
-        rows = [
-            {
-                "symbol": c.symbol.ccxt_symbol,
-                "exchange": c.symbol.exchange.value,
-                "timeframe": c.timeframe,
-                "timestamp": c.timestamp,
-                "open": c.open,
-                "high": c.high,
-                "low": c.low,
-                "close": c.close,
-                "volume": c.volume,
-            }
-            for c in candles
-        ]
+        total_inserted = 0
+        for i in range(0, len(candles), self._CHUNK_SIZE):
+            chunk = candles[i : i + self._CHUNK_SIZE]
+            rows = [
+                {
+                    "symbol": c.symbol.ccxt_symbol,
+                    "exchange": c.symbol.exchange.value,
+                    "timeframe": c.timeframe,
+                    "timestamp": c.timestamp,
+                    "open": c.open,
+                    "high": c.high,
+                    "low": c.low,
+                    "close": c.close,
+                    "volume": c.volume,
+                }
+                for c in chunk
+            ]
 
-        async with get_session() as session:
-            stmt = pg_insert(CandleModel).values(rows)
-            stmt = stmt.on_conflict_do_nothing(constraint="uq_candle")
-            result = await session.execute(stmt)
-            inserted = result.rowcount
-            log.debug("candle_repo.upserted", count=inserted, total=len(candles))
-            return inserted
+            async with get_session() as session:
+                stmt = pg_insert(CandleModel).values(rows)
+                stmt = stmt.on_conflict_do_nothing(constraint="uq_candle")
+                result = await session.execute(stmt)
+                total_inserted += result.rowcount
+
+        log.debug("candle_repo.upserted", count=total_inserted, total=len(candles))
+        return total_inserted
 
     async def get_ohlcv(
         self,
