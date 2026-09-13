@@ -32,6 +32,8 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
+import numpy as np
+
 from sgr.backtesting.types import (
     BacktestConfig,
     BacktestTrade,
@@ -44,8 +46,21 @@ from sgr.core.types import (
     Signal,
     SignalDirection,
 )
-from sgr.market_data.feature_engineering import FeatureEngineer
-from sgr.market_data.types import MarketContext
+from sgr.market_data import feature_engineering as fe
+from sgr.market_data.feature_engineering import (
+    FeatureEngineer,
+    calc_adx,
+    calc_atr,
+    calc_bollinger_bands,
+    calc_keltner_channels,
+    calc_macd,
+    calc_obv,
+    calc_rsi,
+    calc_vwap,
+    candles_to_arrays,
+)
+from sgr.market_data.types import FeatureSet, IndicatorValues, MarketContext
+from sgr.strategy.base import TradingStrategy
 from sgr.strategy.registry import StrategyRegistry
 
 log = get_logger(__name__)
@@ -115,6 +130,143 @@ class BacktestSimulator:
         self._closed_trades: list[BacktestTrade] = []
         self._equity_curve: list[EquityCurvePoint] = []
 
+    def _precompute_all_features(self, candles: list[Candle]) -> list[FeatureSet | None]:
+        """
+        Berechnet alle Indikatoren EINMAL über die komplette Candle-Serie
+        und liefert pro Bar-Index das fertige FeatureSet (oder None, wenn
+        an diesem Index nicht genug History für FeatureEngineer.MIN_CANDLES
+        vorliegt) - Performance-Fix für die Simulation-Hauptschleife.
+
+        Hintergrund: run() rief vorher FeatureEngineer.compute() bei JEDEM
+        Bar mit candles[:bar_idx+1] auf - einer wachsenden Liste. compute()
+        selbst ruft calc_rsi/calc_atr/calc_adx/_ema/_sma/etc. jeweils über
+        die GESAMTE übergebene Serie auf und nimmt am Ende nur den letzten
+        Wert (siehe FeatureEngineer._compute_indicators). Bei 4320 Bars
+        (180 Tage, 1h) bedeutete das: der RSI/ATR/ADX/etc. wurde bei Bar
+        4320 über alle 4320 vorherigen Punkte neu berechnet, obwohl nur
+        der letzte Wert gebraucht wurde - macht die Gesamtschleife O(n^2)
+        (beobachtet auf dem Produktivserver: Backtest mit 4320 Bars ließ
+        den Worker >10 Minuten auf 100% CPU haengen, "unhealthy").
+
+        Alle hier verwendeten calc_*/_ema/_sma-Funktionen sind kausale
+        Rekursionen (result[i] haengt nur von result[i-1] und values[i]
+        ab, nie von zukünftigen Werten) - eine einmalige Berechnung über
+        die volle Serie liefert an Index i denselben Wert wie eine
+        Berechnung nur über candles[:i+1]. Kein Look-Ahead-Risiko, siehe
+        Modul-Docstring "Look-Ahead-Prävention". FeatureEngineer.compute()
+        selbst bleibt unverändert und stateless für alle anderen Aufrufer
+        (Live-Trading, Recovery, API) - diese Methode ist ein simulator-
+        interner Fast-Path, keine Ersatzimplementierung der fachlichen
+        Indikator-Logik (nutzt exakt dieselben calc_*-Bausteine).
+        """
+        n = len(candles)
+        if n == 0:
+            return []
+
+        arrays = candles_to_arrays(candles)
+        c, h, lo, v = arrays.close, arrays.high, arrays.low, arrays.volume
+
+        rsi_14_arr = calc_rsi(c, 14)
+        rsi_7_arr = calc_rsi(c, 7)
+        macd_line_arr, macd_signal_arr, macd_hist_arr = calc_macd(c)
+        atr_arr = calc_atr(h, lo, c, 14)
+        adx_arr, dip_arr, dim_arr = calc_adx(h, lo, c, 14)
+        bb_upper_arr, bb_mid_arr, bb_lower_arr = calc_bollinger_bands(c, 20, 2.0)
+        kc_u_arr, kc_l_arr = calc_keltner_channels(h, lo, c)
+        ema_9_arr = fe._ema(c, 9)
+        ema_21_arr = fe._ema(c, 21)
+        ema_50_arr = fe._ema(c, 50) if n >= 50 else np.full(n, np.nan)
+        ema_200_arr = fe._ema(c, 200) if n >= 200 else np.full(n, np.nan)
+        sma_20_arr = fe._sma(c, 20)
+        vwap_arr = calc_vwap(h, lo, c, v)
+        vol_sma_arr = fe._sma(v, 20)
+        obv_arr = calc_obv(c, v)
+        obv_sma_arr = fe._sma(obv_arr, 20)
+
+        def _at(arr: np.ndarray, i: int) -> float | None:
+            val = arr[i]
+            return None if np.isnan(val) else float(val)
+
+        def _at_dec(arr: np.ndarray, i: int) -> Decimal | None:
+            val = arr[i]
+            return None if np.isnan(val) else Decimal(str(round(val, 8)))
+
+        results: list[FeatureSet | None] = [None] * n
+        for i in range(n):
+            if i + 1 < self._engineer.MIN_CANDLES:
+                continue
+
+            atr_val = _at_dec(atr_arr, i)
+            atr_pct = float(atr_val / Decimal(str(c[i]))) if atr_val and c[i] > 0 else None
+
+            bb_u, bb_m, bb_l = _at(bb_upper_arr, i), _at(bb_mid_arr, i), _at(bb_lower_arr, i)
+            bb_width: float | None = None
+            bb_position: float | None = None
+            if bb_u and bb_m and bb_l and bb_m > 0:
+                bb_width = (bb_u - bb_l) / bb_m
+                if bb_u != bb_l:
+                    bb_position = (c[i] - bb_l) / (bb_u - bb_l)
+
+            vol_ratio: float | None = None
+            if not np.isnan(vol_sma_arr[i]) and vol_sma_arr[i] > 0:
+                vol_ratio = float(v[i] / vol_sma_arr[i])
+
+            obv_val: float | None = None
+            if not np.isnan(obv_sma_arr[i]) and obv_sma_arr[i] != 0:
+                obv_val = float((obv_arr[i] - obv_sma_arr[i]) / abs(obv_sma_arr[i]))
+
+            indicators = IndicatorValues(
+                rsi_14=_at(rsi_14_arr, i),
+                rsi_7=_at(rsi_7_arr, i),
+                macd_line=_at(macd_line_arr, i),
+                macd_signal=_at(macd_signal_arr, i),
+                macd_histogram=_at(macd_hist_arr, i),
+                adx_14=_at(adx_arr, i),
+                di_plus=_at(dip_arr, i),
+                di_minus=_at(dim_arr, i),
+                atr_14=atr_val,
+                atr_pct=atr_pct,
+                bb_upper=_at_dec(bb_upper_arr, i),
+                bb_middle=_at_dec(bb_mid_arr, i),
+                bb_lower=_at_dec(bb_lower_arr, i),
+                bb_width=bb_width,
+                bb_position=bb_position,
+                kc_upper=_at_dec(kc_u_arr, i),
+                kc_lower=_at_dec(kc_l_arr, i),
+                ema_9=_at_dec(ema_9_arr, i),
+                ema_21=_at_dec(ema_21_arr, i),
+                ema_50=_at_dec(ema_50_arr, i),
+                ema_200=_at_dec(ema_200_arr, i),
+                sma_20=_at_dec(sma_20_arr, i),
+                vwap=_at_dec(vwap_arr, i),
+                volume_sma_20=_at_dec(vol_sma_arr, i),
+                volume_ratio=vol_ratio,
+                obv=obv_val,
+            )
+
+            returns_1 = float((c[i] - c[i - 1]) / c[i - 1]) if i >= 1 else None
+            returns_5 = float((c[i] - c[i - 5]) / c[i - 5]) if i >= 5 else None
+            returns_10 = float((c[i] - c[i - 10]) / c[i - 10]) if i >= 10 else None
+            returns_20 = float((c[i] - c[i - 20]) / c[i - 20]) if i >= 20 else None
+
+            candle = candles[i]
+            results[i] = FeatureSet(
+                symbol=candle.symbol,
+                timestamp=candle.timestamp,
+                timeframe=candle.timeframe,
+                close=candle.close,
+                volume=candle.volume,
+                indicators=indicators,
+                orderbook=None,
+                returns_1=returns_1,
+                returns_5=returns_5,
+                returns_10=returns_10,
+                returns_20=returns_20,
+                regime=MarketRegime.UNKNOWN,
+            )
+
+        return results
+
     async def run(
         self,
         candles_by_symbol: dict[str, list[Candle]],
@@ -161,15 +313,22 @@ class BacktestSimulator:
             strategies=[s.name for s in active_strategies],
         )
 
+        # Performance: alle Indikatoren EINMAL über die komplette Serie
+        # vorausberechnen statt bei jedem Bar mit einer wachsenden History
+        # neu (siehe _precompute_all_features() Docstring für die
+        # vollständige Begründung - vorher O(n^2), jetzt O(n)).
+        precomputed_features = self._precompute_all_features(candles)
+
         for bar_idx in range(warmup, len(candles)):
             current_bar = candles[bar_idx]
-            history = candles[: bar_idx + 1]
             bar_count += 1
 
-            # 1. Features berechnen (nur History bis inkl. aktuellen Bar)
-            try:
-                features = self._engineer.compute(history)
-            except Exception:
+            # 1. Features (vorausberechnet, siehe oben - kein compute()-Call
+            # mehr im Hot-Loop). None nur möglich wenn bar_idx+1 < MIN_CANDLES,
+            # was wegen warmup=200 > MIN_CANDLES=50 hier nie eintritt, defensiv
+            # trotzdem behandelt.
+            features = precomputed_features[bar_idx]
+            if features is None:
                 continue
 
             # Regime (vereinfacht: aus ADX/RSI ableiten ohne ML)
@@ -187,7 +346,14 @@ class BacktestSimulator:
             self._update_positions(float(current_bar.close))
 
             # 3. Exit-Logic: einfacher ATR-basierter Stop
-            await self._check_exits(bar_idx, current_bar, history)
+            # _check_exits braucht nur die letzten 15 Bars (ATR-Fenster),
+            # nicht die komplette History - vermeidet den O(bar_idx)
+            # Listen-Slice candles[:bar_idx+1], der bei jedem Bar erneut
+            # die komplett wachsende Liste kopiert hätte (ebenfalls O(n^2)
+            # über die gesamte Schleife, unabhängig von der
+            # Feature-Berechnung selbst).
+            recent_window = candles[max(0, bar_idx - 14) : bar_idx + 1]
+            await self._check_exits(bar_idx, current_bar, recent_window)
 
             # 4. Entry-Logic: Signal generieren
             if not self._positions:  # Nur neue Position wenn keine offen
@@ -240,11 +406,11 @@ class BacktestSimulator:
     def _generate_signal(
         self,
         context: MarketContext,
-        strategies: list,
+        strategies: list[TradingStrategy],
         regime: MarketRegime,
     ) -> Signal | None:
         """Alle aktiven Strategien befragen, bestes Signal wählen."""
-        signals = []
+        signals: list[Signal] = []
         for strategy in strategies:
             if regime not in strategy.supported_regimes:
                 continue
@@ -264,7 +430,8 @@ class BacktestSimulator:
         if has_long and has_short:
             return None
 
-        return max(signals, key=lambda s: s.confidence)
+        best_signal: Signal = max(signals, key=lambda s: s.confidence)
+        return best_signal
 
     # ------------------------------------------------------------------
     # Position Management
@@ -472,7 +639,7 @@ class BacktestSimulator:
     ) -> None:
         """Fügt Equity-Kurve Punkt hinzu."""
         if portfolio_value > self._peak_value:
-            self._peak_value = Decimal(str(portfolio_value))  # type: ignore[assignment]
+            self._peak_value = Decimal(str(portfolio_value))
 
         drawdown = 0.0
         if float(self._peak_value) > 0:

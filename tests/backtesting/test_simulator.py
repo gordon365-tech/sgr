@@ -13,6 +13,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
+
 from sgr.backtesting.simulator import BacktestSimulator, SimulatedPosition
 from sgr.backtesting.types import BacktestConfig
 from sgr.core.types import ExchangeID, MarketRegime, Signal, SignalDirection, Symbol
@@ -778,22 +780,78 @@ class TestEndToEnd:
         # LONG signal across a real feature-engineered uptrend.
         assert len(trades) >= 1 or sim._positions  # opened (and maybe still open until close)
 
-    async def test_full_run_feature_engineer_exception_skips_bar(self, monkeypatch):
+    async def test_full_run_precompute_exception_propagates(self, monkeypatch):
+        """
+        Verhaltensänderung durch den Precompute-Performance-Fix (siehe
+        BacktestSimulator._precompute_all_features() Docstring): Feature-
+        Berechnung läuft jetzt EINMAL vektorisiert über die komplette Serie
+        vor der Hauptschleife, nicht mehr pro Bar mit individuellem
+        try/except. Ein Fehler in der Vorab-Berechnung ist ein
+        struktureller Bug (z.B. NaN-Propagation durch die ganze Serie),
+        kein isolierbarer "kaputter einzelner Bar" mehr wie zuvor - er
+        propagiert bewusst, statt Bars stillschweigend zu überspringen und
+        einen irreführend unvollständigen Backtest zu produzieren.
+        """
         candles = make_candles(210, start_price=100.0, drift=0.3)
         sim = BacktestSimulator(make_config())
 
-        call_count = {"n": 0}
-        original_compute = sim._engineer.compute
+        monkeypatch.setattr(
+            sim,
+            "_precompute_all_features",
+            lambda candles: (_ for _ in ()).throw(ValueError("feature computation blew up")),
+        )
 
-        def flaky_compute(history):
-            call_count["n"] += 1
-            if call_count["n"] <= 3:
-                raise ValueError("feature computation blew up")
-            return original_compute(history)
+        with pytest.raises(ValueError, match="feature computation blew up"):
+            await sim.run({SYMBOL_STR: candles}, FakeRegistry([]))
 
-        monkeypatch.setattr(sim._engineer, "compute", flaky_compute)
 
-        trades, equity = await sim.run({SYMBOL_STR: candles}, FakeRegistry([]))
+# ===========================================================================
+# BacktestSimulator._precompute_all_features
+# ===========================================================================
 
-        # First 3 bars are skipped (continue), rest proceed normally
-        assert len(equity) == 10 - 3  # 210-200=10 total loop iterations, 3 skipped
+
+class TestPrecomputeAllFeatures:
+    """
+    Performance-Fix Regression: _precompute_all_features() muss für jeden
+    Bar-Index EXAKT dasselbe FeatureSet liefern wie
+    FeatureEngineer().compute(candles[:i+1]) - die alte, pro-Bar-Methode,
+    die vorher im Hot-Loop lief (siehe run()-Docstring / Modul-Historie).
+    Das ist die Korrektheitsgarantie für den O(n^2)->O(n) Fix: schnellere
+    Berechnung ist wertlos, wenn sie andere Zahlen liefert.
+    """
+
+    @pytest.mark.parametrize("bar_index", [199, 200, 201, 250, 299])
+    async def test_matches_per_bar_compute_for_various_indices(self, bar_index):
+        from sgr.market_data.feature_engineering import FeatureEngineer
+
+        candles = make_candles(300, start_price=100.0, drift=0.3)
+        sim = BacktestSimulator(make_config())
+        engineer = FeatureEngineer()
+
+        precomputed = sim._precompute_all_features(candles)
+        expected = engineer.compute(candles[: bar_index + 1])
+        actual = precomputed[bar_index]
+
+        assert actual is not None
+        assert actual.indicators == expected.indicators
+        assert actual.returns_1 == expected.returns_1
+        assert actual.returns_5 == expected.returns_5
+        assert actual.returns_10 == expected.returns_10
+        assert actual.returns_20 == expected.returns_20
+        assert actual.close == expected.close
+        assert actual.timestamp == expected.timestamp
+
+    async def test_indices_below_min_candles_are_none(self):
+        candles = make_candles(300, start_price=100.0, drift=0.3)
+        sim = BacktestSimulator(make_config())
+
+        precomputed = sim._precompute_all_features(candles)
+
+        # MIN_CANDLES=50 -> Index 48 (49 Bars History) ist zu wenig
+        assert precomputed[48] is None
+        # Index 49 (50 Bars History) reicht gerade
+        assert precomputed[49] is not None
+
+    async def test_empty_candles_returns_empty_list(self):
+        sim = BacktestSimulator(make_config())
+        assert sim._precompute_all_features([]) == []
