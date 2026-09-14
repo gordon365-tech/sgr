@@ -109,11 +109,21 @@ class ExecutionEngine:
         # Submit-Fehlern, Abgrenzung zur Exchange-seitigen clientOrderId).
         self._safety = SafeOrderExecutor()
 
-    async def execute(self, order: OrderRequest) -> OrderResult:
+    async def execute(
+        self, order: OrderRequest, bypass_kill_switch: bool = False
+    ) -> OrderResult:
         """
         Hauptmethode: OrderRequest → OrderResult.
 
         Fail-Safe: jede Exception → REJECTED Result (kein uncontrolled State).
+
+        bypass_kill_switch: NUR fuer den PositionLiquidator gedacht (siehe
+            sgr/risk/position_liquidator.py) - eine de-risking Order, die
+            der Kill Switch selbst kommissioniert hat (Positionen
+            schliessen), darf nicht an seiner eigenen is_active-Sperre
+            scheitern. Default False haelt jeden bestehenden Aufrufer
+            (Orchestrator, Tests) unveraendert streng: neues Risiko bleibt
+            bei aktivem Kill Switch blockiert.
         """
         # Sanity check: trading_mode muss übereinstimmen
         if order.trading_mode != self._trading_mode:
@@ -123,7 +133,7 @@ class ExecutionEngine:
             )
 
         # Kill Switch (letzte Absicherung vor Exchange-Call)
-        if self._kill_switch.is_active:
+        if self._kill_switch.is_active and not bypass_kill_switch:
             log.warning(
                 "execution_engine.blocked_by_kill_switch",
                 order_id=str(order.id),

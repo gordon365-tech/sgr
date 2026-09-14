@@ -662,6 +662,24 @@ class TestKillSwitch:
         await kill_switch.trigger("Close positions test", close_positions=True)
         assert kill_switch.is_active
 
+    async def test_published_event_carries_tenant_id_and_close_positions(
+        self, mocker: pytest_mock.MockerFixture
+    ) -> None:
+        """PositionLiquidator (sgr/risk/position_liquidator.py) filtert auf
+        genau diese beiden Felder - fehlen sie im publizierten Event oder
+        stimmt tenant_id nicht, schliesst niemand die Positionen."""
+        bus = mocker.Mock()
+        bus.publish = mocker.AsyncMock()
+        mocker.patch("sgr.risk.kill_switch.get_event_bus", return_value=bus)
+
+        ks = KillSwitch(TradingMode.PAPER, tenant_id="gordon-tenant")
+        await ks.trigger("Drawdown breach", close_positions=True)
+
+        bus.publish.assert_awaited_once()
+        published_event = bus.publish.await_args.args[0]
+        assert published_event.tenant_id == "gordon-tenant"
+        assert published_event.close_positions is True
+
     async def test_trigger_survives_adapter_iteration_crash(
         self, kill_switch: KillSwitch, mocker: pytest_mock.MockerFixture
     ) -> None:

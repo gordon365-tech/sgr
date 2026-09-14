@@ -151,6 +151,26 @@ class TestKillSwitchBlocking:
         assert "Kill switch active" in result.raw_response["rejection_reason"]
         adapter.place_order.assert_not_awaited()
 
+    async def test_bypass_kill_switch_allows_submission_while_active(
+        self, engine: ExecutionEngine, mock_pool: tuple[MagicMock, AsyncMock]
+    ) -> None:
+        """PositionLiquidator (sgr/risk/position_liquidator.py) sendet
+        schliessende Orders WAEHREND der Kill Switch aktiv ist - das ist
+        die Reaktion auf den Kill Switch, nicht neues Risiko. Ohne
+        bypass_kill_switch=True wuerde sich die Closing-Order selbst
+        blockieren."""
+        _pool, adapter = mock_pool
+        adapter.place_order = AsyncMock(
+            return_value=_make_order_result(_make_order_request())
+        )
+        engine._kill_switch.is_active = True  # type: ignore[misc]
+        order = _make_order_request()
+
+        result = await engine.execute(order, bypass_kill_switch=True)
+
+        assert result.status == OrderStatus.FILLED
+        adapter.place_order.assert_awaited_once()
+
     async def test_kill_switch_activated_during_monitoring_cancels_order(
         self,
         engine: ExecutionEngine,

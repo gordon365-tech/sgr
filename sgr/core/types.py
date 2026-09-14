@@ -392,6 +392,17 @@ class KillSwitchEvent(BaseEvent):
     reason: str
     severity: AlertSeverity = AlertSeverity.KILL_SWITCH
     trading_mode: TradingMode
+    # tenant_id: welcher Tenant den Kill Switch ausgeloest hat. Noetig, weil
+    # der Event-Bus-Stream sgr:kill_switch_event NICHT tenant-partitioniert
+    # ist (anders als der Redis-Key/Channel in kill_switch.py) - jeder
+    # Konsument (z.B. PositionLiquidator) MUSS Events mit abweichender
+    # tenant_id ignorieren, sonst wuerde Gordons Kill Switch auch Sumos
+    # Positionen schliessen und umgekehrt. None = Single-Tenant-Deployment.
+    tenant_id: str | None = None
+    # close_positions: Spiegelt KillSwitch.trigger(close_positions=...) -
+    # ohne dieses Feld wuesste ein Event-Konsument nicht, ob nur Orders
+    # gecancelt oder zusaetzlich Positionen geschlossen werden sollen.
+    close_positions: bool = False
 
 
 class AlertEvent(BaseEvent):

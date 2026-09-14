@@ -353,6 +353,29 @@ async def lifespan(
         )
         app.state.orchestrator = orchestrator
 
+        # 8b-ii. Position Liquidator (schliesst die Kill-Switch
+        # close_positions=True-Luecke, siehe sgr/risk/position_liquidator.py
+        # Modul-Docstring: KillSwitch publizierte das Event schon immer,
+        # aber niemand hoerte je zu). Konsumiert denselben KillSwitchEvent-
+        # Stream wie jeder andere Tenant, filtert intern per tenant_id -
+        # siehe dortigen Docstring fuer die Begruendung.
+        from sgr.core.types import KillSwitchEvent
+        from sgr.risk.position_liquidator import PositionLiquidator
+
+        liquidator = PositionLiquidator(
+            portfolio_engine=portfolio_engine,
+            execution_engine=execution_engine,
+            tenant_id=config.tenant_id,
+        )
+        app.state.position_liquidator = liquidator
+        liquidator_tenant_suffix = config.tenant_id or "default"
+        bus.subscribe(
+            KillSwitchEvent,
+            liquidator.on_kill_switch_event,
+            consumer_group=f"position_liquidator:{liquidator_tenant_suffix}",
+            consumer_name=f"position_liquidator-{liquidator_tenant_suffix}-1",
+        )
+
         # 8c. Reconciliation Engine (Phase 7B)
         # Nur in LIVE aussagekräftig (siehe sgr/reconciliation/engine.py
         # Modul-Docstring) - wird trotzdem immer instanziiert, damit

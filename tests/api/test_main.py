@@ -745,8 +745,19 @@ class TestLifespanTenantId:
                 new=AsyncMock(return_value={"apiKey": "k", "secret": "s"}),
             ):
                 async with lifespan(app):
-                    mocks["bus"].subscribe.assert_called_once()
-                    call = mocks["bus"].subscribe.call_args
+                    # bus.subscribe() wird zweimal aufgerufen (CandleEvent
+                    # fuer den Orchestrator, KillSwitchEvent fuer den
+                    # PositionLiquidator - siehe sgr/risk/position_liquidator.py).
+                    # Dieser Test prueft gezielt die CandleEvent-Subscription.
+                    from sgr.core.types import CandleEvent
+
+                    candle_calls = [
+                        c
+                        for c in mocks["bus"].subscribe.call_args_list
+                        if c.args[0] is CandleEvent
+                    ]
+                    assert len(candle_calls) == 1
+                    call = candle_calls[0]
                     assert call.kwargs["consumer_group"] == "orchestrator:a47d994d-gordon"
                     assert call.kwargs["consumer_name"] == "orchestrator-a47d994d-gordon-1"
         finally:

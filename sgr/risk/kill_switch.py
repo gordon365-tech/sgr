@@ -320,8 +320,10 @@ class KillSwitch:
         if close_positions:
             await self._close_all_positions()
 
-        # 5. Event Bus – andere Module informieren
-        await self._publish_event(reason)
+        # 5. Event Bus – andere Module informieren (u.a. PositionLiquidator,
+        # siehe sgr/risk/position_liquidator.py, der bei close_positions=True
+        # die tatsaechlichen schliessenden Market Orders sendet)
+        await self._publish_event(reason, close_positions)
 
     async def _cancel_all_orders(self) -> None:
         """Cancelt alle offenen Orders auf allen Exchanges. Best-effort."""
@@ -358,20 +360,26 @@ class KillSwitch:
 
     async def _close_all_positions(self) -> None:
         """
-        Schließt alle offenen Positionen mit Market Orders.
-        Nur wenn explizit requested (close_positions=True).
-        In Krisensituationen kann Market-Close selbst Slippage verursachen.
+        Kuendigt an, dass alle offenen Positionen mit Market Orders
+        geschlossen werden sollen. Nur wenn explizit requested
+        (close_positions=True). In Krisensituationen kann Market-Close
+        selbst Slippage verursachen.
+
+        Die tatsaechliche Ausfuehrung (Market Orders senden, Portfolio
+        State aktualisieren) passiert bewusst NICHT hier, sondern im
+        PositionLiquidator (sgr/risk/position_liquidator.py), der ueber
+        das per _publish_event() publizierte KillSwitchEvent
+        (close_positions=True) getriggert wird - siehe dortigen
+        Modul-Docstring fuer die Begruendung (circular dep vermeiden:
+        KillSwitch kennt weder PortfolioEngine noch ExecutionEngine).
         """
         log.warning(
             "kill_switch.closing_all_positions",
             trading_mode=self._trading_mode.value,
             note="Market orders will be placed for all open positions",
         )
-        # Implementierung durch Portfolio Engine (circular dep vermeiden)
-        # Event wird publiziert → Portfolio Engine hört zu
-        # Hier nur Log – Portfolio Engine schließt bei KillSwitchEvent
 
-    async def _publish_event(self, reason: str) -> None:
+    async def _publish_event(self, reason: str, close_positions: bool = False) -> None:
         """Publiziert KillSwitchEvent auf Event Bus."""
         try:
             event = KillSwitchEvent(
@@ -380,6 +388,8 @@ class KillSwitch:
                 reason=reason,
                 severity=AlertSeverity.KILL_SWITCH,
                 trading_mode=self._trading_mode,
+                tenant_id=self._tenant_id,
+                close_positions=close_positions,
             )
             bus = get_event_bus()
             await bus.publish(event)
