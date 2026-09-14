@@ -170,6 +170,108 @@ class TestSGRMetrics:
         record_candle_received(symbol="BTC/USDT", timeframe="1h")
 
 
+class TestSGRMetricsTenantScoping:
+    """
+    Server-verifizierte Multi-Tenant-Lücke (Schritt 6): worker-gordon und
+    worker-sumo laufen als separate Prozesse, aber ohne Tenant-Label waren
+    ihre Metriken in Prometheus ununterscheidbar (bestätigt per curl:
+    zwei identische sgr_strategy_active_count-Zeilen). Diese Tests prüfen
+    den Fix direkt: _TenantScopedInstrument muss "tenant" transparent in
+    jeden Call injizieren, ohne dass Aufrufer (record_*-Funktionen,
+    MonitoringEngine) sich selbst darum kümmern müssen.
+    """
+
+    def setup_method(self) -> None:
+        metrics_module._metrics_instance = None
+
+    def test_tenant_id_defaults_to_default_without_config_context(self) -> None:
+        m = SGRMetrics()
+        assert isinstance(m._tenant_id, str)
+
+    def test_explicit_tenant_id_is_used(self) -> None:
+        m = SGRMetrics(tenant_id="gordon")
+        assert m._tenant_id == "gordon"
+
+    def test_tenant_id_falls_back_to_default_when_config_unavailable(self, mocker) -> None:
+        """Fail-safe: ein Config-Fehler (z.B. get_config() noch nicht
+        initialisiert) darf SGRMetrics() niemals crashen lassen - siehe
+        _resolve_tenant_id() Docstring."""
+        mocker.patch(
+            "sgr.monitoring.metrics.get_config", side_effect=RuntimeError("not configured")
+        )
+        m = SGRMetrics()
+        assert m._tenant_id == "default"
+
+    def test_set_injects_tenant_label(self, mocker) -> None:
+        underlying = mocker.MagicMock()
+        m = SGRMetrics(tenant_id="sumo")
+        m.portfolio_value._instrument = underlying
+
+        m.portfolio_value.set(100.0, {"status": "live"})
+
+        underlying.set.assert_called_once_with(100.0, {"tenant": "sumo", "status": "live"})
+
+    def test_add_injects_tenant_label(self, mocker) -> None:
+        underlying = mocker.MagicMock()
+        m = SGRMetrics(tenant_id="gordon")
+        m.trades_total._instrument = underlying
+
+        m.trades_total.add(1, {"side": "buy"})
+
+        underlying.add.assert_called_once_with(1, {"tenant": "gordon", "side": "buy"})
+
+    def test_set_injects_tenant_label_even_without_extra_attributes(self, mocker) -> None:
+        underlying = mocker.MagicMock()
+        m = SGRMetrics(tenant_id="gordon")
+        m.active_strategies_count._instrument = underlying
+
+        m.active_strategies_count.set(3)
+
+        underlying.set.assert_called_once_with(3, {"tenant": "gordon"})
+
+    def test_two_tenant_instances_produce_distinct_prometheus_series(self) -> None:
+        """End-to-end gegen eine echte prometheus_client REGISTRY: zwei
+        SGRMetrics-Instanzen mit unterschiedlicher tenant_id müssen zwei
+        unterscheidbare Zeitreihen erzeugen - genau der auf dem Server
+        beobachtete Bug, jetzt als Regressionstest."""
+        from opentelemetry import metrics as otel_metrics
+        from opentelemetry.exporter.prometheus import PrometheusMetricReader
+        from opentelemetry.sdk.metrics import MeterProvider
+        from prometheus_client import CollectorRegistry, generate_latest
+
+        registry = CollectorRegistry()
+        reader = PrometheusMetricReader(registry=registry)
+        provider = MeterProvider(metric_readers=[reader])
+        otel_metrics.set_meter_provider(provider)
+
+        m_gordon = SGRMetrics(tenant_id="gordon")
+        m_gordon.active_strategies_count.set(0, {"trading_mode": "paper"})
+
+        m_sumo = SGRMetrics(tenant_id="sumo")
+        m_sumo.active_strategies_count.set(1, {"trading_mode": "paper"})
+
+        out = generate_latest(registry).decode()
+        gordon_lines = [
+            line
+            for line in out.splitlines()
+            if "sgr_strategy_active_count" in line
+            and not line.startswith("#")
+            and 'tenant="gordon"' in line
+        ]
+        sumo_lines = [
+            line
+            for line in out.splitlines()
+            if "sgr_strategy_active_count" in line
+            and not line.startswith("#")
+            and 'tenant="sumo"' in line
+        ]
+        assert len(gordon_lines) == 1
+        assert len(sumo_lines) == 1
+        assert gordon_lines[0] != sumo_lines[0]
+        assert " 0.0" in gordon_lines[0]
+        assert " 1.0" in sumo_lines[0]
+
+
 # ---------------------------------------------------------------------------
 # sentry.py
 # ---------------------------------------------------------------------------

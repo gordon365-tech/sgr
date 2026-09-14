@@ -7,101 +7,110 @@ Portfolio, Risk, Strategy & Market Data Metrics.
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Any
 
 from opentelemetry import metrics
 from opentelemetry.metrics import Meter
 
+from sgr.core.config import get_config
 from sgr.core.logging import get_logger
 
 log = get_logger(__name__)
 
 
-class SGRMetrics:
-    """Zentralisierte Custom Metrics."""
+class _TenantScopedInstrument:
+    """
+    Transparenter Wrapper um ein OTel-Gauge/Counter-Instrument: injiziert
+    automatisch ein "tenant" Label in jeden .set()/.add()-Aufruf.
 
-    def __init__(self) -> None:
+    Hintergrund (Schritt 6, Server-verifiziert): sgr-worker laeuft als ein
+    Prozess PRO Tenant (worker-gordon, worker-sumo - siehe
+    docker-compose.prod.yml), aber SGRMetrics ist ein reines In-Prozess-
+    Singleton ohne jegliches Tenant-Label. Jeder Worker-Prozess erzeugte
+    seine Gauges bisher mit identischen Labels (z.B. {"strategy": "...",
+    "trading_mode": "paper"}), die beim Zusammenfuehren in
+    worker_metrics_bridge.collect_worker_metrics() (Redis-Snapshots werden
+    roh aneinandergehaengt, kein Label-Rewriting) fuer Prometheus
+    ununterscheidbar sind - bestaetigt per curl auf dem Server: zwei
+    identische sgr_strategy_active_count-Zeilen fuer Gordon und Sumo.
+
+    Dieser Wrapper macht es strukturell unmoeglich, das Tenant-Label zu
+    vergessen: jeder Aufrufer (record_*-Funktionen, MonitoringEngine, jeder
+    zukuenftige neue Call) muss KEIN zusaetzliches Label mitgeben - es wird
+    hier immer automatisch injiziert, auch wenn der Aufrufer selbst kein
+    "tenant" im uebergebenen Dict hat. Ein explizit im Aufrufer-Dict
+    gesetztes "tenant" wuerde NICHT ueberschrieben (siehe dict-merge-
+    Reihenfolge unten) - kommt in der Praxis aber nicht vor, da kein
+    Aufrufer aktuell "tenant" selbst setzt.
+    """
+
+    __slots__ = ("_instrument", "_tenant_id")
+
+    def __init__(self, instrument: Any, tenant_id: str) -> None:
+        self._instrument = instrument
+        self._tenant_id = tenant_id
+
+    def _with_tenant(self, attributes: dict[str, str] | None) -> dict[str, str]:
+        merged = {"tenant": self._tenant_id}
+        if attributes:
+            merged.update(attributes)
+        return merged
+
+    def set(self, amount: float, attributes: dict[str, str] | None = None) -> None:
+        self._instrument.set(amount, self._with_tenant(attributes))
+
+    def add(self, amount: float, attributes: dict[str, str] | None = None) -> None:
+        self._instrument.add(amount, self._with_tenant(attributes))
+
+
+class SGRMetrics:
+    """Zentralisierte Custom Metrics.
+
+    tenant_id: identifiziert den Tenant-Prozess (z.B. "gordon", "sumo"),
+    der diese Instanz erzeugt hat - siehe _TenantScopedInstrument
+    Docstring fuer den Hintergrund. Default "default" fuer Single-Tenant-
+    Deployments/Tests, in denen kein Tenant-Kontext existiert.
+    """
+
+    def __init__(self, tenant_id: str | None = None) -> None:
         self._meter: Meter = metrics.get_meter(__name__)
+        self._tenant_id = tenant_id or _resolve_tenant_id()
+
+        def gauge(name: str, description: str, unit: str = "") -> _TenantScopedInstrument:
+            instrument = self._meter.create_gauge(name=name, description=description, unit=unit)
+            return _TenantScopedInstrument(instrument, self._tenant_id)
+
+        def counter(name: str, description: str) -> _TenantScopedInstrument:
+            instrument = self._meter.create_counter(name=name, description=description)
+            return _TenantScopedInstrument(instrument, self._tenant_id)
 
         # Portfolio Metrics
-        self.portfolio_value = self._meter.create_gauge(
-            name="sgr.portfolio.value_usd",
-            description="Current portfolio value",
-            unit="USD",
-        )
-
-        self.portfolio_cash = self._meter.create_gauge(
-            name="sgr.portfolio.cash_usd",
-            description="Available cash",
-            unit="USD",
-        )
-
-        self.daily_pnl = self._meter.create_gauge(
-            name="sgr.portfolio.daily_pnl_usd",
-            description="Daily profit/loss",
-            unit="USD",
-        )
-
-        self.daily_pnl_pct = self._meter.create_gauge(
-            name="sgr.portfolio.daily_pnl_pct",
-            description="Daily profit/loss percentage",
-            unit="%",
+        self.portfolio_value = gauge("sgr.portfolio.value_usd", "Current portfolio value", "USD")
+        self.portfolio_cash = gauge("sgr.portfolio.cash_usd", "Available cash", "USD")
+        self.daily_pnl = gauge("sgr.portfolio.daily_pnl_usd", "Daily profit/loss", "USD")
+        self.daily_pnl_pct = gauge(
+            "sgr.portfolio.daily_pnl_pct", "Daily profit/loss percentage", "%"
         )
 
         # Risk Metrics
-        self.portfolio_heat = self._meter.create_gauge(
-            name="sgr.risk.portfolio_heat",
-            description="Portfolio heat (0-1)",
+        self.portfolio_heat = gauge("sgr.risk.portfolio_heat", "Portfolio heat (0-1)")
+        self.max_drawdown = gauge("sgr.risk.max_drawdown_pct", "Maximum drawdown", "%")
+        self.leverage = gauge("sgr.risk.leverage", "Current leverage ratio")
+        self.open_positions_count = gauge(
+            "sgr.risk.open_positions", "Number of open positions"
         )
-
-        self.max_drawdown = self._meter.create_gauge(
-            name="sgr.risk.max_drawdown_pct",
-            description="Maximum drawdown",
-            unit="%",
-        )
-
-        self.leverage = self._meter.create_gauge(
-            name="sgr.risk.leverage",
-            description="Current leverage ratio",
-        )
-
-        self.open_positions_count = self._meter.create_gauge(
-            name="sgr.risk.open_positions",
-            description="Number of open positions",
-        )
-
-        self.var_95 = self._meter.create_gauge(
-            name="sgr.risk.var_95_pct",
-            description="Value at Risk (95% confidence)",
-            unit="%",
-        )
+        self.var_95 = gauge("sgr.risk.var_95_pct", "Value at Risk (95% confidence)", "%")
 
         # Trading Metrics
-        self.trades_total = self._meter.create_counter(
-            name="sgr.trades.total",
-            description="Total trades executed",
-        )
-
-        self.trades_winning = self._meter.create_counter(
-            name="sgr.trades.winning",
-            description="Winning trades",
-        )
-
-        self.trades_losing = self._meter.create_counter(
-            name="sgr.trades.losing",
-            description="Losing trades",
-        )
+        self.trades_total = counter("sgr.trades.total", "Total trades executed")
+        self.trades_winning = counter("sgr.trades.winning", "Winning trades")
+        self.trades_losing = counter("sgr.trades.losing", "Losing trades")
 
         # Strategy Metrics
-        self.strategy_signals = self._meter.create_counter(
-            name="sgr.strategy.signals_generated",
-            description="Trading signals generated",
+        self.strategy_signals = counter(
+            "sgr.strategy.signals_generated", "Trading signals generated"
         )
-
-        self.strategy_win_rate = self._meter.create_gauge(
-            name="sgr.strategy.win_rate_pct",
-            description="Strategy win rate",
-            unit="%",
-        )
+        self.strategy_win_rate = gauge("sgr.strategy.win_rate_pct", "Strategy win rate", "%")
 
         # Strategy Validation Metrics (Schritt 6: Sharpe/Return/Drawdown aus
         # StrategyValidationRunner duerfen nicht nur geloggt werden - siehe
@@ -109,59 +118,59 @@ class SGRMetrics:
         # log.debug ausgab, nie als Metrik. Quelle: StrategyEntry.
         # last_validation_result (sgr/strategy/registry.py), gefuellt von
         # StrategyValidationRunner.mark_validated().
-        self.active_strategies_count = self._meter.create_gauge(
-            name="sgr.strategy.active_count",
-            description="Number of currently activated (validated, is_active) strategies",
+        self.active_strategies_count = gauge(
+            "sgr.strategy.active_count",
+            "Number of currently activated (validated, is_active) strategies",
         )
-
-        self.strategy_validation_status = self._meter.create_gauge(
-            name="sgr.strategy.validation_status",
-            description=(
-                "Go-live gate result per strategy (1 = can_go_live, "
-                "0 = not approved for paper/live activation)"
-            ),
+        self.strategy_validation_status = gauge(
+            "sgr.strategy.validation_status",
+            "Go-live gate result per strategy (1 = can_go_live, "
+            "0 = not approved for paper/live activation)",
         )
-
-        self.strategy_sharpe_ratio = self._meter.create_gauge(
-            name="sgr.strategy.backtest_sharpe_ratio",
-            description="Sharpe ratio from the most recent validation backtest",
+        self.strategy_sharpe_ratio = gauge(
+            "sgr.strategy.backtest_sharpe_ratio",
+            "Sharpe ratio from the most recent validation backtest",
         )
-
-        self.strategy_total_return = self._meter.create_gauge(
-            name="sgr.strategy.backtest_total_return_pct",
-            description="Total return from the most recent validation backtest",
-            unit="%",
+        self.strategy_total_return = gauge(
+            "sgr.strategy.backtest_total_return_pct",
+            "Total return from the most recent validation backtest",
+            "%",
         )
-
-        self.strategy_max_drawdown = self._meter.create_gauge(
-            name="sgr.strategy.backtest_max_drawdown_pct",
-            description="Max drawdown from the most recent validation backtest",
-            unit="%",
+        self.strategy_max_drawdown = gauge(
+            "sgr.strategy.backtest_max_drawdown_pct",
+            "Max drawdown from the most recent validation backtest",
+            "%",
         )
-
-        self.strategy_backtest_trades = self._meter.create_gauge(
-            name="sgr.strategy.backtest_total_trades",
-            description="Number of trades in the most recent validation backtest",
+        self.strategy_backtest_trades = gauge(
+            "sgr.strategy.backtest_total_trades",
+            "Number of trades in the most recent validation backtest",
         )
 
         # Market Data Metrics
-        self.candles_received = self._meter.create_counter(
-            name="sgr.market_data.candles_received",
-            description="OHLCV candles received",
+        self.candles_received = counter(
+            "sgr.market_data.candles_received", "OHLCV candles received"
         )
 
         # System Metrics
-        self.api_requests_total = self._meter.create_counter(
-            name="sgr.api.requests_total",
-            description="Total API requests",
-        )
+        self.api_requests_total = counter("sgr.api.requests_total", "Total API requests")
+        self.api_errors_total = counter("sgr.api.errors_total", "API errors")
 
-        self.api_errors_total = self._meter.create_counter(
-            name="sgr.api.errors_total",
-            description="API errors",
-        )
+        log.info("metrics.sgr_metrics_initialized", tenant_id=self._tenant_id)
 
-        log.info("metrics.sgr_metrics_initialized")
+
+def _resolve_tenant_id() -> str:
+    """Liest tenant_id aus der globalen Config (sgr.core.config.get_config()
+    .tenant_id, dasselbe Feld, das WorkerMetricsPublisher bereits fuer den
+    Redis-Snapshot-Key nutzt - siehe sgr/api/main.py Instanziierungsstelle).
+    Fail-safe: liefert "default", falls Config noch nicht initialisiert ist
+    (z.B. in Unit-Tests ohne vollen App-Kontext) oder tenant_id nicht
+    gesetzt ist - konsistent mit WorkerMetricsPublisher's eigenem
+    "config.tenant_id or 'default'"-Fallback."""
+    try:
+        config = get_config()
+        return config.tenant_id or "default"
+    except Exception:
+        return "default"
 
 
 # Singleton instance
