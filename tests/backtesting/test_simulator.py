@@ -405,6 +405,10 @@ class TestCheckExits:
         assert SYMBOL_STR not in sim._positions
         assert len(sim._closed_trades) == 1
         assert sim._closed_trades[0].holding_bars == 20
+        # Schritt 10 Analyse-Fix: exit_reason muss im Trade landen, nicht
+        # nur geloggt werden - sonst ist post-hoc nicht unterscheidbar, ob
+        # eine Position durch Zeit-Exit oder ATR-Stop geschlossen wurde.
+        assert sim._closed_trades[0].metadata.get("exit_reason") == "time_exit"
 
     async def test_check_exits_atr_stop_long(self):
         sim = BacktestSimulator(make_config())
@@ -432,6 +436,7 @@ class TestCheckExits:
 
         assert SYMBOL_STR not in sim._positions
         assert sim._closed_trades[0].symbol == SYMBOL_STR
+        assert sim._closed_trades[0].metadata.get("exit_reason") == "atr_stop"
 
     async def test_check_exits_atr_stop_short(self):
         sim = BacktestSimulator(make_config())
@@ -455,6 +460,7 @@ class TestCheckExits:
         await sim._check_exits(10, spike_bar, candles)
 
         assert SYMBOL_STR not in sim._positions
+        assert sim._closed_trades[0].metadata.get("exit_reason") == "atr_stop"
 
     async def test_check_exits_no_exit_when_conditions_not_met(self):
         sim = BacktestSimulator(make_config())

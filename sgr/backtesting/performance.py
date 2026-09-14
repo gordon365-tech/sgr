@@ -335,6 +335,16 @@ class PerformanceAnalyzer:
             "confidence": t.entry_signal_confidence,
             "mae": str(t.max_adverse_excursion),
             "mfe": str(t.max_favorable_excursion),
+            # exit_reason ("atr_stop" | "time_exit", siehe
+            # BacktestSimulator._check_exits): bislang nur ins log.debug
+            # geschrieben und danach verworfen - kein Weg, nachtraeglich zu
+            # analysieren, WARUM eine Strategie verliert (z.B. verlässt der
+            # generische Zeit-Exit eine Mean-Reversion-Position systematisch
+            # vor Erreichen ihres eigentlichen Ziels?). Siehe Schritt 10
+            # Analyse-Notiz. Default "" statt None fuer Trades, die (noch)
+            # ohne exit_reason in metadata ankommen (z.B. aeltere/Test-
+            # BacktestTrade-Instanzen ohne dieses Feld).
+            "exit_reason": t.metadata.get("exit_reason", ""),
         }
 
     def _empty_result(self, config: BacktestConfig) -> BacktestResult:

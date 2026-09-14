@@ -43,6 +43,7 @@ def _make_trade(
     strategy: str = "trend_following_v1",
     regime: MarketRegime = MarketRegime.TRENDING_UP,
     entry_hour: int = 0,
+    exit_reason: str = "",
 ) -> BacktestTrade:
     entry = _make_ts(entry_hour)
     exit_ts = _make_ts(entry_hour + holding_bars)
@@ -65,6 +66,7 @@ def _make_trade(
         max_adverse_excursion=Decimal("50"),
         max_favorable_excursion=Decimal("120"),
         entry_signal_confidence=0.75,
+        metadata={"exit_reason": exit_reason} if exit_reason else {},
     )
 
 
@@ -239,6 +241,37 @@ class TestPerformanceAnalyzer:
         # Jeder Trade: fees=10, slippage=2
         assert float(result.total_fees) == pytest.approx(n * 10.0)
         assert float(result.total_slippage) == pytest.approx(n * 2.0)
+
+    def test_exit_reason_is_included_in_trade_dict(self) -> None:
+        """Schritt 10 Analyse-Fix: exit_reason (aus
+        BacktestSimulator._check_exits: 'atr_stop' | 'time_exit') muss in
+        result.trades ankommen, nicht nur ins log.debug geschrieben werden
+        - sonst ist post-hoc nicht analysierbar, ob eine Strategie
+        systematisch durch den generischen Zeit-/Stop-Exit statt durch ihr
+        eigenes Signal-Ziel geschlossen wird."""
+        analyzer = PerformanceAnalyzer()
+        trades = [
+            _make_trade(100.0, exit_reason="atr_stop"),
+            _make_trade(-50.0, exit_reason="time_exit"),
+        ]
+        equity = _make_equity_curve([10000, 10050])
+        config = _make_config()
+        result = analyzer.analyze(trades, equity, config)
+
+        reasons = [t["exit_reason"] for t in result.trades]
+        assert reasons == ["atr_stop", "time_exit"]
+
+    def test_trade_without_exit_reason_metadata_defaults_to_empty_string(self) -> None:
+        """Trades ohne exit_reason in metadata (z.B. aus aelterem Code-Pfad
+        oder direkt konstruierte Test-BacktestTrade-Instanzen) duerfen
+        _trade_to_dict() nicht mit einem KeyError crashen lassen."""
+        analyzer = PerformanceAnalyzer()
+        trades = [_make_trade(100.0)]  # exit_reason="" -> metadata={}
+        equity = _make_equity_curve([10000, 10100])
+        config = _make_config()
+        result = analyzer.analyze(trades, equity, config)
+
+        assert result.trades[0]["exit_reason"] == ""
 
 
 # ===========================================================================

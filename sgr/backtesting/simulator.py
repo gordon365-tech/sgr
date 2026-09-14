@@ -607,6 +607,7 @@ class BacktestSimulator:
             max_adverse_excursion=pos.max_adverse_excursion,
             max_favorable_excursion=pos.max_favorable_excursion,
             entry_signal_confidence=pos.signal_confidence,
+            metadata={"exit_reason": reason},
         )
         self._closed_trades.append(trade)
         del self._positions[symbol_str]
