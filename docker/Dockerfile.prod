@@ -75,9 +75,15 @@ LABEL description="SGR Trading System - Production Runtime"
 WORKDIR /app
 
 # Install only runtime dependencies (no build tools)
+# libgomp1: OpenMP runtime required by lightgbm (sgr/ml/strategy_selector.py
+# imports it lazily, so the container starts and runs fine without it until
+# that specific ML code path fires - discovered via `OSError: libgomp.so.1:
+# cannot open shared object file` when running the ML test suite against
+# this image).
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     libpq5 \
+    libgomp1 \
     curl \
     tini \
     && rm -rf /var/lib/apt/lists/*

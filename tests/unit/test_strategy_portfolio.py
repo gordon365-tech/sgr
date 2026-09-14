@@ -564,9 +564,11 @@ class TestPortfolioEngine:
 
         assert len(engine.trade_history) == 1
         trade = engine.trade_history[0]
-        # Entry 50000, Exit 55000, Qty 1 → PnL ≈ 5000 - fees
+        # Entry 50000, Exit 55000, Qty 1 -> Gross 5000, minus Entry-Fee (50)
+        # UND Exit-Fee (55) - beide Fees fliessen in net_pnl ein (siehe
+        # PortfolioEngine._entry_fees).
         pnl = Decimal(trade["realized_pnl"])
-        assert pnl > Decimal("4900")
+        assert pnl == Decimal("4895.0000")
 
     def test_update_prices_updates_unrealized(self) -> None:
         engine = PortfolioEngine(TradingMode.PAPER, initial_cash=Decimal("100000"))
@@ -597,6 +599,124 @@ class TestPortfolioEngine:
         assert "open_positions" in summary
         assert "trading_mode" in summary
         assert summary["trading_mode"] == "paper"
+
+
+# ===========================================================================
+# Portfolio Engine - Short-Position Cash Accounting Regression
+#
+# Analog zu Commit 1584e08 (fix(backtesting): correct short-position cash
+# accounting in BacktestSimulator): PortfolioEngine._open_position()/
+# _update_position() und PortfolioState.portfolio_value hatten denselben
+# Bug (Short mit der Long-Formel gebucht: Cash sank beim Open statt zu
+# steigen, offene Short-Notional zaehlte als Aktivum statt Verbindlichkeit).
+# Diese Tests verifizieren die symmetrische Korrektur im Live/Paper-Pfad
+# (nicht nur im Backtest-Simulator).
+# ===========================================================================
+
+
+class TestPortfolioEngineShortCashAccounting:
+    async def test_cash_increases_on_short_open(self) -> None:
+        """Short-Open verkauft zuerst -> Cash steigt um Notional - Fee."""
+        engine = PortfolioEngine(TradingMode.PAPER, initial_cash=Decimal("10000"))
+        qty = Decimal("0.1")
+        price = Decimal("50000")
+        result = _make_order_result(qty=qty, price=price, side="sell")
+        await engine.on_order_filled(result)
+
+        assert len(engine.positions) == 1
+        assert engine.positions[0].side == PositionSide.SHORT
+
+        expected_cash = Decimal("10000") + qty * price - result.fees
+        assert engine.cash == pytest.approx(float(expected_cash), rel=1e-9)
+
+    async def test_cash_decreases_on_short_close_buyback(self) -> None:
+        """Short-Close kauft zurueck -> Cash sinkt um Exit-Notional + Fee."""
+        engine = PortfolioEngine(TradingMode.PAPER, initial_cash=Decimal("10000"))
+        sym = _make_symbol()
+
+        open_qty = Decimal("1.0")
+        open_price = Decimal("50000")
+        short_open = _make_order_result(symbol=sym, qty=open_qty, price=open_price, side="sell")
+        await engine.on_order_filled(short_open)
+        cash_after_open = engine.cash
+
+        close_price = Decimal("48000")  # Preis gefallen -> Short gewinnt
+        buyback = _make_order_result(symbol=sym, qty=open_qty, price=close_price, side="buy")
+        await engine.on_order_filled(buyback)
+
+        expected_cash_after_close = cash_after_open - (open_qty * close_price + buyback.fees)
+        assert engine.cash == pytest.approx(float(expected_cash_after_close), rel=1e-9)
+        assert len(engine.positions) == 0
+
+    async def test_short_round_trip_cash_delta_equals_net_pnl(self) -> None:
+        """cash_after - cash_before muss fuer eine profitable Short-Position
+        exakt dem net_pnl (realized_pnl inkl. beider Fees) entsprechen -
+        dieselbe Invariante wie in den Backtest-Regressionstests (Schritt
+        17)."""
+        engine = PortfolioEngine(TradingMode.PAPER, initial_cash=Decimal("10000"))
+        sym = _make_symbol()
+        cash_before = engine.cash
+
+        open_qty = Decimal("1.0")
+        short_open = _make_order_result(
+            symbol=sym, qty=open_qty, price=Decimal("50000"), side="sell"
+        )
+        await engine.on_order_filled(short_open)
+
+        buyback = _make_order_result(
+            symbol=sym, qty=open_qty, price=Decimal("48000"), side="buy"
+        )
+        await engine.on_order_filled(buyback)
+
+        net_pnl = Decimal(engine.trade_history[0]["net_pnl"])
+        cash_delta = engine.cash - cash_before
+        assert cash_delta == pytest.approx(float(net_pnl), rel=1e-9)
+
+    async def test_short_position_value_is_liability_not_asset(self) -> None:
+        """Eine offene Short-Position darf portfolio_value NICHT erhoehen
+        (Verkaufserloes bereits in Cash gebucht) - der Rueckkaufbedarf muss
+        als Minus gefuehrt werden, sonst Doppelzaehlung."""
+        engine = PortfolioEngine(TradingMode.PAPER, initial_cash=Decimal("10000"))
+        cash_before = engine.cash
+
+        short_open = _make_order_result(qty=Decimal("1.0"), price=Decimal("50000"), side="sell")
+        await engine.on_order_filled(short_open)
+
+        # Sofort nach Open (Marktpreis == Entry-Preis): portfolio_value
+        # darf sich nur um die Fee veraendert haben, nicht um +2x Notional.
+        expected_value = cash_before - short_open.fees
+        assert engine.portfolio_value == pytest.approx(float(expected_value), rel=1e-9)
+
+    async def test_alternating_long_short_cash_matches_cumulative_net_pnl(self) -> None:
+        """4 Trades (long win, short win, long loss, short loss) -
+        cash == initial_capital + cumulative_net_pnl muss nach jedem Close
+        gelten, exakt wie im Backtest-Invarianten-Test aus Commit 1584e08."""
+        engine = PortfolioEngine(TradingMode.PAPER, initial_cash=Decimal("10000"))
+        initial = engine.cash
+        cumulative_net_pnl = Decimal("0")
+
+        specs = [
+            ("buy", Decimal("50000"), "sell", Decimal("51000")),  # long win
+            ("sell", Decimal("51000"), "buy", Decimal("50000")),  # short win
+            ("buy", Decimal("50000"), "sell", Decimal("49000")),  # long loss
+            ("sell", Decimal("49000"), "buy", Decimal("50000")),  # short loss
+        ]
+
+        for open_side, open_price, close_side, close_price in specs:
+            sym = _make_symbol()
+            open_result = _make_order_result(
+                symbol=sym, qty=Decimal("1.0"), price=open_price, side=open_side
+            )
+            await engine.on_order_filled(open_result)
+            close_result = _make_order_result(
+                symbol=sym, qty=Decimal("1.0"), price=close_price, side=close_side
+            )
+            await engine.on_order_filled(close_result)
+
+            cumulative_net_pnl += Decimal(engine.trade_history[-1]["net_pnl"])
+            assert engine.cash == pytest.approx(
+                float(initial + cumulative_net_pnl), rel=1e-9
+            )
 
 
 # ===========================================================================

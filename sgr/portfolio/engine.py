@@ -73,8 +73,26 @@ class PortfolioState:
 
     @property
     def portfolio_value(self) -> Decimal:
-        """Cash + Summe aller Position Notional Values."""
-        position_value = sum(p.notional_value for p in self._positions.values())
+        """
+        Cash + Marktwert offener Positionen.
+
+        LONG: der Marktwert ist ein Aktivum (du haeltst quantity Einheiten)
+        - wird addiert. SHORT: der Marktwert ist eine Verbindlichkeit (du
+        musst quantity Einheiten zum aktuellen Preis zurueckkaufen, um die
+        Position zu schliessen) - wird abgezogen. Symmetrisch zum
+        Cash-Fix in PortfolioEngine._open_position()/_update_position():
+        mit dem dort beim Open bereits gutgeschriebenen Verkaufserloes
+        (Cash steigt) muss der noch offene Rueckkaufbedarf hier als Minus
+        gefuehrt werden, sonst wuerde eine offene Short-Position
+        faelschlich doppelt als Vermoegen gezaehlt (Cash-Gutschrift UND
+        positiver Positionswert gleichzeitig) - siehe analoger Fix in
+        sgr/backtesting/simulator.py::_compute_portfolio_value
+        (Commit 1584e08).
+        """
+        position_value = sum(
+            p.notional_value if p.side == PositionSide.LONG else -p.notional_value
+            for p in self._positions.values()
+        )
         return self._cash + position_value
 
     @property
@@ -111,6 +129,16 @@ class PortfolioEngine:
         # Optional: PositionRepository fuer Crash-Recovery und Phase 7B
         # Reconciliation. None = rein in-memory (Tests, Backtesting).
         self._position_repo: Any = position_repository
+        # Entry-Fee pro offener Position (Symbol -> noch nicht durch einen
+        # Close verrechnete Fee-Anteile). realized_pnl/net_pnl wurde vorher
+        # ausschliesslich mit der Exit-Fee berechnet (result.fees beim
+        # Close), die Entry-Fee (beim Open bereits vom Cash abgezogen bzw.
+        # beim Short-Open gutgeschrieben) floss nie in net_pnl ein - jeder
+        # Trade wurde dadurch um die Entry-Fee zu gut ausgewiesen. Bei
+        # Teilschliessungen wird der verbleibende Anteil proportional
+        # weitergefuehrt; beim vollstaendigen Close wird der Eintrag
+        # entfernt.
+        self._entry_fees: dict[str, Decimal] = {}
 
     # ------------------------------------------------------------------
     # Event Handlers
@@ -168,9 +196,20 @@ class PortfolioEngine:
 
         self._state._positions[symbol_key] = position
 
-        # Cash reduzieren
+        # Cash-Buchung: LONG zahlt das Notional (Kauf) - SHORT erhaelt das
+        # Notional (abzueglich Fee) als Verkaufserloes gutgeschrieben
+        # (verkaufen zuerst, zurueckkaufen beim Close). Vorher wurde hier
+        # fuer beide Seiten identisch abgebucht (cash -= notional + fees),
+        # was fuer Short-Positionen wirtschaftlich falsch war - siehe
+        # analoger, bereits behobener Bug in
+        # sgr/backtesting/simulator.py::_open_position (Commit 1584e08,
+        # docs/ANALYSIS-mean-reversion-v1-schritt16-fundamental-suitability.md).
         notional = result.filled_quantity * result.average_fill_price  # type: ignore[operator]
-        self._state._cash -= notional + result.fees
+        if side == PositionSide.LONG:
+            self._state._cash -= notional + result.fees
+        else:
+            self._state._cash += notional - result.fees
+        self._entry_fees[symbol_key] = result.fees
 
         await self._persist_position_upsert(position)
 
@@ -200,20 +239,39 @@ class PortfolioEngine:
             fill_qty = result.filled_quantity
             close_qty = min(fill_qty, existing.quantity)
 
-            # Realized PnL berechnen
+            # Realized PnL berechnen (Entry-Fee anteilig + Exit-Fee, siehe
+            # self._entry_fees Docstring in __init__ - sonst waere jeder
+            # Trade um die Entry-Fee zu gut ausgewiesen).
             side_factor = Decimal("1") if existing.side == PositionSide.LONG else Decimal("-1")
             entry = existing.entry_price
             exit_price = result.average_fill_price  # type: ignore[assignment]
-            realized = (exit_price - entry) * close_qty * side_factor - result.fees
+            remaining_entry_fee = self._entry_fees.get(symbol_key, Decimal(0))
+            entry_fee_share = (
+                remaining_entry_fee * (close_qty / existing.quantity)
+                if existing.quantity > 0
+                else Decimal(0)
+            )
+            realized = (
+                (exit_price - entry) * close_qty * side_factor - result.fees - entry_fee_share
+            )
+            total_fees = result.fees + entry_fee_share
 
             # Trade Record speichern
-            self._record_trade(existing, result, close_qty, realized)
+            self._record_trade(existing, result, close_qty, realized, total_fees)
 
             if close_qty >= existing.quantity:
                 # Vollständig geschlossen
                 del self._state._positions[symbol_key]
-                # Cash wieder erhöhen
-                self._state._cash += exit_price * close_qty - result.fees
+                self._entry_fees.pop(symbol_key, None)
+                # Cash-Buchung symmetrisch zu _open_position(): LONG
+                # erhaelt beim Verkauf den Exit-Erloes zurueck (Cash
+                # steigt); SHORT muss zum Exit-Preis zurueckkaufen, um die
+                # beim Open erhaltenen Verkaufserloese abzuloesen (Cash
+                # sinkt).
+                if existing.side == PositionSide.LONG:
+                    self._state._cash += exit_price * close_qty - result.fees
+                else:
+                    self._state._cash -= exit_price * close_qty + result.fees
 
                 await self._persist_position_close(existing.id, existing.realized_pnl + realized)
 
@@ -226,6 +284,7 @@ class PortfolioEngine:
             else:
                 # Teilweise geschlossen
                 remaining_qty = existing.quantity - close_qty
+                self._entry_fees[symbol_key] = remaining_entry_fee - entry_fee_share
                 updated = Position(
                     id=existing.id,
                     symbol=existing.symbol,
@@ -239,7 +298,10 @@ class PortfolioEngine:
                     realized_pnl=existing.realized_pnl + realized,
                 )
                 self._state._positions[symbol_key] = updated
-                self._state._cash += exit_price * close_qty - result.fees
+                if existing.side == PositionSide.LONG:
+                    self._state._cash += exit_price * close_qty - result.fees
+                else:
+                    self._state._cash -= exit_price * close_qty + result.fees
 
                 await self._persist_position_upsert(updated)
 
@@ -249,8 +311,13 @@ class PortfolioEngine:
         close_result: OrderResult,
         qty: Decimal,
         realized_pnl: Decimal,
+        total_fees: Decimal,
     ) -> None:
-        """Speichert geschlossenen Trade als immutable Record."""
+        """Speichert geschlossenen Trade als immutable Record.
+
+        total_fees = Entry-Fee-Anteil + Exit-Fee (siehe _entry_fees
+        Docstring in __init__) - realized_pnl hat beide bereits abgezogen.
+        """
         self._trade_history.append(
             {
                 "id": str(uuid4()),
@@ -260,7 +327,7 @@ class PortfolioEngine:
                 "exit_price": str(close_result.average_fill_price),
                 "quantity": str(qty),
                 "realized_pnl": str(realized_pnl),
-                "fees": str(close_result.fees),
+                "fees": str(total_fees),
                 "net_pnl": str(realized_pnl),
                 "strategy": position.strategy_name,
                 "opened_at": position.opened_at.isoformat(),
