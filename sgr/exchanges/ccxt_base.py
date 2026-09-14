@@ -666,8 +666,21 @@ class CCXTBaseAdapter:
                 fill_price = ticker.ask * Decimal("1.0005")  # 0.05% slippage
             else:
                 fill_price = ticker.bid * Decimal("0.9995")  # 0.05% slippage
+        elif order.limit_price:
+            fill_price = order.limit_price
         else:
-            fill_price = order.limit_price or Decimal("0")
+            # Kein Ticker und kein Limit-Preis verfuegbar (z.B. Testnet-Ausfall
+            # bei einer Market-Order): ein Fill bei Preis 0 wuerde P&L/MAE/MFE
+            # und Risiko-Metriken verfaelschen, als waere der Trade real
+            # ausgefuehrt worden. Statt einen falschen Fill vorzutaeuschen,
+            # wird der Fehler propagiert - der bestehende Retry-Layer
+            # (_retryable_exchange_call auf place_order) und die
+            # Unknown-State-Behandlung in order_safety.py greifen dann genau
+            # wie bei einem echten Exchange-Fehler.
+            raise ExchangeConnectionError(
+                exchange=self.exchange_id.value,
+                detail=f"paper fill simulation: no ticker and no limit_price for {order.symbol}",
+            )
 
         # Simulate fees (0.1% taker)
         fee_rate = Decimal("0.001")

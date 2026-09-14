@@ -882,6 +882,25 @@ class TestOrderManagement:
         result = await adapter.place_order(req)
         assert result.average_fill_price == Decimal("50000")
 
+    async def test_simulate_order_ticker_failure_without_limit_price_raises(
+        self, adapter, monkeypatch
+    ):
+        """
+        Market order in paper mode with no ticker available and no
+        limit_price fallback must not fabricate a fill at price 0 - that
+        would silently corrupt P&L/MAE/MFE. It must raise instead, so the
+        existing retry + unknown-state handling (order_safety.py) applies.
+        """
+        fake = FakeCCXTExchange()
+        fake.fetch_ticker = AsyncMock(side_effect=RuntimeError("ticker down"))
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+        req = make_order_request(
+            trading_mode=TradingMode.PAPER, order_type=OrderType.MARKET, limit_price=None
+        )
+        with pytest.raises(ExchangeConnectionError):
+            await adapter.place_order(req)
+
     async def test_cancel_order_success(self, adapter, monkeypatch):
         install_fake_ccxt(monkeypatch)
         await adapter.connect()
