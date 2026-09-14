@@ -370,7 +370,7 @@ class BacktestSimulator:
             # über die gesamte Schleife, unabhängig von der
             # Feature-Berechnung selbst).
             recent_window = candles[max(0, bar_idx - 14) : bar_idx + 1]
-            await self._check_exits(bar_idx, current_bar, recent_window)
+            await self._check_exits(bar_idx, current_bar, recent_window, current_regime=regime)
 
             # 4. Entry-Logic: Signal generieren
             if not self._positions:  # Nur neue Position wenn keine offen
@@ -545,16 +545,31 @@ class BacktestSimulator:
         bar_idx: int,
         current_bar: Candle,
         history: list[Candle],
+        current_regime: MarketRegime | None = None,
     ) -> None:
         """
         Prüft Exit-Bedingungen für alle offenen Positionen.
         Exit-Typen, in Prioritätsreihenfolge (erster Treffer gewinnt):
-            1. ATR-Stop: 2.5x ATR unter Entry (Long) / über Entry (Short)
+            1. Regime-Change: Position wurde im RANGING-Regime eröffnet
+               (pos.regime == RANGING), aktuelles Regime ist nicht mehr
+               RANGING -> die Mean-Reversion-These der Position ist nicht
+               mehr gültig, unabhängig vom aktuellen PnL. Nur relevant für
+               Positionen mit RANGING-Entry (betrifft aktuell nur
+               mean_reversion_v1; trend_following_v1 eröffnet Positionen
+               ausschließlich in TRENDING_UP/DOWN, für die dieser Check nie
+               greift - siehe SimulatedPosition.regime, gesetzt bei
+               Eröffnung, unveränderlich über die Positionslebensdauer).
+               Vor dem ATR-Stop geprüft: ein ungültig gewordenes Setup soll
+               nicht erst warten, bis der Preis so weit gelaufen ist, dass
+               der Stop greift (siehe Schritt 10 Diagnose: 70.6% der
+               ADX-Grauzone-Stop-Trades zeigten einen deutlichen
+               ADX-Anstieg in den ersten 10 Bars nach Entry).
+            2. ATR-Stop: 2.5x ATR unter Entry (Long) / über Entry (Short)
                - Risikoschutz geht vor Gewinnmitnahme oder Zeitablauf.
-            2. Target erreicht: strategie-eigenes target_price aus
+            3. Target erreicht: strategie-eigenes target_price aus
                signal.metadata (siehe SimulatedPosition.target_price
                Docstring) - nur falls die Strategie eines geliefert hat.
-            3. Zeit-Exit: Max 20 Bars gehalten (passiver Fallback, wenn
+            4. Zeit-Exit: Max 20 Bars gehalten (passiver Fallback, wenn
                weder Stop noch Ziel erreicht wurden).
         """
         for symbol_str, pos in list(self._positions.items()):
@@ -566,8 +581,20 @@ class BacktestSimulator:
             exit_triggered = False
             exit_reason = ""
 
-            # 1. ATR-basierter Stop (aus letzten 14 Bars)
-            if len(history) >= 15:
+            # 1. Regime-Change: nur fuer Positionen, die im RANGING-Regime
+            # eroeffnet wurden (siehe Docstring oben fuer die Begruendung,
+            # warum das automatisch strategiespezifisch bleibt, ohne den
+            # Strategienamen hart zu verdrahten).
+            if (
+                current_regime is not None
+                and pos.regime == MarketRegime.RANGING
+                and current_regime != MarketRegime.RANGING
+            ):
+                exit_triggered = True
+                exit_reason = "regime_change"
+
+            # 2. ATR-basierter Stop (aus letzten 14 Bars)
+            if not exit_triggered and len(history) >= 15:
                 import numpy as np
 
                 from sgr.market_data.feature_engineering import calc_atr, candles_to_arrays
@@ -585,8 +612,9 @@ class BacktestSimulator:
                         exit_triggered = True
                         exit_reason = "atr_stop"
 
-            # 2. Target erreicht (nur falls Stop nicht schon getriggert hat -
-            # Risikoschutz hat Vorrang, siehe Docstring oben)
+            # 3. Target erreicht (nur falls Regime-Change/Stop nicht schon
+            # getriggert haben - Risikoschutz/Regime-Guelitgkeit haben
+            # Vorrang, siehe Docstring oben)
             if not exit_triggered and pos.target_price is not None:
                 if pos.side == "long" and close >= pos.target_price:
                     exit_triggered = True
@@ -595,8 +623,8 @@ class BacktestSimulator:
                     exit_triggered = True
                     exit_reason = "target_reached"
 
-            # 3. Zeit-Exit: max 20 Bars (nur falls weder Stop noch Ziel
-            # bereits getriggert haben)
+            # 4. Zeit-Exit: max 20 Bars (nur falls nichts von oben
+            # bereits getriggert hat)
             if not exit_triggered and bars_held >= 20:
                 exit_triggered = True
                 exit_reason = "time_exit"

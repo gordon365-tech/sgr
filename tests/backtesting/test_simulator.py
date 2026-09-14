@@ -700,6 +700,144 @@ class TestCheckExits:
 
         assert SYMBOL_STR in sim._positions  # bars_held=3, kein Exit-Grund
 
+    async def test_check_exits_regime_change_closes_ranging_entry_position(self):
+        """Schritt 10, Teil B (Erweiterung): eine im RANGING-Regime
+        eroeffnete Position (mean_reversion_v1-Fall) muss geschlossen
+        werden, sobald das aktuelle Regime nicht mehr RANGING ist - die
+        Mean-Reversion-These gilt nicht mehr. Empirisch begruendet: 70.6%
+        der ADX-Grauzone atr_stop-Trades zeigten einen deutlichen
+        ADX-Anstieg (Regimewechsel Richtung Trend) in den ersten 10 Bars
+        nach Entry, siehe Analysedokumentation im _check_exits() Docstring."""
+        sim = BacktestSimulator(make_config())
+        candles = make_candles(10, start_price=100.0, drift=0.0)
+        pos = SimulatedPosition(
+            symbol=SYMBOL_STR,
+            side="long",
+            quantity=Decimal("1"),
+            entry_price=Decimal("100"),
+            entry_time=datetime.now(tz=UTC),
+            strategy="mean_reversion_v1",
+            signal_confidence=0.7,
+            regime=MarketRegime.RANGING,  # Entry-Regime war RANGING
+        )
+        pos.entry_bar_index = 0
+        sim._positions[SYMBOL_STR] = pos
+        bar = candles[2].model_copy(update={"close": Decimal("100.1")})
+        candles[2] = bar
+
+        # Aktuelles Regime ist jetzt TRENDING_UP -> Regime-Change-Exit
+        await sim._check_exits(2, bar, candles[:3], current_regime=MarketRegime.TRENDING_UP)
+
+        assert SYMBOL_STR not in sim._positions
+        assert sim._closed_trades[0].metadata.get("exit_reason") == "regime_change"
+
+    async def test_check_exits_no_regime_change_exit_while_still_ranging(self):
+        """Solange das aktuelle Regime weiterhin RANGING ist, darf kein
+        regime_change-Exit ausgeloest werden - normaler Ablauf
+        (Target/Stop/Zeit) greift unveraendert."""
+        sim = BacktestSimulator(make_config())
+        candles = make_candles(10, start_price=100.0, drift=0.0)
+        pos = SimulatedPosition(
+            symbol=SYMBOL_STR,
+            side="long",
+            quantity=Decimal("1"),
+            entry_price=Decimal("100"),
+            entry_time=datetime.now(tz=UTC),
+            strategy="mean_reversion_v1",
+            signal_confidence=0.7,
+            regime=MarketRegime.RANGING,
+        )
+        pos.entry_bar_index = 0
+        sim._positions[SYMBOL_STR] = pos
+        bar = candles[2].model_copy(update={"close": Decimal("100.1")})
+        candles[2] = bar
+
+        await sim._check_exits(2, bar, candles[:3], current_regime=MarketRegime.RANGING)
+
+        assert SYMBOL_STR in sim._positions
+
+    async def test_check_exits_regime_change_ignored_for_non_ranging_entry(self):
+        """Eine Position, die NICHT im RANGING-Regime eroeffnet wurde
+        (trend_following_v1-Fall: Entry-Regime TRENDING_UP), darf durch
+        den Regime-Change-Check nicht beeinflusst werden, selbst wenn sich
+        das aktuelle Regime aendert - der Check ist an pos.regime ==
+        RANGING gebunden, nicht an eine feste Strategieliste."""
+        sim = BacktestSimulator(make_config())
+        candles = make_candles(10, start_price=100.0, drift=0.0)
+        pos = SimulatedPosition(
+            symbol=SYMBOL_STR,
+            side="long",
+            quantity=Decimal("1"),
+            entry_price=Decimal("100"),
+            entry_time=datetime.now(tz=UTC),
+            strategy="trend_following_v1",
+            signal_confidence=0.7,
+            regime=MarketRegime.TRENDING_UP,  # Entry-Regime war NICHT RANGING
+        )
+        pos.entry_bar_index = 0
+        sim._positions[SYMBOL_STR] = pos
+        bar = candles[2].model_copy(update={"close": Decimal("100.1")})
+        candles[2] = bar
+
+        # current_regime unterscheidet sich vom Entry-Regime, aber Entry
+        # war nie RANGING -> Check greift nicht.
+        await sim._check_exits(2, bar, candles[:3], current_regime=MarketRegime.RANGING)
+
+        assert SYMBOL_STR in sim._positions
+
+    async def test_check_exits_regime_change_takes_priority_over_target(self):
+        """Regime-Change hat die hoechste Prioritaet (siehe Docstring):
+        selbst wenn im selben Bar auch target_price erreicht waere, muss
+        regime_change gewinnen - eine ungueltig gewordene These wird nicht
+        durch eine zufaellige Zielerreichung im selben Bar maskiert."""
+        sim = BacktestSimulator(make_config())
+        candles = make_candles(10, start_price=100.0, drift=0.0)
+        pos = SimulatedPosition(
+            symbol=SYMBOL_STR,
+            side="long",
+            quantity=Decimal("1"),
+            entry_price=Decimal("100"),
+            entry_time=datetime.now(tz=UTC),
+            strategy="mean_reversion_v1",
+            signal_confidence=0.7,
+            regime=MarketRegime.RANGING,
+            target_price=Decimal("100.05"),  # sehr nah, wuerde ebenfalls treffen
+        )
+        pos.entry_bar_index = 0
+        sim._positions[SYMBOL_STR] = pos
+        bar = candles[2].model_copy(update={"close": Decimal("100.1")})
+        candles[2] = bar
+
+        await sim._check_exits(2, bar, candles[:3], current_regime=MarketRegime.TRENDING_UP)
+
+        assert sim._closed_trades[0].metadata.get("exit_reason") == "regime_change"
+
+    async def test_check_exits_without_current_regime_argument_skips_regime_check(self):
+        """Rueckwaertskompatibilitaet: current_regime=None (Default, alle
+        bestehenden Aufrufer/Tests vor diesem Fix) darf den Regime-Change-
+        Check niemals ausloesen - unveraendertes Verhalten fuer Aufrufer,
+        die den neuen Parameter nicht kennen."""
+        sim = BacktestSimulator(make_config())
+        candles = make_candles(10, start_price=100.0, drift=0.0)
+        pos = SimulatedPosition(
+            symbol=SYMBOL_STR,
+            side="long",
+            quantity=Decimal("1"),
+            entry_price=Decimal("100"),
+            entry_time=datetime.now(tz=UTC),
+            strategy="mean_reversion_v1",
+            signal_confidence=0.7,
+            regime=MarketRegime.RANGING,
+        )
+        pos.entry_bar_index = 0
+        sim._positions[SYMBOL_STR] = pos
+        bar = candles[2].model_copy(update={"close": Decimal("100.1")})
+        candles[2] = bar
+
+        await sim._check_exits(2, bar, candles[:3])  # kein current_regime
+
+        assert SYMBOL_STR in sim._positions
+
 
 # ---------------------------------------------------------------------
 # _close_position()
