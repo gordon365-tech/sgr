@@ -923,6 +923,140 @@ class TestClosePosition:
 
 
 # ---------------------------------------------------------------------
+# Cash accounting regression (Schritt 16/17): _open_position()/
+# _close_position() used to book SHORT positions with the LONG-side cash
+# formula (subtract notional at open, add notional at close) - correct
+# only for long. Verified via instrumentation on a real 180-day BTC/USDT
+# backtest: 84/84 long trades matched cash_delta to net_pnl exactly,
+# only 5/77 short trades did (see
+# docs/ANALYSIS-mean-reversion-v1-schritt16-fundamental-suitability.md).
+# These tests pin the fixed, symmetric behavior directly so a regression
+# is caught immediately, not just in an ad-hoc diagnostic script.
+# ---------------------------------------------------------------------
+
+
+class TestCashAccountingRegression:
+    async def test_open_long_decreases_cash(self):
+        sim = BacktestSimulator(make_config(taker_fee=Decimal("0.001")))
+        cash_before = sim._cash
+        entry_bar = make_candles(1, start_price=100.0)[0]
+        signal = make_signal(direction=SignalDirection.LONG, confidence=1.0, size_hint=1.0)
+        await sim._open_position(signal, entry_bar, bar_index=0)
+        assert sim._cash < cash_before
+
+    async def test_open_short_increases_cash(self):
+        """Opening a short receives sale proceeds - cash goes UP, not
+        down. Before the fix, this asserted the opposite (short wrongly
+        booked like a long: cash decreased on open)."""
+        sim = BacktestSimulator(make_config(taker_fee=Decimal("0.001")))
+        cash_before = sim._cash
+        entry_bar = make_candles(1, start_price=100.0)[0]
+        signal = make_signal(direction=SignalDirection.SHORT, confidence=1.0, size_hint=1.0)
+        await sim._open_position(signal, entry_bar, bar_index=0)
+        assert sim._cash > cash_before
+
+    async def test_open_close_long_cash_delta_equals_net_pnl(self):
+        sim = BacktestSimulator(
+            make_config(taker_fee=Decimal("0.001"), slippage_pct=Decimal("0.0005"))
+        )
+        initial_cash = sim._cash
+        entry_bar = make_candles(1, start_price=100.0)[0]
+        signal = make_signal(direction=SignalDirection.LONG, confidence=1.0, size_hint=1.0)
+        await sim._open_position(signal, entry_bar, bar_index=0)
+        pos = sim._positions[SYMBOL_STR]
+        sim._close_position(pos, Decimal("110"), datetime.now(tz=UTC), bar_index=5, reason="test")
+        trade = sim._closed_trades[0]
+        cash_delta = sim._cash - initial_cash
+        assert abs(cash_delta - trade.net_pnl) < Decimal("0.0001")
+
+    async def test_open_close_short_win_cash_delta_equals_net_pnl(self):
+        """The core regression test for the reported bug: before the fix,
+        cash_delta and net_pnl were essentially unrelated for shorts (only
+        5/77 real backtest trades matched); the discrepancy was on the
+        order of the position's full notional, not a rounding artifact."""
+        sim = BacktestSimulator(
+            make_config(taker_fee=Decimal("0.001"), slippage_pct=Decimal("0.0005"))
+        )
+        initial_cash = sim._cash
+        entry_bar = make_candles(1, start_price=100.0)[0]
+        signal = make_signal(direction=SignalDirection.SHORT, confidence=1.0, size_hint=1.0)
+        await sim._open_position(signal, entry_bar, bar_index=0)
+        pos = sim._positions[SYMBOL_STR]
+        # Price drops -> short profits.
+        sim._close_position(pos, Decimal("90"), datetime.now(tz=UTC), bar_index=5, reason="test")
+        trade = sim._closed_trades[0]
+        assert trade.net_pnl > Decimal("0")
+        cash_delta = sim._cash - initial_cash
+        assert abs(cash_delta - trade.net_pnl) < Decimal("0.0001")
+
+    async def test_open_close_short_loss_cash_delta_equals_net_pnl(self):
+        sim = BacktestSimulator(
+            make_config(taker_fee=Decimal("0.001"), slippage_pct=Decimal("0.0005"))
+        )
+        initial_cash = sim._cash
+        entry_bar = make_candles(1, start_price=100.0)[0]
+        signal = make_signal(direction=SignalDirection.SHORT, confidence=1.0, size_hint=1.0)
+        await sim._open_position(signal, entry_bar, bar_index=0)
+        pos = sim._positions[SYMBOL_STR]
+        # Price rises -> short loses.
+        sim._close_position(pos, Decimal("115"), datetime.now(tz=UTC), bar_index=5, reason="test")
+        trade = sim._closed_trades[0]
+        assert trade.net_pnl < Decimal("0")
+        cash_delta = sim._cash - initial_cash
+        assert abs(cash_delta - trade.net_pnl) < Decimal("0.0001")
+
+    async def test_compute_portfolio_value_short_is_liability_not_asset(self):
+        """An open short's mark-to-market value must be SUBTRACTED (you
+        owe the buy-back to close), not added - otherwise the equity
+        curve double-counts the sale proceeds already credited to cash
+        at open. Immediately after opening (price ~= entry, zero fees
+        here), portfolio value must be unchanged from before the open."""
+        sim = BacktestSimulator(make_config(slippage_pct=Decimal("0"), taker_fee=Decimal("0")))
+        entry_bar = make_candles(1, start_price=100.0)[0]
+        signal = make_signal(direction=SignalDirection.SHORT, confidence=1.0, size_hint=1.0)
+        cash_before_open = sim._cash
+        await sim._open_position(signal, entry_bar, bar_index=0)
+        pos = sim._positions[SYMBOL_STR]
+        value_at_entry = sim._compute_portfolio_value(float(pos.entry_price))
+        assert abs(Decimal(str(value_at_entry)) - cash_before_open) < Decimal("0.01")
+
+    async def test_multi_trade_sequence_equity_matches_cumulative_net_pnl(self):
+        """Alternating long/short trades. After every close (no position
+        open), cash must exactly equal initial_capital + cumulative
+        net_pnl, and portfolio value must exactly equal cash. This is the
+        invariant the original bug violated - on a real 180-day backtest,
+        final cash diverged from sum(net_pnl) by roughly 2x once shorts
+        were involved (-209.83 actual vs -418.34 implied by net_pnl)."""
+        sim = BacktestSimulator(
+            make_config(taker_fee=Decimal("0.001"), slippage_pct=Decimal("0.0005"))
+        )
+        initial_cash = sim._cash
+        cumulative_net_pnl = Decimal("0")
+
+        trade_plan = [
+            (SignalDirection.LONG, 100.0, Decimal("110")),  # long win
+            (SignalDirection.SHORT, 110.0, Decimal("95")),  # short win
+            (SignalDirection.SHORT, 95.0, Decimal("105")),  # short loss
+            (SignalDirection.LONG, 105.0, Decimal("100")),  # long loss
+        ]
+
+        for direction, entry_price_hint, exit_price in trade_plan:
+            entry_bar = make_candles(1, start_price=entry_price_hint)[0]
+            signal = make_signal(direction=direction, confidence=1.0, size_hint=1.0)
+            await sim._open_position(signal, entry_bar, bar_index=0)
+            pos = sim._positions[SYMBOL_STR]
+            sim._close_position(pos, exit_price, datetime.now(tz=UTC), bar_index=5, reason="test")
+            cumulative_net_pnl += sim._closed_trades[-1].net_pnl
+
+            assert SYMBOL_STR not in sim._positions
+            assert abs(sim._cash - (initial_cash + cumulative_net_pnl)) < Decimal("0.0001")
+            portfolio_value = Decimal(str(sim._compute_portfolio_value(float(exit_price))))
+            assert abs(portfolio_value - sim._cash) < Decimal("0.0001")
+
+        assert cumulative_net_pnl != Decimal("0")  # sanity: trades actually moved money
+
+
+# ---------------------------------------------------------------------
 # SimulatedPosition
 # ---------------------------------------------------------------------
 

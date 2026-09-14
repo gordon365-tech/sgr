@@ -516,7 +516,23 @@ class BacktestSimulator:
         if total_cost > self._cash:
             return
 
-        self._cash -= total_cost
+        # Cash-Buchung: fuer LONG wird das Notional ausgegeben (Kauf) -
+        # fuer SHORT wird das Notional (abzueglich Fee) als Verkaufserloes
+        # gutgeschrieben (verkaufen zuerst, zurueckkaufen beim Close).
+        # Vorher wurde hier fuer beide Seiten identisch abgebucht
+        # (self._cash -= total_cost), was fuer Short-Positionen
+        # wirtschaftlich falsch war und die Cash-/Equity-Kurve korrumpierte
+        # - verifiziert per Cash-Delta-vs-net_pnl-Instrumentierung: 84/84
+        # Long-Trades stimmten exakt, nur 5/77 Short-Trades (siehe
+        # docs/ANALYSIS-mean-reversion-v1-schritt16-fundamental-suitability.md).
+        # total_cost bleibt unveraendert die Affordability-Guard-Groesse
+        # fuer beide Seiten (Risk-Sizing-Verhalten unveraendert) - nur die
+        # tatsaechliche Cash-Bewegung wird jetzt seitenabhaengig korrekt
+        # gebucht, symmetrisch zu _close_position() unten.
+        if side == "long":
+            self._cash -= total_cost
+        else:
+            self._cash += notional - fee
 
         pos = SimulatedPosition(
             symbol=symbol_str,
@@ -671,7 +687,16 @@ class BacktestSimulator:
         )
 
         net_pnl = gross_pnl - total_fees
-        self._cash += exit_notional - exit_fee
+        # Symmetrisch zu _open_position(): LONG erhaelt beim Verkauf den
+        # Exit-Erloes zurueck (Cash steigt); SHORT muss zum Exit-Preis
+        # zurueckkaufen, um die beim Open erhaltenen Verkaufserloese
+        # abzuloesen (Cash sinkt). Mit dem Fix in _open_position() ergibt
+        # open_delta + close_delta fuer beide Seiten exakt net_pnl (siehe
+        # Schritt-17-Regressionstests).
+        if pos.side == "long":
+            self._cash += exit_notional - exit_fee
+        else:
+            self._cash -= exit_notional + exit_fee
 
         trade = BacktestTrade(
             id=pos.id,
@@ -711,10 +736,25 @@ class BacktestSimulator:
             pos.update_excursions(Decimal(str(current_price)))
 
     def _compute_portfolio_value(self, current_price: float) -> float:
-        """Cash + offene Positions Notional."""
-        position_value = sum(
-            float(pos.quantity) * current_price for pos in self._positions.values()
-        )
+        """
+        Cash + Marktwert offener Positionen.
+
+        LONG: der Marktwert ist ein Aktivum (du haeltst quantity Einheiten) -
+        wird addiert. SHORT: der Marktwert ist eine Verbindlichkeit (du
+        musst quantity Einheiten zum aktuellen Preis zurueckkaufen, um die
+        Position zu schliessen) - wird abgezogen. Symmetrisch zum Cash-Fix
+        in _open_position()/_close_position(): mit dem dort bereits beim
+        Open gutgeschriebenen Verkaufserloes (Cash steigt) muss der noch
+        offene Rueckkaufbedarf hier als Minus gefuehrt werden, sonst wuerde
+        eine offene Short-Position faelschlich doppelt als Vermoegen
+        gezaehlt (Cash-Gutschrift UND positiver Positionswert gleichzeitig).
+        """
+        position_value = 0.0
+        for pos in self._positions.values():
+            if pos.side == "long":
+                position_value += float(pos.quantity) * current_price
+            else:
+                position_value -= float(pos.quantity) * current_price
         return float(self._cash) + position_value
 
     def _record_equity(
