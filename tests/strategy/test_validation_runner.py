@@ -225,6 +225,59 @@ class TestSuccessfulValidation:
         assert entry.validation_status.paper_trading_passed is True
         assert entry.validation_status.live_approved is False
 
+    async def test_validation_stores_backtest_result_on_entry_for_metrics(
+        self, fake_pool
+    ) -> None:
+        """
+        Schritt 6 (Prometheus/Grafana): StrategyEntry.last_validation_result
+        muss nach der Validierung die vollen Backtest-Rohwerte enthalten,
+        da MonitoringEngine._collect() diese liest, um Sharpe/Return/
+        Drawdown als Gauges zu exportieren - siehe sgr/monitoring/engine.py.
+        """
+        registry = StrategyRegistry.get()
+        registry.register_instance(FakeStrategy("s1"))
+
+        backtest = make_backtest_result(acceptable=True)
+        report = make_report(
+            backtest=backtest,
+            walk_forward=make_walk_forward_result(is_consistent=True),
+        )
+        runner = StrategyValidationRunner(exchange_pool=fake_pool)
+        runner._engine.run_full_validation = AsyncMock(return_value=report)
+
+        await runner.validate_pending_strategies()
+
+        entry = registry.get_entry("s1")
+        assert entry.last_validation_result is backtest
+        assert entry.last_validation_result.sharpe_ratio == 1.5
+        assert entry.last_validation_result.total_trades == 40
+
+    async def test_failed_validation_still_stores_backtest_result(
+        self, fake_pool
+    ) -> None:
+        """Auch bei nicht bestandener Validierung (is_acceptable False)
+        sollen die Rohwerte für die Metriken verfügbar bleiben - genau das
+        ist der auf dem Server beobachtete, fachlich korrekte Fall
+        (negativer Sharpe, active_strategies bleibt 0, aber der Wert selbst
+        muss in Grafana sichtbar sein, nicht nur im Log)."""
+        registry = StrategyRegistry.get()
+        registry.register_instance(FakeStrategy("s1"))
+
+        backtest = make_backtest_result(acceptable=False)
+        report = make_report(
+            backtest=backtest,
+            walk_forward=make_walk_forward_result(is_consistent=True),
+        )
+        runner = StrategyValidationRunner(exchange_pool=fake_pool)
+        runner._engine.run_full_validation = AsyncMock(return_value=report)
+
+        await runner.validate_pending_strategies()
+
+        entry = registry.get_entry("s1")
+        assert entry.is_validated is False
+        assert entry.last_validation_result is backtest
+        assert entry.last_validation_result.sharpe_ratio == 0.2
+
     async def test_already_validated_strategy_is_not_rebacktested(
         self, fake_pool
     ) -> None:

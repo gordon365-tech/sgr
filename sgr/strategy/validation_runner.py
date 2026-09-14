@@ -162,7 +162,7 @@ class StrategyValidationRunner:
                 continue
 
             status = self._to_validation_status(report)
-            registry.mark_validated(name, status)
+            registry.mark_validated(name, status, backtest_result=report.backtest)
 
             if status.can_go_live:
                 summary.validated.append(name)

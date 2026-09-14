@@ -22,6 +22,8 @@ import httpx
 import pytest
 
 import sgr.monitoring.metrics as metrics_module
+from sgr.backtesting.types import BacktestResult, BacktestStatus
+from sgr.core.types import MarketRegime
 from sgr.monitoring import alerts, sentry
 from sgr.monitoring.alerts import AlertSeverity
 from sgr.monitoring.engine import MonitoringEngine, add_metrics_middleware, create_metrics_app
@@ -34,6 +36,64 @@ from sgr.monitoring.metrics import (
     record_signal_generated,
     record_trade_executed,
 )
+from sgr.strategy.base import ValidationStatus
+from sgr.strategy.registry import StrategyRegistry
+
+
+class FakeStrategyForMetrics:
+    """Minimal-Strategie fürs Registry-basierte Testen der Gauge-Wiring in
+    MonitoringEngine._collect() - siehe TestMonitoringEngineCollect neue
+    Tests weiter unten (Schritt 6: Sharpe/Return/active_strategies)."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.version = "1.0.0"
+        self.supported_regimes = [MarketRegime.TRENDING_UP]
+
+    def generate_signal(self, context):
+        return None
+
+    def get_parameters(self):
+        return {}
+
+
+def make_fake_backtest_result(
+    *,
+    sharpe_ratio: float,
+    total_return_pct: float,
+    max_drawdown_pct: float,
+    total_trades: int,
+) -> BacktestResult:
+    """Minimal-gültiges BacktestResult für Gauge-Wiring-Tests - nur die
+    Felder, die MonitoringEngine._collect() tatsächlich liest, sind
+    variabel, alles andere ist ein neutraler Platzhalter."""
+    return BacktestResult(
+        config_summary={},
+        status=BacktestStatus.COMPLETED,
+        start_date="2026-01-01",
+        end_date="2026-06-30",
+        duration_days=180,
+        initial_capital="10000",
+        final_capital="10000",
+        total_return_pct=total_return_pct,
+        cagr_pct=0.0,
+        sharpe_ratio=sharpe_ratio,
+        sortino_ratio=0.0,
+        calmar_ratio=0.0,
+        max_drawdown_pct=max_drawdown_pct,
+        max_drawdown_duration_days=1,
+        profit_factor=1.0,
+        hit_rate_pct=50.0,
+        expected_value_per_trade="0",
+        total_trades=total_trades,
+        winning_trades=0,
+        losing_trades=0,
+        avg_winner="0",
+        avg_loser="0",
+        avg_holding_bars=1.0,
+        total_fees="0",
+        total_slippage="0",
+    )
 
 # ---------------------------------------------------------------------------
 # metrics.py
@@ -68,6 +128,12 @@ class TestSGRMetrics:
             "trades_losing",
             "strategy_signals",
             "strategy_win_rate",
+            "active_strategies_count",
+            "strategy_validation_status",
+            "strategy_sharpe_ratio",
+            "strategy_total_return",
+            "strategy_max_drawdown",
+            "strategy_backtest_trades",
             "candles_received",
             "api_requests_total",
             "api_errors_total",
@@ -326,6 +392,98 @@ class TestMonitoringEngineCollect:
         registry.get_all.side_effect = RuntimeError("registry down")
         engine = MonitoringEngine(strategy_registry=registry)
         await engine._collect()  # must not raise
+
+    async def test_collect_sets_active_strategies_count_gauge(self) -> None:
+        """Schritt 6: active_strategies muss als echte Metrik sichtbar
+        sein, nicht nur geloggt - siehe MonitoringEngine._collect()
+        Docstring-Kommentar zum Server-Verifikationsverlauf."""
+        registry = StrategyRegistry.get()
+        registry.clear()
+        try:
+            registry.register_instance(FakeStrategyForMetrics("s1"))
+            registry.register_instance(FakeStrategyForMetrics("s2"))
+            await registry.activate("s1")  # nur eine von zwei aktiv
+
+            metrics_module._metrics_instance = None
+            m = get_metrics()
+            m.active_strategies_count = MagicMock(wraps=m.active_strategies_count)
+
+            engine = MonitoringEngine(strategy_registry=registry)
+            await engine._collect()
+
+            m.active_strategies_count.set.assert_called_once()
+            call_args = m.active_strategies_count.set.call_args
+            assert call_args[0][0] == 1  # nur "s1" ist aktiv
+        finally:
+            registry.clear()
+
+    async def test_collect_sets_backtest_metrics_from_last_validation_result(self) -> None:
+        """StrategyEntry.last_validation_result (gefüllt von
+        StrategyValidationRunner.mark_validated) muss als
+        strategy_sharpe_ratio/total_return/max_drawdown/backtest_trades
+        Gauge ankommen - der zuvor auf dem Server bestätigte Bug war, dass
+        diese Werte nur per log.debug ausgegeben wurden."""
+        registry = StrategyRegistry.get()
+        registry.clear()
+        try:
+            registry.register_instance(FakeStrategyForMetrics("s1"))
+            registry.mark_validated(
+                "s1",
+                ValidationStatus(
+                    backtest_passed=False,
+                    walk_forward_passed=True,
+                    paper_trading_passed=True,
+                ),
+                backtest_result=make_fake_backtest_result(
+                    sharpe_ratio=-1.91, total_return_pct=-1.6, max_drawdown_pct=12.0,
+                    total_trades=120,
+                ),
+            )
+
+            metrics_module._metrics_instance = None
+            m = get_metrics()
+            m.strategy_sharpe_ratio = MagicMock(wraps=m.strategy_sharpe_ratio)
+            m.strategy_total_return = MagicMock(wraps=m.strategy_total_return)
+            m.strategy_max_drawdown = MagicMock(wraps=m.strategy_max_drawdown)
+            m.strategy_backtest_trades = MagicMock(wraps=m.strategy_backtest_trades)
+            m.strategy_validation_status = MagicMock(wraps=m.strategy_validation_status)
+
+            engine = MonitoringEngine(strategy_registry=registry)
+            await engine._collect()
+
+            m.strategy_sharpe_ratio.set.assert_called_once()
+            assert m.strategy_sharpe_ratio.set.call_args[0][0] == -1.91
+            m.strategy_total_return.set.assert_called_once()
+            assert m.strategy_total_return.set.call_args[0][0] == -1.6
+            m.strategy_max_drawdown.set.assert_called_once()
+            assert m.strategy_max_drawdown.set.call_args[0][0] == 12.0
+            m.strategy_backtest_trades.set.assert_called_once()
+            assert m.strategy_backtest_trades.set.call_args[0][0] == 120
+            # can_go_live False (backtest_passed=False) -> Gauge 0, nicht 1
+            m.strategy_validation_status.set.assert_called_once()
+            assert m.strategy_validation_status.set.call_args[0][0] == 0
+        finally:
+            registry.clear()
+
+    async def test_collect_skips_backtest_gauges_before_first_validation(self) -> None:
+        """Vor dem ersten Validierungslauf ist last_validation_result None -
+        die Backtest-Gauges dürfen dann NICHT geschrieben werden (keine
+        vorgetäuschte 0, die wie ein echtes Ergebnis aussähe)."""
+        registry = StrategyRegistry.get()
+        registry.clear()
+        try:
+            registry.register_instance(FakeStrategyForMetrics("s1"))
+
+            metrics_module._metrics_instance = None
+            m = get_metrics()
+            m.strategy_sharpe_ratio = MagicMock(wraps=m.strategy_sharpe_ratio)
+
+            engine = MonitoringEngine(strategy_registry=registry)
+            await engine._collect()
+
+            m.strategy_sharpe_ratio.set.assert_not_called()
+        finally:
+            registry.clear()
 
 
 class TestMetricsAppAndMiddleware:

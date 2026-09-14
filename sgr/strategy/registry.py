@@ -22,7 +22,7 @@ Registry ist ein Singleton – alle Module teilen dieselbe Instanz.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sgr.core.logging import get_logger
 from sgr.core.types import MarketRegime
@@ -31,6 +31,9 @@ from sgr.strategy.base import (
     TradingStrategy,
     ValidationStatus,
 )
+
+if TYPE_CHECKING:
+    from sgr.backtesting.types import BacktestResult
 
 log = get_logger(__name__)
 
@@ -43,6 +46,7 @@ class StrategyEntry:
         "is_active",
         "is_validated",
         "validation_status",
+        "last_validation_result",
         "performance",
         "registered_at",
         "deactivation_reason",
@@ -53,6 +57,13 @@ class StrategyEntry:
         self.is_active = False
         self.is_validated = False
         self.validation_status = ValidationStatus()
+        # Rohwerte (Sharpe, Return, Drawdown, Trade-Count, ...) aus dem
+        # letzten Validierungslauf - siehe StrategyValidationRunner. Getrennt
+        # von validation_status (reine Boolean-Gates), da MonitoringEngine
+        # diese konkreten Zahlen fuer Prometheus-Gauges braucht (Schritt 6:
+        # "Sharpe/Return duerfen nicht nur geloggt, muessen als echte Metrik
+        # sichtbar sein"). None bis zum ersten Validierungslauf.
+        self.last_validation_result: BacktestResult | None = None
         self.performance: StrategyPerformance | None = None
         self.registered_at = datetime.now(tz=UTC)
         self.deactivation_reason: str | None = None
@@ -215,11 +226,21 @@ class StrategyRegistry:
         self,
         name: str,
         validation_status: ValidationStatus,
+        backtest_result: BacktestResult | None = None,
     ) -> None:
-        """Setzt Validierungsstatus (nach bestandenem Backtest etc.)."""
+        """
+        Setzt Validierungsstatus (nach bestandenem Backtest etc.).
+
+        backtest_result: optional, die vollen Rohwerte (Sharpe, Return,
+        Drawdown, Trade-Count, ...) aus dem zugrundeliegenden Backtest -
+        siehe StrategyEntry.last_validation_result Docstring. Optional statt
+        Pflichtparameter, um bestehende Aufrufer (z.B. Tests, die nur den
+        Status setzen wollen) nicht zu brechen.
+        """
         entry = self._get_entry(name)
         entry.validation_status = validation_status
         entry.is_validated = validation_status.can_go_live
+        entry.last_validation_result = backtest_result
         log.info(
             "strategy_registry.validated",
             name=name,

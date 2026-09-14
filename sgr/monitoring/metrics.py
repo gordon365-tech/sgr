@@ -103,6 +103,47 @@ class SGRMetrics:
             unit="%",
         )
 
+        # Strategy Validation Metrics (Schritt 6: Sharpe/Return/Drawdown aus
+        # StrategyValidationRunner duerfen nicht nur geloggt werden - siehe
+        # MonitoringEngine._collect(), das diese Werte vorher nur per
+        # log.debug ausgab, nie als Metrik. Quelle: StrategyEntry.
+        # last_validation_result (sgr/strategy/registry.py), gefuellt von
+        # StrategyValidationRunner.mark_validated().
+        self.active_strategies_count = self._meter.create_gauge(
+            name="sgr.strategy.active_count",
+            description="Number of currently activated (validated, is_active) strategies",
+        )
+
+        self.strategy_validation_status = self._meter.create_gauge(
+            name="sgr.strategy.validation_status",
+            description=(
+                "Go-live gate result per strategy (1 = can_go_live, "
+                "0 = not approved for paper/live activation)"
+            ),
+        )
+
+        self.strategy_sharpe_ratio = self._meter.create_gauge(
+            name="sgr.strategy.backtest_sharpe_ratio",
+            description="Sharpe ratio from the most recent validation backtest",
+        )
+
+        self.strategy_total_return = self._meter.create_gauge(
+            name="sgr.strategy.backtest_total_return_pct",
+            description="Total return from the most recent validation backtest",
+            unit="%",
+        )
+
+        self.strategy_max_drawdown = self._meter.create_gauge(
+            name="sgr.strategy.backtest_max_drawdown_pct",
+            description="Max drawdown from the most recent validation backtest",
+            unit="%",
+        )
+
+        self.strategy_backtest_trades = self._meter.create_gauge(
+            name="sgr.strategy.backtest_total_trades",
+            description="Number of trades in the most recent validation backtest",
+        )
+
         # Market Data Metrics
         self.candles_received = self._meter.create_counter(
             name="sgr.market_data.candles_received",
