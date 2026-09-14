@@ -138,6 +138,18 @@ class BacktestSimulator:
         trades, equity = await sim.run(candles_by_symbol, registry)
     """
 
+    # Bars für Indikator-Warmup, bevor die Haupt-Loop in run() ueberhaupt
+    # zu iterieren beginnt (siehe dort: `for bar_idx in range(warmup, ...)`).
+    # Als Klassenkonstante exponiert (statt nur als lokale Variable in
+    # run()), damit Aufrufer, die eigene Kerzen-Slices bemessen muessen -
+    # insbesondere WalkForwardAnalyzer beim Zuschnitt von IS/OOS-Fenstern -
+    # nicht denselben Wert redundant und potenziell abweichend hartcodieren.
+    # Genau diese Redundanz war die Ursache des Schritt-18-Befunds: die
+    # OOS-Fenstergroesse dort kannte diese Zahl nicht und fiel regelmaessig
+    # kleiner aus, wodurch die Haupt-Loop nie iterierte (0 Trades in jedem
+    # Split) - siehe validation.py.
+    WARMUP_BARS: int = 200
+
     def __init__(self, config: BacktestConfig) -> None:
         self._config = config
         self._engineer = FeatureEngineer()
@@ -318,7 +330,7 @@ class BacktestSimulator:
                 count=len(candles),
             )
 
-        warmup = 200  # Bars für Indikator-Warmup
+        warmup = self.WARMUP_BARS  # Bars für Indikator-Warmup (Klassenkonstante)
         bar_count = 0
         active_strategies = registry.get_active()
 

@@ -69,13 +69,27 @@ class WalkForwardAnalyzer:
             else candles_by_symbol.get(primary_symbol, [])
         )
 
-        if len(all_candles) < 200:
+        warmup = BacktestSimulator.WARMUP_BARS
+
+        if len(all_candles) < warmup:
             return self._insufficient_data_result()
 
         # Splits berechnen
         total_bars = len(all_candles)
         split_size = total_bars // (self._n_splits + 1)
-        oos_size = max(split_size // 6, 50)  # OOS = ~14% des IS
+        # OOS-Fenstergroesse: mindestens 2x Warmup, damit nach dem
+        # Indikator-Warmup in BacktestSimulator.run() (`for bar_idx in
+        # range(warmup, len(candles))`) tatsaechlich Bars fuer die
+        # Handelsschleife uebrig bleiben. Der vorherige Floor (50) kannte
+        # die Warmup-Anforderung nicht und lag bei den ueblichen
+        # Datengroessen regelmaessig darunter (z.B. 180 Tage 1h: oos_size
+        # kam auf ~102 Bars, weit unter warmup=200) - die Handelsschleife
+        # lief dadurch in JEDEM Split ueber genau 0 Bars, jeder OOS-Split
+        # maass also 0 Trades statt echter Out-of-Sample-Performance
+        # (siehe docs/ANALYSIS-mean-reversion-v1-schritt18-...md, Punkt 3).
+        # "OOS = ~14% des IS" (split_size // 6) bleibt die Zielgroesse,
+        # sofern sie den Warmup-Floor bereits uebersteigt.
+        oos_size = max(split_size // 6, warmup * 2)
 
         split_results = []
         is_sharpes = []
@@ -89,14 +103,18 @@ class WalkForwardAnalyzer:
             oos_start = is_end
             oos_end = min(oos_start + oos_size, total_bars)
 
-            if oos_end <= oos_start or is_end <= 200:
+            if oos_end <= oos_start or is_end <= warmup:
                 continue
 
             is_candles = all_candles[is_start:is_end]
             oos_candles = all_candles[oos_start:oos_end]
 
             for period_name, candles_slice in [("is", is_candles), ("oos", oos_candles)]:
-                if len(candles_slice) < 50:
+                # Muss den Warmup ueberschreiten UND noch Bars fuer die
+                # eigentliche Handelsschleife uebrig lassen - derselbe
+                # Mindestwert wie oben bei oos_size, konsistent fuer
+                # IS und OOS angewendet.
+                if len(candles_slice) < warmup * 2:
                     continue
 
                 split_config = BacktestConfig(
