@@ -690,6 +690,20 @@ class StrategyRepository:
             )
             await session.execute(stmt)
 
+    async def set_validated(self, name: str, is_validated: bool) -> None:
+        """Persistiert den Validierungsstatus. Best-effort, vom Aufrufer
+        gegen Exceptions abzusichern (siehe StrategyRegistry.mark_validated
+        Docstring - dort bewusst NICHT aufgerufen, um die Methode synchron
+        zu halten; Aufrufer mit Event-Loop-Kontext, z.B. sgr/api/main.py
+        lifespan(), rufen dies direkt zusaetzlich auf)."""
+        async with get_session() as session:
+            stmt = (
+                update(StrategyModel)
+                .where(StrategyModel.name == name)
+                .values(is_validated=is_validated, updated_at=datetime.utcnow())
+            )
+            await session.execute(stmt)
+
     async def set_active(self, name: str, is_active: bool, reason: str | None = None) -> None:
         async with get_session() as session:
             updates: dict[str, Any] = {

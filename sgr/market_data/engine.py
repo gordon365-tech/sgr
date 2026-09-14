@@ -68,6 +68,13 @@ _POLL_INTERVALS: dict[str, float] = {
     "1d": 86390.0,
 }
 
+# Rate-Limit-Schutz beim Start eines groesseren Symbol-Universums (siehe
+# MarketDataEngine.start()): maximale Anzahl gleichzeitiger
+# feed.initialize()-Aufrufe (voller History-Fetch) sowie ein kleiner
+# Zeitversatz zwischen dem Start einzelner Poll-Loops.
+_MAX_CONCURRENT_INIT = 5
+_POLL_START_STAGGER_SECONDS = 0.5
+
 # Candle-History pro Timeframe für Feature-Berechnung
 _HISTORY_REQUIRED: dict[str, int] = {
     "1m": 250,
@@ -503,19 +510,46 @@ class MarketDataEngine:
 
         self._running = True
 
-        # Initialize all feeds concurrently
-        init_tasks = [feed.initialize(self._pool) for feed in self._feeds.values()]
+        # Initialize all feeds concurrently, aber mit begrenzter
+        # Parallelitaet (Semaphore): ein Multi-Asset-Universum mit 20+
+        # Symbolen wuerde sonst 20+ volle History-Fetches (250 Bars pro
+        # Feed) gleichzeitig gegen dieselbe Exchange abfeuern. ccxt's
+        # eigener enableRateLimit-Mechanismus throttelt zwar sequentielle
+        # Calls DERSELBEN Adapter-Instanz, aber ohne diese zusaetzliche
+        # Bremse gehen alle Requests praktisch simultan raus und warten
+        # dann gemeinsam auf den Rate-Limiter - das Verhalten am Limit
+        # (Burst-Erkennung, IP-Bans) haengt vom jeweiligen Exchange ab und
+        # sollte nicht darauf verlassen werden. Empirisch bestaetigt: eine
+        # unkoordinierte Burst-Sequenz von Marktdaten-Calls gegen Binance
+        # Testnet fuehrte waehrend der Verifikation dieser Aenderung zu
+        # einem kurzzeitigen IP-Ban (418 DDoSProtection, ~1.5h).
+        # _MAX_CONCURRENT_INIT ist bewusst klein und nicht konfigurierbar
+        # gehalten (kein neuer Tuning-Parameter fuer einen reinen
+        # Safety-Mechanismus).
+        init_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_INIT)
+
+        async def _bounded_initialize(feed: SymbolFeed) -> None:
+            async with init_semaphore:
+                await feed.initialize(self._pool)
+
+        init_tasks = [_bounded_initialize(feed) for feed in self._feeds.values()]
         if init_tasks:
             await asyncio.gather(*init_tasks, return_exceptions=True)
 
-        # Start polling loops
+        # Start polling loops, ebenfalls leicht zeitversetzt statt alle im
+        # selben Event-Loop-Tick zu erzeugen - vermeidet, dass der erste
+        # update()-Call aller Feeds (naechste Iteration von _poll_loop)
+        # erneut gebuendelt startet, direkt nachdem die Init-Phase oben
+        # bereits abgeschlossen ist.
+        stagger_seconds = 0.0
         for key, feed in self._feeds.items():
             interval = _POLL_INTERVALS.get(feed.timeframe, 60.0)
             task = asyncio.create_task(
-                self._poll_loop(feed, interval),
+                self._poll_loop(feed, interval, initial_delay=stagger_seconds),
                 name=f"market_data:{key}",
             )
             self._tasks.append(task)
+            stagger_seconds += _POLL_START_STAGGER_SECONDS
 
         log.info(
             "market_data.engine.started",
@@ -534,12 +568,25 @@ class MarketDataEngine:
         await self._store.close()
         log.info("market_data.engine.stopped")
 
-    async def _poll_loop(self, feed: SymbolFeed, interval: float) -> None:
+    async def _poll_loop(
+        self, feed: SymbolFeed, interval: float, initial_delay: float = 0.0
+    ) -> None:
         """
         Polling-Loop für einen Feed.
         Wartet `interval` Sekunden zwischen Updates.
         Fehler werden geloggt und Loop weitergeführt (resilient).
+
+        initial_delay: staffelt den allerersten update()-Aufruf leicht
+        (siehe start()) - verhindert, dass bei einem groesseren
+        Symbol-Universum alle Feeds im selben Moment ihren ersten
+        Poll-Zyklus ausloesen.
         """
+        if initial_delay:
+            try:
+                await asyncio.sleep(initial_delay)
+            except asyncio.CancelledError:
+                return
+
         while self._running:
             try:
                 updated = await feed.update(self._pool)

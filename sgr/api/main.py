@@ -48,6 +48,144 @@ from sgr.core.types import Environment, TradingMode
 
 log = get_logger(__name__)
 
+# Live-Market-Data-Universum (Multi-Asset-Erweiterung, explizite operative
+# Anweisung): Binance USDT-M Perpetual-Futures-Symbole im ccxt-Unified-Format
+# ("BASE/USDT:USDT" - der ":USDT"-Suffix ist der Settle-Currency-Marker fuer
+# einen Swap/Future, siehe Symbol._parse_symbol() in
+# sgr/exchanges/ccxt_base.py, die diesen Fall bereits VOR dieser Aenderung
+# korrekt in AssetClass.FUTURES uebersetzte - keine Anpassung an
+# get_ohlcv()/get_ticker()/_parse_symbol() noetig, beide reichen den
+# rohen ccxt-Symbol-String unveraendert durch).
+#
+# Jedes einzelne Symbol wurde vor Aufnahme LIVE gegen Binance (ccxt,
+# oeffentliche load_markets()-Daten, Mainnet + Testnet) verifiziert -
+# keine erfundenen Symbole. Wichtige Befunde dabei:
+#   - PEPE/SHIB/FLOKI/BONK existieren NICHT unter ihrem einfachen Namen
+#     als Future, sondern unter der "1000X"-Konvention, die Binance fuer
+#     Coins mit sehr niedrigem Preis verwendet (vermeidet uebermaessige
+#     Nachkommastellen im Kontraktpreis) - 1000PEPE/USDT:USDT etc.
+#   - XAU/USDT:USDT und XAG/USDT:USDT existieren wirklich als aktive,
+#     linear USDT-marginierte Perpetual-Swaps (verifiziert: type=swap,
+#     contract=True, linear=True, settle=USDT, active=True) - Binance
+#     bietet damit tatsaechlich Gold/Silber-Perpetuals an. Reine
+#     Spot-Rohstoffe (z.B. PAXG, ein Spot-Gold-Token) werden bewusst
+#     NICHT aufgenommen (Punkt 2 der Anweisung: "Keine Spot Rohstoffe").
+#   - Binance bietet zusaetzlich eine deutlich groessere Palette an
+#     tokenisierten Aktien-/Rohstoff-Perpetuals (u.a. CL/USDT:USDT =
+#     Rohoel, MSTR/USDT:USDT, SOXL/USDT:USDT, weitere), die beim
+#     Liquiditaets-Check entdeckt wurden - NICHT aufgenommen, da explizit
+#     nur Gold/Silber angefordert wurden und diese Produktkategorie
+#     (tokenisierte Einzelaktien) eine eigene, hier nicht beauftragte
+#     Einordnungsentscheidung waere. Siehe Go-Live-Report fuer die volle
+#     Liste als Kandidat fuer eine spaetere, bewusste Erweiterung.
+#   - "Automatisch um weitere liquide USDT Futures erweitern" wurde
+#     bewusst NICHT zusaetzlich zu den 22 angefragten Symbolen umgesetzt:
+#     eine Liquiditaets-Bulk-Abfrage (fetch_tickers) waehrend dieser
+#     Verifikation loeste einen kurzzeitigen Binance-Testnet-IP-Ban aus
+#     (418 DDoSProtection, ~1.5h) - genau das Risiko, vor dem Punkt 6 der
+#     Anweisung ausdruecklich warnt ("keine unkontrollierte parallele
+#     CCXT-Abfrage"). Eine weitere automatische Ausweitung ueber die 22
+#     explizit angefragten Symbole hinaus haette dieses Risiko erhoeht,
+#     ohne dass sie explizit gefordert war.
+#
+# Bewusst getrennt von sgr.strategy.validation_runner.DEFAULT_SYMBOLS
+# (BTC/USDT, ETH/USDT, SPOT) - die dortige Eignungsanalyse (Schritt
+# 16/18, docs/ANALYSIS-mean-reversion-v1-schritt18-*.md) ist explizit
+# auf BTC/ETH-SPOT gescoped; eine Ausweitung des Validierungs-Backtests
+# auf alle 24 Symbole/Futures hier wäre ein separater, deutlich
+# teurerer Analyseauftrag (24x Backtest+Walk-Forward pro Strategie,
+# jeweils gegen andere Instrumentmechanik) und keine reine
+# Konfigurationsänderung - nicht Teil dieser Änderung.
+LIVE_MARKET_DATA_SYMBOLS: list[str] = [
+    # Large-Cap
+    "BTC/USDT:USDT",
+    "ETH/USDT:USDT",
+    "SOL/USDT:USDT",
+    "XRP/USDT:USDT",
+    "BNB/USDT:USDT",
+    # Mid-Cap / Volatile
+    "ADA/USDT:USDT",
+    "AVAX/USDT:USDT",
+    "DOT/USDT:USDT",
+    "NEAR/USDT:USDT",
+    "LINK/USDT:USDT",
+    "FET/USDT:USDT",
+    "RENDER/USDT:USDT",
+    "INJ/USDT:USDT",
+    "SUI/USDT:USDT",
+    "APT/USDT:USDT",
+    "TIA/USDT:USDT",
+    # Small-Cap / High-Beta Altcoins (1000X-Kontraktkonvention siehe oben)
+    "1000PEPE/USDT:USDT",
+    "DOGE/USDT:USDT",
+    "1000SHIB/USDT:USDT",
+    "1000FLOKI/USDT:USDT",
+    "WIF/USDT:USDT",
+    "1000BONK/USDT:USDT",
+    # Commodities (Binance USDT-M Perpetuals, kein Spot)
+    "XAU/USDT:USDT",  # Gold
+    "XAG/USDT:USDT",  # Silber
+]
+
+
+async def apply_strategy_force_activate_override(
+    registry: Any, strategy_repo: Any, names: list[str]
+) -> list[str]:
+    """
+    Aktiviert Strategien trotz NO-GO/negativem Ergebnis aus der
+    automatischen Backtest+Walk-Forward-Validierung (siehe
+    sgr/strategy/validation_runner.py) - AUSSCHLIESSLICH auf explizite
+    operative Anweisung fuer einen Paper-Trading-Pipeline-Testlauf, NICHT
+    weil die Strategie den Go-Live-Gate tatsaechlich bestanden haette
+    (siehe docs/ANALYSIS-mean-reversion-v1-schritt18-*.md: Klassifikation
+    C - grundsaetzlich ungeeignet fuer mean_reversion_v1; trend_following_v1
+    NO-GO mit OOS-Sharpe -7.2). Aufgerufen aus lifespan() NACH
+    StrategyValidationRunner.validate_pending_strategies() - das echte
+    Ergebnis bleibt in dessen Log-Event und in
+    entry.last_validation_result unveraendert sichtbar, dieser Override
+    ersetzt nur ValidationStatus/is_validated fuer die explizit genannten
+    Namen.
+
+    names: aus STRATEGY_FORCE_ACTIVATE env var (kommagetrennt). Leer =
+    kein Override, unveraendertes Verhalten.
+
+    Returns: Liste der tatsaechlich uebersteuerten Namen (fuer Logging/Tests).
+    """
+    from sgr.strategy.base import ValidationStatus
+
+    overridden: list[str] = []
+    for name in names:
+        entry = registry.get_entry(name)
+        if entry is None:
+            log.warning("sgr.api.strategy_force_activate_unknown_name", name=name)
+            continue
+        real_notes = entry.validation_status.notes
+        override_status = ValidationStatus(
+            backtest_passed=True,
+            walk_forward_passed=True,
+            paper_trading_passed=True,
+            live_approved=False,
+            notes=(
+                "MANUAL OVERRIDE (STRATEGY_FORCE_ACTIVATE env var): echte "
+                f"Validierung bestand NICHT ({real_notes!r}). Forciert aktiv "
+                "fuer einen Paper-Trading-Pipeline-Testlauf auf explizite "
+                "operative Anweisung - KEIN oekonomisch validiertes "
+                "Go-Live-Signal, kein Live-Trading-Freigabe."
+            ),
+        )
+        registry.mark_validated(
+            name, override_status, backtest_result=entry.last_validation_result
+        )
+        await strategy_repo.set_validated(name, True)
+        log.warning(
+            "sgr.api.strategy_force_activate_override",
+            name=name,
+            real_validation_notes=real_notes,
+        )
+        overridden.append(name)
+    return overridden
+
+
 # Rolle, mit der lifespan() aufgerufen wird. Steuert, ob der volle Trading
 # Lifecycle (Exchange Pool, Strategy Engine, Execution Engine, Orchestrator,
 # Market Data Engine) gestartet wird, oder nur die Read-Pfad-Infrastruktur
@@ -314,6 +452,20 @@ async def lifespan(
         except Exception as e:
             log.error("sgr.api.strategy_validation_runner_failed", error=str(e))
 
+        # Manueller Override (STRATEGY_FORCE_ACTIVATE env var), siehe
+        # apply_strategy_force_activate_override() Docstring oben im Modul.
+        import os
+
+        await apply_strategy_force_activate_override(
+            registry=registry,
+            strategy_repo=repos.strategies,
+            names=[
+                n.strip()
+                for n in os.environ.get("STRATEGY_FORCE_ACTIVATE", "").split(",")
+                if n.strip()
+            ],
+        )
+
         # Aktiviere alle validierten Strategien für das Paper Trading.
         # Default: Strategien starten deaktiviert, müssen explizit aktiviert werden.
         # Hier aktivieren wir nur die, die bereits validiert sind (is_validated=True
@@ -414,10 +566,18 @@ async def lifespan(
         from sgr.market_data.engine import MarketDataEngine
 
         md_engine = MarketDataEngine(pool, config.trading_mode, feature_store)
-        # Standard-Subscriptions
+        # Standard-Subscriptions (siehe LIVE_MARKET_DATA_SYMBOLS oben).
+        # BTC/USDT zusaetzlich auf 4h, wie zuvor. Ein einzelnes Symbol, das
+        # auf der jeweiligen Exchange (z.B. Binance Testnet) nicht gelistet
+        # ist oder keine History liefert, blockiert die uebrigen Feeds
+        # nicht - SymbolFeed.initialize()-Fehler werden pro Feed isoliert
+        # behandelt (asyncio.gather(..., return_exceptions=True) in
+        # MarketDataEngine.start()), der Poll-Loop des betroffenen Feeds
+        # laeuft trotzdem weiter und versucht es bei jedem Intervall erneut.
         if pool._adapters:
-            md_engine.subscribe("BTC/USDT", primary_exchange, ["1h", "4h"])
-            md_engine.subscribe("ETH/USDT", primary_exchange, ["1h"])
+            for symbol in LIVE_MARKET_DATA_SYMBOLS:
+                timeframes = ["1h", "4h"] if symbol == "BTC/USDT:USDT" else ["1h"]
+                md_engine.subscribe(symbol, primary_exchange, timeframes)
             await md_engine.start()
 
             # Orchestrator automatisch bei jedem neuen Candle auslösen

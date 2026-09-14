@@ -35,7 +35,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from sgr.api.main import AppState, create_app, lifespan
+from sgr.api.main import LIVE_MARKET_DATA_SYMBOLS, AppState, create_app, lifespan
 from sgr.core.types import Environment, ExchangeID, TradingMode
 
 pytestmark = pytest.mark.asyncio
@@ -484,9 +484,9 @@ class TestLifespanPrimaryExchangeConfigurable:
                 p.stop()
 
     async def test_market_data_subscriptions_use_configured_primary_exchange(self) -> None:
-        """Standard-Subscriptions (BTC/USDT, ETH/USDT) muessen auf die
-        konfigurierte primary_exchange zeigen, nicht hartcodiert auf
-        Pionex."""
+        """Standard-Subscriptions (LIVE_MARKET_DATA_SYMBOLS, siehe
+        sgr/api/main.py) muessen auf die konfigurierte primary_exchange
+        zeigen, nicht hartcodiert auf Pionex."""
         patchers, mocks = _patch_lifespan_dependencies(
             paper_mode=True, has_adapters=True, primary_exchange=ExchangeID.BINANCE
         )
@@ -499,7 +499,7 @@ class TestLifespanPrimaryExchangeConfigurable:
         try:
             async with lifespan(app):
                 calls = mocks["md_engine"].subscribe.call_args_list
-                assert len(calls) == 2
+                assert len(calls) == len(LIVE_MARKET_DATA_SYMBOLS)
                 for call in calls:
                     assert call.args[1] == ExchangeID.BINANCE
         finally:

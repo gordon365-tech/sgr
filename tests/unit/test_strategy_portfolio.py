@@ -506,6 +506,108 @@ class TestStrategyRegistryPersistence:
 
 
 # ===========================================================================
+# Strategy Force-Activate Override (STRATEGY_FORCE_ACTIVATE)
+#
+# sgr.api.main.apply_strategy_force_activate_override() - aktiviert eine
+# Strategie trotz NO-GO aus der automatischen Validierung, ausschliesslich
+# auf explizite operative Anweisung fuer einen Paper-Trading-Pipeline-
+# Testlauf. Siehe dessen Docstring fuer die vollstaendige Begruendung.
+# ===========================================================================
+
+
+class TestStrategyForceActivateOverride:
+    @pytest.fixture(autouse=True)
+    def reset_registry(self):
+        StrategyRegistry.get().clear()
+        yield
+        StrategyRegistry.get().clear()
+
+    async def test_override_sets_is_validated_true_despite_no_go(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from sgr.api.main import apply_strategy_force_activate_override
+
+        registry = StrategyRegistry.get()
+        registry.register_instance(TrendFollowingStrategy())
+        real_no_go = ValidationStatus(
+            backtest_passed=False, walk_forward_passed=False, notes="NO-GO: Sharpe -7.2"
+        )
+        registry.mark_validated("trend_following_v1", real_no_go)
+        assert registry.get_entry("trend_following_v1").is_validated is False
+
+        repo = AsyncMock()
+        overridden = await apply_strategy_force_activate_override(
+            registry=registry, strategy_repo=repo, names=["trend_following_v1"]
+        )
+
+        assert overridden == ["trend_following_v1"]
+        entry = registry.get_entry("trend_following_v1")
+        assert entry.is_validated is True
+        # Das echte NO-GO-Ergebnis bleibt erhalten, nur ueberschrieben durch
+        # den klar gekennzeichneten Override-Status - nicht verloren.
+        assert "NO-GO" in entry.validation_status.notes
+        assert "MANUAL OVERRIDE" in entry.validation_status.notes
+        repo.set_validated.assert_awaited_once_with("trend_following_v1", True)
+
+    async def test_override_activates_via_normal_activation_loop(self) -> None:
+        """Nach dem Override muss der bestehende
+        `for entry in registry.get_all().values(): if entry.is_validated:
+        await registry.activate(...)`-Loop in lifespan() die Strategie
+        normal aktivieren - kein Sonderpfad noetig."""
+        from unittest.mock import AsyncMock
+
+        from sgr.api.main import apply_strategy_force_activate_override
+
+        registry = StrategyRegistry.get()
+        registry.register_instance(MeanReversionStrategy())
+        registry.mark_validated(
+            "mean_reversion_v1",
+            ValidationStatus(backtest_passed=False, walk_forward_passed=False, notes="C"),
+        )
+
+        await apply_strategy_force_activate_override(
+            registry=registry, strategy_repo=AsyncMock(), names=["mean_reversion_v1"]
+        )
+        for entry in registry.get_all().values():
+            if entry.is_validated:
+                await registry.activate(entry.strategy.name)
+
+        assert registry.is_active("mean_reversion_v1")
+
+    async def test_unknown_name_is_skipped_not_raised(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from sgr.api.main import apply_strategy_force_activate_override
+
+        registry = StrategyRegistry.get()
+        repo = AsyncMock()
+
+        overridden = await apply_strategy_force_activate_override(
+            registry=registry, strategy_repo=repo, names=["does_not_exist"]
+        )
+
+        assert overridden == []
+        repo.set_validated.assert_not_awaited()
+
+    async def test_empty_names_is_noop(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from sgr.api.main import apply_strategy_force_activate_override
+
+        registry = StrategyRegistry.get()
+        registry.register_instance(TrendFollowingStrategy())
+        repo = AsyncMock()
+
+        overridden = await apply_strategy_force_activate_override(
+            registry=registry, strategy_repo=repo, names=[]
+        )
+
+        assert overridden == []
+        assert registry.get_entry("trend_following_v1").is_validated is False
+        repo.set_validated.assert_not_awaited()
+
+
+# ===========================================================================
 # Portfolio Engine
 # ===========================================================================
 
