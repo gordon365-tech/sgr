@@ -79,6 +79,7 @@ class SimulatedPosition:
         strategy: str,
         signal_confidence: float,
         regime: MarketRegime,
+        target_price: Decimal | None = None,
     ) -> None:
         self.id = str(uuid.uuid4())
         self.symbol = symbol
@@ -90,6 +91,22 @@ class SimulatedPosition:
         self.signal_confidence = signal_confidence
         self.regime = regime
         self.entry_bar_index = 0
+
+        # Strategie-spezifisches Exit-Ziel aus signal.metadata["target_price"]
+        # (siehe z.B. MeanReversionStrategy: BB Middle als Mean-Reversion-
+        # Ziel). Optional - Strategien ohne eigenes Ziel (z.B.
+        # TrendFollowingStrategy) liefern kein target_price, die Position
+        # verlaesst sich dann ausschliesslich auf den generischen ATR-
+        # Stop/Zeit-Exit in _check_exits(), unveraendertes Verhalten.
+        #
+        # Hintergrund (Schritt 10, Teil A -> B): ein Server-Backtest zeigte
+        # fuer mean_reversion_v1 eine exit_reason-Verteilung von
+        # time_exit=77, atr_stop=41, backtest_end=1 (119 Trades gesamt) -
+        # KEIN einziger Trade wurde je durch das eigentliche Mean-
+        # Reversion-Ziel geschlossen, weil dieser Exit-Pfad bis hierhin
+        # nicht existierte. target_price lag zwar im Signal, wurde aber
+        # nie bis zur SimulatedPosition durchgereicht.
+        self.target_price = target_price
 
         # MAE/MFE tracking
         self.max_adverse_excursion = Decimal("0")
@@ -437,6 +454,29 @@ class BacktestSimulator:
     # Position Management
     # ------------------------------------------------------------------
 
+    def _extract_target_price(self, signal: Signal) -> Decimal | None:
+        """
+        Liest signal.metadata["target_price"] fail-safe aus. Strategien wie
+        MeanReversionStrategy setzen dies als float (siehe
+        sgr/strategy/mean_reversion.py: "target_price": round(target_price, 2)
+        wenn ind.bb_middle vorhanden). Ein fehlendes, None- oder nicht
+        numerisch konvertierbares target_price darf den Backtest nie zum
+        Absturz bringen - liefert dann einfach None, die Position verhaelt
+        sich wie zuvor (nur generischer Stop/Zeit-Exit).
+        """
+        raw = signal.metadata.get("target_price")
+        if raw is None:
+            return None
+        try:
+            return Decimal(str(raw))
+        except (ValueError, ArithmeticError):
+            log.warning(
+                "backtesting.invalid_target_price",
+                strategy=signal.strategy_name,
+                raw_value=raw,
+            )
+            return None
+
     async def _open_position(
         self,
         signal: Signal,
@@ -487,6 +527,7 @@ class BacktestSimulator:
             strategy=signal.strategy_name,
             signal_confidence=signal.confidence,
             regime=signal.regime,
+            target_price=self._extract_target_price(signal),
         )
         pos.entry_bar_index = bar_index
         self._positions[symbol_str] = pos
@@ -507,9 +548,14 @@ class BacktestSimulator:
     ) -> None:
         """
         Prüft Exit-Bedingungen für alle offenen Positionen.
-        Exit-Typen:
-            - ATR-Stop: 2.5x ATR unter Entry (Long) / über Entry (Short)
-            - Zeit-Exit: Max 20 Bars gehalten
+        Exit-Typen, in Prioritätsreihenfolge (erster Treffer gewinnt):
+            1. ATR-Stop: 2.5x ATR unter Entry (Long) / über Entry (Short)
+               - Risikoschutz geht vor Gewinnmitnahme oder Zeitablauf.
+            2. Target erreicht: strategie-eigenes target_price aus
+               signal.metadata (siehe SimulatedPosition.target_price
+               Docstring) - nur falls die Strategie eines geliefert hat.
+            3. Zeit-Exit: Max 20 Bars gehalten (passiver Fallback, wenn
+               weder Stop noch Ziel erreicht wurden).
         """
         for symbol_str, pos in list(self._positions.items()):
             if symbol_str != current_bar.symbol.ccxt_symbol:
@@ -520,7 +566,7 @@ class BacktestSimulator:
             exit_triggered = False
             exit_reason = ""
 
-            # ATR-basierter Stop (aus letzten 14 Bars)
+            # 1. ATR-basierter Stop (aus letzten 14 Bars)
             if len(history) >= 15:
                 import numpy as np
 
@@ -539,8 +585,19 @@ class BacktestSimulator:
                         exit_triggered = True
                         exit_reason = "atr_stop"
 
-            # Zeit-Exit: max 20 Bars
-            if bars_held >= 20:
+            # 2. Target erreicht (nur falls Stop nicht schon getriggert hat -
+            # Risikoschutz hat Vorrang, siehe Docstring oben)
+            if not exit_triggered and pos.target_price is not None:
+                if pos.side == "long" and close >= pos.target_price:
+                    exit_triggered = True
+                    exit_reason = "target_reached"
+                elif pos.side == "short" and close <= pos.target_price:
+                    exit_triggered = True
+                    exit_reason = "target_reached"
+
+            # 3. Zeit-Exit: max 20 Bars (nur falls weder Stop noch Ziel
+            # bereits getriggert haben)
+            if not exit_triggered and bars_held >= 20:
                 exit_triggered = True
                 exit_reason = "time_exit"
 

@@ -76,6 +76,7 @@ def make_signal(
     strategy_name: str = "fake_strategy",
     regime: MarketRegime = MarketRegime.TRENDING_UP,
     size_hint: float = 1.0,
+    metadata: dict | None = None,
 ) -> Signal:
     return Signal(
         timestamp=datetime.now(tz=UTC),
@@ -85,6 +86,7 @@ def make_signal(
         confidence=confidence,
         regime=regime,
         size_hint=size_hint,
+        metadata=metadata or {},
     )
 
 
@@ -361,6 +363,42 @@ class TestOpenPosition:
         await sim._open_position(signal, entry_bar, bar_index=0)
         assert sim._cash < cash_before
 
+    async def test_open_position_stores_target_price_from_signal_metadata(self):
+        """Schritt 10, Teil B: target_price aus signal.metadata muss auf
+        die SimulatedPosition durchgereicht werden, damit _check_exits()
+        es spaeter nutzen kann - siehe SimulatedPosition.target_price
+        Docstring fuer den Hintergrund (mean_reversion_v1 auf dem Server:
+        0 von 119 Trades wurden je durch das eigentliche Ziel geschlossen,
+        weil dieser Pfad bis zu diesem Fix nicht existierte)."""
+        sim = BacktestSimulator(make_config())
+        entry_bar = make_candles(1, start_price=100.0)[0]
+        signal = make_signal(confidence=1.0, metadata={"target_price": 105.5})
+        await sim._open_position(signal, entry_bar, bar_index=0)
+        pos = sim._positions[SYMBOL_STR]
+        assert pos.target_price == Decimal("105.5")
+
+    async def test_open_position_without_target_price_in_metadata_leaves_none(self):
+        """TrendFollowingStrategy (und jede andere Strategie ohne eigenes
+        Exit-Ziel) liefert kein target_price - Position muss weiterhin
+        None haben, unveraendertes Verhalten (nur generischer Stop/Zeit-
+        Exit greift dann)."""
+        sim = BacktestSimulator(make_config())
+        entry_bar = make_candles(1, start_price=100.0)[0]
+        signal = make_signal(confidence=1.0)  # kein metadata
+        await sim._open_position(signal, entry_bar, bar_index=0)
+        pos = sim._positions[SYMBOL_STR]
+        assert pos.target_price is None
+
+    async def test_open_position_invalid_target_price_is_fail_safe(self):
+        """Ein nicht-numerisches target_price darf den Backtest nie
+        crashen lassen - fail-safe auf None."""
+        sim = BacktestSimulator(make_config())
+        entry_bar = make_candles(1, start_price=100.0)[0]
+        signal = make_signal(confidence=1.0, metadata={"target_price": "not-a-number"})
+        await sim._open_position(signal, entry_bar, bar_index=0)
+        pos = sim._positions[SYMBOL_STR]
+        assert pos.target_price is None
+
 
 # ---------------------------------------------------------------------
 # _check_exits()
@@ -499,6 +537,168 @@ class TestCheckExits:
         # time-exit check applies (bars_held=1, no exit)
         await sim._check_exits(9, candles[9], candles[:10])
         assert SYMBOL_STR in sim._positions
+
+    async def test_check_exits_target_reached_long(self):
+        """Schritt 10, Teil B: Long-Position mit target_price - sobald
+        close >= target_price, muss die Position mit exit_reason=
+        'target_reached' geschlossen werden, statt bis zum Zeit-Exit zu
+        laufen (der bisherige, auf dem Server beobachtete Bug)."""
+        sim = BacktestSimulator(make_config())
+        candles = make_candles(10, start_price=100.0, drift=0.0)
+        pos = SimulatedPosition(
+            symbol=SYMBOL_STR,
+            side="long",
+            quantity=Decimal("1"),
+            entry_price=Decimal("100"),
+            entry_time=datetime.now(tz=UTC),
+            strategy="mean_reversion_v1",
+            signal_confidence=0.9,
+            regime=MarketRegime.RANGING,
+            target_price=Decimal("100.5"),
+        )
+        pos.entry_bar_index = 0
+        sim._positions[SYMBOL_STR] = pos
+        target_bar = candles[3].model_copy(update={"close": Decimal("101")})
+        candles[3] = target_bar
+
+        await sim._check_exits(3, target_bar, candles[:4])
+
+        assert SYMBOL_STR not in sim._positions
+        assert sim._closed_trades[0].metadata.get("exit_reason") == "target_reached"
+
+    async def test_check_exits_target_reached_short(self):
+        sim = BacktestSimulator(make_config())
+        candles = make_candles(10, start_price=100.0, drift=0.0)
+        pos = SimulatedPosition(
+            symbol=SYMBOL_STR,
+            side="short",
+            quantity=Decimal("1"),
+            entry_price=Decimal("100"),
+            entry_time=datetime.now(tz=UTC),
+            strategy="mean_reversion_v1",
+            signal_confidence=0.9,
+            regime=MarketRegime.RANGING,
+            target_price=Decimal("99.5"),
+        )
+        pos.entry_bar_index = 0
+        sim._positions[SYMBOL_STR] = pos
+        target_bar = candles[3].model_copy(update={"close": Decimal("99")})
+        candles[3] = target_bar
+
+        await sim._check_exits(3, target_bar, candles[:4])
+
+        assert SYMBOL_STR not in sim._positions
+        assert sim._closed_trades[0].metadata.get("exit_reason") == "target_reached"
+
+    async def test_check_exits_target_not_yet_reached_stays_open(self):
+        sim = BacktestSimulator(make_config())
+        candles = make_candles(10, start_price=100.0, drift=0.0)
+        pos = SimulatedPosition(
+            symbol=SYMBOL_STR,
+            side="long",
+            quantity=Decimal("1"),
+            entry_price=Decimal("100"),
+            entry_time=datetime.now(tz=UTC),
+            strategy="mean_reversion_v1",
+            signal_confidence=0.9,
+            regime=MarketRegime.RANGING,
+            target_price=Decimal("105"),  # weit entfernt
+        )
+        pos.entry_bar_index = 0
+        sim._positions[SYMBOL_STR] = pos
+        bar = candles[3].model_copy(update={"close": Decimal("100.2")})
+        candles[3] = bar
+
+        await sim._check_exits(3, bar, candles[:4])
+
+        assert SYMBOL_STR in sim._positions
+
+    async def test_check_exits_atr_stop_takes_priority_over_target(self):
+        """Wenn im selben Bar sowohl ATR-Stop als auch target_price
+        zutreffen wuerden, muss der Stop gewinnen (Risikoschutz vor
+        Gewinnmitnahme) - siehe _check_exits() Docstring Prioritaet."""
+        sim = BacktestSimulator(make_config())
+        candles = make_candles(20, start_price=100.0, drift=0.0)
+        # Crash weit unter target_price UND unter den ATR-Stop-Abstand.
+        crash_bar = candles[-1].model_copy(update={"close": Decimal("50"), "low": Decimal("48")})
+        candles[-1] = crash_bar
+
+        pos = SimulatedPosition(
+            symbol=SYMBOL_STR,
+            side="long",
+            quantity=Decimal("1"),
+            entry_price=Decimal("100"),
+            entry_time=datetime.now(tz=UTC),
+            strategy="mean_reversion_v1",
+            signal_confidence=0.9,
+            regime=MarketRegime.RANGING,
+            # target_price liegt UNTER dem Crash-Preis 50 -> waere technisch
+            # auch "erreicht" (long: close >= target), aber der Stop muss
+            # zuerst greifen.
+            target_price=Decimal("45"),
+        )
+        pos.entry_bar_index = 0
+        sim._positions[SYMBOL_STR] = pos
+
+        await sim._check_exits(10, crash_bar, candles)
+
+        assert SYMBOL_STR not in sim._positions
+        assert sim._closed_trades[0].metadata.get("exit_reason") == "atr_stop"
+
+    async def test_check_exits_target_reached_takes_priority_over_time_exit(self):
+        """Wenn Ziel und Zeit-Exit im selben Bar zutreffen (bars_held>=20
+        UND target erreicht), muss target_reached gewinnen - eine aktive
+        Zielerreichung ist informativer als ein reines Zeitlimit."""
+        sim = BacktestSimulator(make_config())
+        candles = make_candles(25, start_price=100.0, drift=0.0)
+        target_bar = candles[20].model_copy(update={"close": Decimal("101")})
+        candles[20] = target_bar
+
+        pos = SimulatedPosition(
+            symbol=SYMBOL_STR,
+            side="long",
+            quantity=Decimal("1"),
+            entry_price=Decimal("100"),
+            entry_time=datetime.now(tz=UTC),
+            strategy="mean_reversion_v1",
+            signal_confidence=0.9,
+            regime=MarketRegime.RANGING,
+            target_price=Decimal("100.5"),
+        )
+        pos.entry_bar_index = 0  # bars_held = 20 at bar_idx=20 -> time_exit would also trigger
+        sim._positions[SYMBOL_STR] = pos
+
+        await sim._check_exits(20, target_bar, candles[:21])
+
+        assert SYMBOL_STR not in sim._positions
+        assert sim._closed_trades[0].metadata.get("exit_reason") == "target_reached"
+
+    async def test_check_exits_without_target_price_unaffected_by_new_logic(self):
+        """Regression: eine Position ohne target_price (z.B.
+        trend_following_v1) darf durch die neue Ziel-Pruefung nicht
+        beeinflusst werden - weiterhin nur Stop/Zeit-Exit, unveraendertes
+        Verhalten."""
+        sim = BacktestSimulator(make_config())
+        candles = make_candles(25, start_price=100.0, drift=0.0)
+        pos = SimulatedPosition(
+            symbol=SYMBOL_STR,
+            side="long",
+            quantity=Decimal("1"),
+            entry_price=Decimal("100"),
+            entry_time=datetime.now(tz=UTC),
+            strategy="trend_following_v1",
+            signal_confidence=0.9,
+            regime=MarketRegime.TRENDING_UP,
+            target_price=None,
+        )
+        pos.entry_bar_index = 15
+        sim._positions[SYMBOL_STR] = pos
+        bar = candles[18].model_copy(update={"close": Decimal("100.2")})
+        candles[18] = bar
+
+        await sim._check_exits(18, bar, candles[:19])
+
+        assert SYMBOL_STR in sim._positions  # bars_held=3, kein Exit-Grund
 
 
 # ---------------------------------------------------------------------
