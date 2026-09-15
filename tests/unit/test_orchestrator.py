@@ -320,13 +320,17 @@ async def test_successful_cycle_increments_trading_cycles_counter() -> None:
     orchestrator = e.orchestrator()
 
     before = trading_cycles_total.labels(
-        status=TradingCycleStatus.NO_SIGNAL.value, symbol="pionex:BTC/USDT"
+        status=TradingCycleStatus.NO_SIGNAL.value,
+        symbol="pionex:BTC/USDT",
+        tenant="default",
     )._value.get()
 
     await orchestrator.run_cycle("pionex:BTC/USDT", "1h")
 
     after = trading_cycles_total.labels(
-        status=TradingCycleStatus.NO_SIGNAL.value, symbol="pionex:BTC/USDT"
+        status=TradingCycleStatus.NO_SIGNAL.value,
+        symbol="pionex:BTC/USDT",
+        tenant="default",
     )._value.get()
     assert after == before + 1
 
@@ -344,13 +348,17 @@ async def test_unexpected_exception_still_increments_failed_cycles_counter(
     orchestrator = e.orchestrator()
 
     before = trading_cycles_total.labels(
-        status=TradingCycleStatus.FAILED.value, symbol="pionex:BTC/USDT"
+        status=TradingCycleStatus.FAILED.value,
+        symbol="pionex:BTC/USDT",
+        tenant="default",
     )._value.get()
 
     await orchestrator.run_cycle("pionex:BTC/USDT", "1h")
 
     after = trading_cycles_total.labels(
-        status=TradingCycleStatus.FAILED.value, symbol="pionex:BTC/USDT"
+        status=TradingCycleStatus.FAILED.value,
+        symbol="pionex:BTC/USDT",
+        tenant="default",
     )._value.get()
     assert after == before + 1
 
@@ -472,9 +480,7 @@ async def test_on_candle_event_triggers_cycle_for_matching_symbol(
     event = sample_candle_event_factory(btc_symbol, "1h")
     await orchestrator.on_candle_event(event)
 
-    e.strategy_engine.process.assert_called_once_with(
-        "pionex:BTC/USDT", "1h", MarketRegime.UNKNOWN
-    )
+    e.strategy_engine.process.assert_called_once_with("pionex:BTC/USDT", "1h", MarketRegime.UNKNOWN)
 
 
 async def test_on_candle_event_never_raises_on_malformed_event() -> None:

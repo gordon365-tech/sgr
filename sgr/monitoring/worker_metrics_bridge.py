@@ -89,6 +89,8 @@ class WorkerMetricsPublisher:
         trading_mode: str,
     ) -> None:
         self._redis = redis_client
+        self._tenant_id = tenant_id
+        self._trading_mode = trading_mode
         self._key = _worker_key(tenant_id, trading_mode)
         self._task: asyncio.Task[None] | None = None
 
@@ -130,6 +132,16 @@ class WorkerMetricsPublisher:
         try:
             from prometheus_client import REGISTRY, generate_latest
 
+            from sgr.monitoring.trading_metrics import worker_heartbeat_timestamp_seconds
+
+            # Vor generate_latest(): der Heartbeat muss Teil DIESES
+            # Snapshots sein, sonst wuerde Grafana den Zeitstempel vom
+            # vorherigen Zyklus sehen (Freshness-Check faelschlich
+            # verzoegert um ein Publish-Intervall).
+            worker_heartbeat_timestamp_seconds.labels(
+                trading_mode=self._trading_mode, tenant=self._tenant_id
+            ).set_to_current_time()
+
             snapshot = generate_latest(REGISTRY)
             await self._redis.set(self._key, snapshot, ex=_SNAPSHOT_TTL_SECONDS)
             await self._redis.sadd(_REDIS_WORKER_SET_KEY, self._key)
@@ -167,9 +179,7 @@ async def collect_worker_metrics(redis_client: Redis) -> bytes:
         try:
             snapshot = await redis_client.get(key)
             if snapshot is not None:
-                snapshots.append(
-                    snapshot if isinstance(snapshot, bytes) else snapshot.encode()
-                )
+                snapshots.append(snapshot if isinstance(snapshot, bytes) else snapshot.encode())
             else:
                 # TTL abgelaufen (Worker vermutlich gestorben, SREM nie
                 # ausgefuehrt) - Set-Eintrag best-effort aufraeumen,

@@ -12,260 +12,25 @@
     ]
   },
   "editable": true,
-  "gnetId": null,
+  "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
   "id": null,
   "links": [],
+  "liveNow": false,
   "panels": [
     {
+      "collapsed": false,
       "datasource": "Prometheus",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {
-              "tooltip": false,
-              "viz": false,
-              "legend": false
-            },
-            "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "short"
-        }
-      },
       "gridPos": {
-        "h": 8,
-        "w": 12,
+        "h": 1,
+        "w": 24,
         "x": 0,
         "y": 0
       },
-      "id": 2,
-      "options": {
-        "legend": {
-          "calcs": [
-            "last"
-          ],
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "expr": "sgr_portfolio_value_usd{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\"}",
-          "interval": "",
-          "legendFormat": "Portfolio Value (Gordon)",
-          "refId": "A"
-        },
-        {
-          "expr": "sgr_portfolio_value_usd{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\"}",
-          "interval": "",
-          "legendFormat": "Portfolio Value (Sumo)",
-          "refId": "B"
-        }
-      ],
-      "title": "Portfolio Value Over Time",
-      "type": "timeseries"
-    },
-    {
-      "datasource": "Prometheus",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisLabel": "USD",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 0
-              }
-            ]
-          },
-          "unit": "short"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 0
-      },
-      "id": 3,
-      "options": {
-        "legend": {
-          "calcs": [
-            "last",
-            "mean"
-          ],
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "expr": "sgr_portfolio_daily_pnl_usd{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\"}",
-          "interval": "",
-          "legendFormat": "Daily PnL (Gordon)",
-          "refId": "A"
-        },
-        {
-          "expr": "sgr_portfolio_daily_pnl_usd{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\"}",
-          "interval": "",
-          "legendFormat": "Daily PnL (Sumo)",
-          "refId": "B"
-        }
-      ],
-      "title": "Daily Profit & Loss",
-      "type": "timeseries"
-    },
-    {
-      "datasource": "Prometheus",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisLabel": "%",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "opacity",
-            "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": -0.1
-              },
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          },
-          "unit": "percentunit"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 8
-      },
-      "id": 4,
-      "options": {
-        "legend": {
-          "calcs": [
-            "last",
-            "min"
-          ],
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "expr": "sgr_risk_max_drawdown_pct{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\"} / 100",
-          "interval": "",
-          "legendFormat": "Max Drawdown (Gordon)",
-          "refId": "A"
-        },
-        {
-          "expr": "sgr_risk_max_drawdown_pct{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\"} / 100",
-          "interval": "",
-          "legendFormat": "Max Drawdown (Sumo)",
-          "refId": "B"
-        }
-      ],
-      "title": "Maximum Drawdown",
-      "type": "timeseries"
+      "id": 1,
+      "panels": [],
+      "title": "System Health & Safety",
+      "type": "row"
     },
     {
       "datasource": "Prometheus",
@@ -276,24 +41,500 @@
           },
           "mappings": [
             {
+              "type": "value",
               "options": {
                 "0": {
-                  "color": "green",
-                  "text": "Low"
+                  "text": "OK",
+                  "index": 0
                 },
-                "0.5": {
-                  "color": "yellow",
-                  "text": "Medium"
-                },
-                "0.7": {
-                  "color": "red",
-                  "text": "High"
+                "1": {
+                  "text": "ACTIVE",
+                  "index": 1
                 }
-              },
-              "type": "value"
+              }
             }
           ],
-          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 1
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_kill_switch_active{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\"}",
+          "legendFormat": "Gordon",
+          "refId": "A"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_kill_switch_active{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\"}",
+          "legendFormat": "Sumo",
+          "refId": "B"
+        }
+      ],
+      "title": "Kill Switch",
+      "type": "stat"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "index": 0
+                },
+                "1": {
+                  "text": "UP",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 8,
+        "y": 1
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "up{job=\"sgr-api\"}",
+          "legendFormat": "sgr-api",
+          "refId": "A"
+        }
+      ],
+      "title": "API / Metrics Endpoint Health",
+      "type": "stat"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 30
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 1
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "time() - sgr_worker_heartbeat_timestamp_seconds{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\"}",
+          "legendFormat": "Gordon",
+          "refId": "A"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "time() - sgr_worker_heartbeat_timestamp_seconds{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\"}",
+          "legendFormat": "Sumo",
+          "refId": "B"
+        }
+      ],
+      "title": "Worker Heartbeat Age",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "datasource": "Prometheus",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "id": 5,
+      "panels": [],
+      "title": "Portfolio & Performance",
+      "type": "row"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 6
+      },
+      "id": 6,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_portfolio_value_usd{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\"}",
+          "legendFormat": "Gordon",
+          "refId": "A"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_portfolio_value_usd{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\"}",
+          "legendFormat": "Sumo",
+          "refId": "B"
+        }
+      ],
+      "title": "Portfolio Value",
+      "type": "stat"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 6
+      },
+      "id": 7,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_portfolio_cash_usd{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\"}",
+          "legendFormat": "Gordon",
+          "refId": "A"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_portfolio_cash_usd{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\"}",
+          "legendFormat": "Sumo",
+          "refId": "B"
+        }
+      ],
+      "title": "Available Cash",
+      "type": "stat"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 6
+      },
+      "id": 8,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_portfolio_daily_pnl_usd{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\"}",
+          "legendFormat": "Gordon",
+          "refId": "A"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_portfolio_daily_pnl_usd{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\"}",
+          "legendFormat": "Sumo",
+          "refId": "B"
+        }
+      ],
+      "title": "Daily PnL (USD)",
+      "type": "stat"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 6
+      },
+      "id": 9,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_portfolio_daily_pnl_pct{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\"}",
+          "legendFormat": "Gordon",
+          "refId": "A"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_portfolio_daily_pnl_pct{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\"}",
+          "legendFormat": "Sumo",
+          "refId": "B"
+        }
+      ],
+      "title": "Daily PnL (%)",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "datasource": "Prometheus",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 10
+      },
+      "id": 10,
+      "panels": [],
+      "title": "Risk & Exposure",
+      "type": "row"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "max": 4,
           "min": 0,
           "thresholds": {
             "mode": "absolute",
@@ -304,52 +545,53 @@
               },
               {
                 "color": "yellow",
-                "value": 0.5
+                "value": 2
               },
               {
                 "color": "red",
-                "value": 0.7
+                "value": 3
               }
             ]
           },
-          "unit": "percentunit"
-        }
+          "unit": "none"
+        },
+        "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 8
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 11
       },
-      "id": 5,
+      "id": 11,
       "options": {
         "orientation": "auto",
         "reduceOptions": {
-          "values": false,
           "calcs": [
             "lastNotNull"
           ],
-          "fields": ""
+          "fields": "",
+          "values": false
         },
         "showThresholdLabels": false,
         "showThresholdMarkers": true
       },
-      "pluginVersion": "9.5.3",
+      "pluginVersion": "10.4.0",
       "targets": [
         {
-          "expr": "sgr_risk_portfolio_heat{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\"}",
-          "interval": "",
-          "legendFormat": "Portfolio Heat (Gordon)",
+          "datasource": "Prometheus",
+          "expr": "sgr_risk_leverage{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\"}",
+          "legendFormat": "Gordon",
           "refId": "A"
         },
         {
-          "expr": "sgr_risk_portfolio_heat{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\"}",
-          "interval": "",
-          "legendFormat": "Portfolio Heat (Sumo)",
+          "datasource": "Prometheus",
+          "expr": "sgr_risk_leverage{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\"}",
+          "legendFormat": "Sumo",
           "refId": "B"
         }
       ],
-      "title": "Portfolio Heat (Risk Level)",
+      "title": "Leverage",
       "type": "gauge"
     },
     {
@@ -357,27 +599,156 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 11
+      },
+      "id": 12,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_risk_open_positions{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\"}",
+          "legendFormat": "Gordon",
+          "refId": "A"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_risk_open_positions{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\"}",
+          "legendFormat": "Sumo",
+          "refId": "B"
+        }
+      ],
+      "title": "Open Positions (Count)",
+      "type": "stat"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "max": 25,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 7.5
+              },
+              {
+                "color": "red",
+                "value": 15
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 11
+      },
+      "id": 13,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_risk_max_drawdown_pct{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\"}",
+          "legendFormat": "Gordon",
+          "refId": "A"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_risk_max_drawdown_pct{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\"}",
+          "legendFormat": "Sumo",
+          "refId": "B"
+        }
+      ],
+      "title": "Max Drawdown",
+      "type": "gauge"
+    },
+    {
+      "collapsed": false,
+      "datasource": "Prometheus",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "id": 14,
+      "panels": [],
+      "title": "Asset / Position Breakdown",
+      "type": "row"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
           },
           "custom": {
-            "axisLabel": "Count",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "bars",
-            "fillOpacity": 100,
-            "gradientMode": "none",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
             },
-            "showPoints": "auto",
-            "spanNulls": true,
-            "stacking": {
-              "group": "A",
-              "mode": "normal"
-            }
+            "inspect": false
           },
           "mappings": [],
           "thresholds": {
@@ -389,22 +760,289 @@
               }
             ]
           }
-        }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Tenant"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "a47d994d-35cc-4619-83bb-86fd0cb48447": {
+                        "text": "Gordon",
+                        "index": 0
+                      },
+                      "144f7bb0-113d-4c66-b5d3-7a34ab1d551a": {
+                        "text": "Sumo",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Unrealized PnL (USD)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "green",
+                      "value": 0
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Exposure (USD)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Size"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Leverage"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 16
+        "y": 18
       },
-      "id": 6,
+      "id": 15,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_position_size{symbol=~\"$symbol\", tenant=~\"$tenant\"}",
+          "legendFormat": "",
+          "refId": "A",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_position_exposure_usd{symbol=~\"$symbol\", tenant=~\"$tenant\"}",
+          "legendFormat": "",
+          "refId": "B",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_position_leverage{symbol=~\"$symbol\", tenant=~\"$tenant\"}",
+          "legendFormat": "",
+          "refId": "C",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_position_unrealized_pnl_usd{symbol=~\"$symbol\", tenant=~\"$tenant\"}",
+          "legendFormat": "",
+          "refId": "D",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "title": "Position Breakdown",
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "otel_scope_name": true,
+              "otel_scope_schema_url": true,
+              "otel_scope_version": true,
+              "status": true,
+              "__name__": true,
+              "Value #A": true,
+              "Value #B": true,
+              "Value #C": true,
+              "Value #D": true
+            },
+            "indexByName": {
+              "symbol": 0,
+              "side": 1,
+              "exchange": 2,
+              "trading_mode": 3,
+              "tenant": 4,
+              "Size": 5,
+              "Exposure (USD)": 6,
+              "Leverage": 7,
+              "Unrealized PnL (USD)": 8
+            },
+            "renameByName": {
+              "symbol": "Symbol",
+              "side": "Side",
+              "exchange": "Exchange",
+              "trading_mode": "Mode",
+              "tenant": "Tenant",
+              "Value #A": "Size",
+              "Value #B": "Exposure (USD)",
+              "Value #C": "Leverage",
+              "Value #D": "Unrealized PnL (USD)"
+            }
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "datasource": "Prometheus",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "id": 16,
+      "panels": [],
+      "title": "Trading Activity (optional)",
+      "type": "row"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 27
+      },
+      "id": 17,
       "options": {
         "legend": {
           "calcs": [
-            "sum"
+            "last"
           ],
           "displayMode": "table",
-          "placement": "right"
+          "placement": "bottom"
         },
         "tooltip": {
           "mode": "multi"
@@ -412,672 +1050,190 @@
       },
       "targets": [
         {
-          "expr": "increase(sgr_trades_winning{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\"}[1h])",
-          "interval": "",
-          "legendFormat": "Winning Trades (Gordon)",
+          "datasource": "Prometheus",
+          "expr": "sgr_portfolio_value_usd{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\"}",
+          "legendFormat": "Gordon",
           "refId": "A"
         },
         {
-          "expr": "increase(sgr_trades_losing{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\"}[1h])",
-          "interval": "",
-          "legendFormat": "Losing Trades (Gordon)",
+          "datasource": "Prometheus",
+          "expr": "sgr_portfolio_value_usd{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\"}",
+          "legendFormat": "Sumo",
+          "refId": "B"
+        }
+      ],
+      "title": "Portfolio Value (Equity Curve)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "bars",
+            "fillOpacity": 100,
+            "gradientMode": "none",
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 27
+      },
+      "id": 18,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "increase(sgr_trades_winning_total{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\"}[1h])",
+          "legendFormat": "Winning (Gordon)",
+          "refId": "A"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "increase(sgr_trades_losing_total{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\"}[1h])",
+          "legendFormat": "Losing (Gordon)",
           "refId": "B"
         },
         {
-          "expr": "increase(sgr_trades_winning{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\"}[1h])",
-          "interval": "",
-          "legendFormat": "Winning Trades (Sumo)",
+          "datasource": "Prometheus",
+          "expr": "increase(sgr_trades_winning_total{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\"}[1h])",
+          "legendFormat": "Winning (Sumo)",
           "refId": "C"
         },
         {
-          "expr": "increase(sgr_trades_losing{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\"}[1h])",
-          "interval": "",
-          "legendFormat": "Losing Trades (Sumo)",
+          "datasource": "Prometheus",
+          "expr": "increase(sgr_trades_losing_total{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\"}[1h])",
+          "legendFormat": "Losing (Sumo)",
           "refId": "D"
         }
       ],
       "title": "Trade Results (Hourly)",
       "type": "timeseries"
-    },
-    {
-      "datasource": "Prometheus",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          },
-          "unit": "short"
-        }
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 6,
-        "x": 0,
-        "y": 24
-      },
-      "id": 7,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto"
-      },
-      "targets": [
-        {
-          "expr": "sgr_strategy_active_count{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\"}",
-          "interval": "",
-          "legendFormat": "Active",
-          "refId": "A"
-        }
-      ],
-      "title": "Active Strategies - Gordon",
-      "type": "stat"
-    },
-    {
-      "datasource": "Prometheus",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          },
-          "unit": "short"
-        }
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 6,
-        "x": 6,
-        "y": 24
-      },
-      "id": 8,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto"
-      },
-      "targets": [
-        {
-          "expr": "sgr_strategy_active_count{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\"}",
-          "interval": "",
-          "legendFormat": "Active",
-          "refId": "A"
-        }
-      ],
-      "title": "Active Strategies - Sumo",
-      "type": "stat"
-    },
-    {
-      "datasource": "Prometheus",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          },
-          "unit": "short"
-        }
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 6,
-        "x": 12,
-        "y": 24
-      },
-      "id": 9,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto"
-      },
-      "targets": [
-        {
-          "expr": "sgr_strategy_validation_status{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\", strategy=\"mean_reversion_v1\"}",
-          "interval": "",
-          "legendFormat": "Gordon",
-          "refId": "A"
-        },
-        {
-          "expr": "sgr_strategy_validation_status{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\", strategy=\"mean_reversion_v1\"}",
-          "interval": "",
-          "legendFormat": "Sumo",
-          "refId": "B"
-        }
-      ],
-      "title": "Go-Live Gate: mean_reversion_v1",
-      "type": "stat"
-    },
-    {
-      "datasource": "Prometheus",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          },
-          "unit": "short"
-        }
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 6,
-        "x": 18,
-        "y": 24
-      },
-      "id": 10,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto"
-      },
-      "targets": [
-        {
-          "expr": "sgr_strategy_validation_status{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\", strategy=\"trend_following_v1\"}",
-          "interval": "",
-          "legendFormat": "Gordon",
-          "refId": "A"
-        },
-        {
-          "expr": "sgr_strategy_validation_status{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\", strategy=\"trend_following_v1\"}",
-          "interval": "",
-          "legendFormat": "Sumo",
-          "refId": "B"
-        }
-      ],
-      "title": "Go-Live Gate: trend_following_v1",
-      "type": "stat"
-    },
-    {
-      "datasource": "Prometheus",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {
-              "tooltip": false,
-              "viz": false,
-              "legend": false
-            },
-            "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "short"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 28
-      },
-      "id": 11,
-      "options": {
-        "legend": {
-          "calcs": [
-            "last"
-          ],
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "expr": "sgr_strategy_backtest_sharpe_ratio{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\", strategy=\"mean_reversion_v1\"}",
-          "interval": "",
-          "legendFormat": "mean_reversion_v1 (Gordon)",
-          "refId": "A"
-        },
-        {
-          "expr": "sgr_strategy_backtest_sharpe_ratio{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\", strategy=\"trend_following_v1\"}",
-          "interval": "",
-          "legendFormat": "trend_following_v1 (Gordon)",
-          "refId": "B"
-        },
-        {
-          "expr": "sgr_strategy_backtest_sharpe_ratio{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\", strategy=\"mean_reversion_v1\"}",
-          "interval": "",
-          "legendFormat": "mean_reversion_v1 (Sumo)",
-          "refId": "C"
-        },
-        {
-          "expr": "sgr_strategy_backtest_sharpe_ratio{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\", strategy=\"trend_following_v1\"}",
-          "interval": "",
-          "legendFormat": "trend_following_v1 (Sumo)",
-          "refId": "D"
-        }
-      ],
-      "title": "Backtest Sharpe Ratio",
-      "type": "timeseries"
-    },
-    {
-      "datasource": "Prometheus",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {
-              "tooltip": false,
-              "viz": false,
-              "legend": false
-            },
-            "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "percent"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 28
-      },
-      "id": 12,
-      "options": {
-        "legend": {
-          "calcs": [
-            "last"
-          ],
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "expr": "sgr_strategy_backtest_total_return_pct{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\", strategy=\"mean_reversion_v1\"}",
-          "interval": "",
-          "legendFormat": "mean_reversion_v1 (Gordon)",
-          "refId": "A"
-        },
-        {
-          "expr": "sgr_strategy_backtest_total_return_pct{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\", strategy=\"trend_following_v1\"}",
-          "interval": "",
-          "legendFormat": "trend_following_v1 (Gordon)",
-          "refId": "B"
-        },
-        {
-          "expr": "sgr_strategy_backtest_total_return_pct{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\", strategy=\"mean_reversion_v1\"}",
-          "interval": "",
-          "legendFormat": "mean_reversion_v1 (Sumo)",
-          "refId": "C"
-        },
-        {
-          "expr": "sgr_strategy_backtest_total_return_pct{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\", strategy=\"trend_following_v1\"}",
-          "interval": "",
-          "legendFormat": "trend_following_v1 (Sumo)",
-          "refId": "D"
-        }
-      ],
-      "title": "Backtest Total Return",
-      "type": "timeseries"
-    },
-    {
-      "datasource": "Prometheus",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {
-              "tooltip": false,
-              "viz": false,
-              "legend": false
-            },
-            "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "percent"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 36
-      },
-      "id": 13,
-      "options": {
-        "legend": {
-          "calcs": [
-            "last"
-          ],
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "expr": "sgr_strategy_backtest_max_drawdown_pct{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\", strategy=\"mean_reversion_v1\"}",
-          "interval": "",
-          "legendFormat": "mean_reversion_v1 (Gordon)",
-          "refId": "A"
-        },
-        {
-          "expr": "sgr_strategy_backtest_max_drawdown_pct{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\", strategy=\"trend_following_v1\"}",
-          "interval": "",
-          "legendFormat": "trend_following_v1 (Gordon)",
-          "refId": "B"
-        },
-        {
-          "expr": "sgr_strategy_backtest_max_drawdown_pct{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\", strategy=\"mean_reversion_v1\"}",
-          "interval": "",
-          "legendFormat": "mean_reversion_v1 (Sumo)",
-          "refId": "C"
-        },
-        {
-          "expr": "sgr_strategy_backtest_max_drawdown_pct{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\", strategy=\"trend_following_v1\"}",
-          "interval": "",
-          "legendFormat": "trend_following_v1 (Sumo)",
-          "refId": "D"
-        }
-      ],
-      "title": "Backtest Max Drawdown",
-      "type": "timeseries"
-    },
-    {
-      "datasource": "Prometheus",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {
-              "tooltip": false,
-              "viz": false,
-              "legend": false
-            },
-            "lineInterpolation": "linear",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "spanNulls": true,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "short"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 36
-      },
-      "id": 14,
-      "options": {
-        "legend": {
-          "calcs": [
-            "last"
-          ],
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "expr": "sgr_strategy_backtest_total_trades{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\", strategy=\"mean_reversion_v1\"}",
-          "interval": "",
-          "legendFormat": "mean_reversion_v1 (Gordon)",
-          "refId": "A"
-        },
-        {
-          "expr": "sgr_strategy_backtest_total_trades{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\", strategy=\"trend_following_v1\"}",
-          "interval": "",
-          "legendFormat": "trend_following_v1 (Gordon)",
-          "refId": "B"
-        },
-        {
-          "expr": "sgr_strategy_backtest_total_trades{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\", strategy=\"mean_reversion_v1\"}",
-          "interval": "",
-          "legendFormat": "mean_reversion_v1 (Sumo)",
-          "refId": "C"
-        },
-        {
-          "expr": "sgr_strategy_backtest_total_trades{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\", strategy=\"trend_following_v1\"}",
-          "interval": "",
-          "legendFormat": "trend_following_v1 (Sumo)",
-          "refId": "D"
-        }
-      ],
-      "title": "Backtest Total Trades",
-      "type": "timeseries"
     }
   ],
   "refresh": "30s",
-  "schemaVersion": 36,
+  "schemaVersion": 39,
   "style": "dark",
   "tags": [
     "sgr",
     "trading",
-    "portfolio"
+    "paper-trading",
+    "observability"
   ],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": "Prometheus",
+        "definition": "label_values(sgr_position_size, symbol)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Symbol",
+        "multi": true,
+        "name": "symbol",
+        "options": [],
+        "query": {
+          "query": "label_values(sgr_position_size, symbol)",
+          "refId": "symbol-variable"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": "Prometheus",
+        "definition": "label_values(sgr_position_size, tenant)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Tenant",
+        "multi": true,
+        "name": "tenant",
+        "options": [],
+        "query": {
+          "query": "label_values(sgr_position_size, tenant)",
+          "refId": "tenant-variable"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
   },
   "time": {
-    "from": "now-24h",
+    "from": "now-6h",
     "to": "now"
   },
   "timepicker": {},
   "timezone": "",
   "title": "SGR Trading Dashboard",
   "uid": "sgr-trading-dashboard",
-  "version": 2
+  "version": 3,
+  "weekStart": ""
 }

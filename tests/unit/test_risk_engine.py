@@ -496,9 +496,7 @@ class TestPositionSizer:
         assert qty_high_cap == qty_no_cap
         assert reason_high_cap is None or "max order size" not in reason_high_cap.lower()
 
-    def test_max_order_notional_exactly_at_boundary_not_capped(
-        self, sample_signal: Signal
-    ) -> None:
+    def test_max_order_notional_exactly_at_boundary_not_capped(self, sample_signal: Signal) -> None:
         """final_notional == max_order_notional darf nicht als 'capped' gelten
         (strikt größer, nicht größer-gleich, siehe Implementierung)."""
         sizer = PositionSizer()
@@ -543,7 +541,7 @@ class TestKillSwitch:
 
         KillSwitch(TradingMode.LIVE)
 
-        assert kill_switch_active.labels(trading_mode="live")._value.get() == 0
+        assert kill_switch_active.labels(trading_mode="live", tenant="default")._value.get() == 0
 
     async def test_trigger_activates(self, kill_switch: KillSwitch) -> None:
         await kill_switch.trigger("Test reason", triggered_by="test")
@@ -569,7 +567,7 @@ class TestKillSwitch:
 
         await kill_switch.trigger("Test reason")
 
-        assert kill_switch_active.labels(trading_mode="paper")._value.get() == 1
+        assert kill_switch_active.labels(trading_mode="paper", tenant="default")._value.get() == 1
 
     async def test_reset_clears_prometheus_gauge(self, kill_switch: KillSwitch) -> None:
         from sgr.monitoring.trading_metrics import kill_switch_active
@@ -577,7 +575,7 @@ class TestKillSwitch:
         await kill_switch.trigger("Test reason")
         await kill_switch.reset(reset_by="test_user")
 
-        assert kill_switch_active.labels(trading_mode="paper")._value.get() == 0
+        assert kill_switch_active.labels(trading_mode="paper", tenant="default")._value.get() == 0
 
     async def test_trigger_without_exchange_pool_does_not_crash(
         self, kill_switch: KillSwitch
@@ -587,9 +585,7 @@ class TestKillSwitch:
         await kill_switch.trigger("No pool test")
         assert kill_switch.is_active
 
-    async def test_inject_exchange_pool_stores_reference(
-        self, kill_switch: KillSwitch
-    ) -> None:
+    async def test_inject_exchange_pool_stores_reference(self, kill_switch: KillSwitch) -> None:
         fake_pool = object()
         kill_switch.inject_exchange_pool(fake_pool)
         assert kill_switch._exchange_pool is fake_pool
@@ -773,7 +769,7 @@ class TestRiskEngineLimits:
         await risk_engine._kill_switch.trigger("manual test")
 
         before = risk_rejected_total.labels(
-            trading_mode="paper", reason="Kill switch is active"
+            trading_mode="paper", reason="Kill switch is active", tenant="default"
         )._value.get()
 
         await risk_engine.evaluate(
@@ -785,7 +781,7 @@ class TestRiskEngineLimits:
         )
 
         after = risk_rejected_total.labels(
-            trading_mode="paper", reason="Kill switch is active"
+            trading_mode="paper", reason="Kill switch is active", tenant="default"
         )._value.get()
         assert after == before + 1
 
@@ -1098,9 +1094,7 @@ class TestLeverageGuard:
         # Cleanup
         await risk_engine._kill_switch.reset("cleanup")
 
-    async def test_gross_leverage_included_in_empty_metrics(
-        self, risk_engine: RiskEngine
-    ) -> None:
+    async def test_gross_leverage_included_in_empty_metrics(self, risk_engine: RiskEngine) -> None:
         """_empty_metrics() (Fail-Safe-Pfad) setzt gross_leverage explizit
         auf 0.0 statt es implizit vom Pydantic-Default abhängen zu lassen."""
         metrics = risk_engine._empty_metrics(Decimal("50000"))

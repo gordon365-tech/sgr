@@ -85,24 +85,54 @@ class SGRMetrics:
             return _TenantScopedInstrument(instrument, self._tenant_id)
 
         # Portfolio Metrics
-        self.portfolio_value = gauge("sgr.portfolio.value_usd", "Current portfolio value", "USD")
-        self.portfolio_cash = gauge("sgr.portfolio.cash_usd", "Available cash", "USD")
-        self.daily_pnl = gauge("sgr.portfolio.daily_pnl_usd", "Daily profit/loss", "USD")
-        self.daily_pnl_pct = gauge(
-            "sgr.portfolio.daily_pnl_pct", "Daily profit/loss percentage", "%"
-        )
+        #
+        # WICHTIG (Grafana-Observability-Audit): kein `unit=` Argument mehr
+        # auf Gauges, deren Name die Einheit bereits im letzten Wortteil
+        # traegt (_usd, _pct). Der PrometheusMetricReader haengt den `unit`-
+        # Wert IMMER als zusaetzlichen Namens-Suffix an (empirisch am
+        # exportierten /metrics-Text verifiziert) - "value_usd" + unit="USD"
+        # exportierte bisher faelschlich als "sgr_portfolio_value_usd_USD"
+        # (Doppel-Suffix, nirgends von Dashboard/Tests erwartet). Die
+        # Einheit steht bereits im Namen selbst - `unit=` ist hier
+        # redundant und wird komplett weggelassen statt umbenannt, damit
+        # der Name weiterhin mit den bestehenden Grafana-Queries und dem
+        # Dashboard-Test (test_grafana_dashboard.py) uebereinstimmt.
+        self.portfolio_value = gauge("sgr.portfolio.value_usd", "Current portfolio value")
+        self.portfolio_cash = gauge("sgr.portfolio.cash_usd", "Available cash")
+        self.daily_pnl = gauge("sgr.portfolio.daily_pnl_usd", "Daily profit/loss")
+        self.daily_pnl_pct = gauge("sgr.portfolio.daily_pnl_pct", "Daily profit/loss percentage")
 
         # Risk Metrics
         self.portfolio_heat = gauge("sgr.risk.portfolio_heat", "Portfolio heat (0-1)")
-        self.max_drawdown = gauge("sgr.risk.max_drawdown_pct", "Maximum drawdown", "%")
+        self.max_drawdown = gauge("sgr.risk.max_drawdown_pct", "Maximum drawdown")
         self.leverage = gauge("sgr.risk.leverage", "Current leverage ratio")
-        self.open_positions_count = gauge(
-            "sgr.risk.open_positions", "Number of open positions"
+        self.open_positions_count = gauge("sgr.risk.open_positions", "Number of open positions")
+        self.var_95 = gauge("sgr.risk.var_95_pct", "Value at Risk (95% confidence)")
+
+        # Position Metrics (Asset/Position Breakdown im Grafana-Dashboard,
+        # siehe monitoring/grafana/dashboards/sgr-trading.json): eine
+        # Zeitreihe pro offener Position, gelabelt mit symbol/side/
+        # trading_mode/exchange. tenant kommt wie bei allen SGRMetrics-
+        # Instrumenten automatisch ueber _TenantScopedInstrument dazu.
+        # Vorher existierte keine einzige Metrik auf Positions-Ebene -
+        # das Dashboard haette pro Asset/Position nichts anzuzeigen gehabt.
+        self.position_size = gauge("sgr.position.size", "Current position size (quantity)")
+        self.position_exposure = gauge(
+            "sgr.position.exposure_usd", "Position notional exposure (quantity * price)"
         )
-        self.var_95 = gauge("sgr.risk.var_95_pct", "Value at Risk (95% confidence)", "%")
+        self.position_leverage = gauge("sgr.position.leverage", "Position leverage")
+        self.position_unrealized_pnl = gauge(
+            "sgr.position.unrealized_pnl_usd", "Position unrealized profit/loss"
+        )
 
         # Trading Metrics
-        self.trades_total = counter("sgr.trades.total", "Total trades executed")
+        #
+        # Namensaudit: OTel's PrometheusMetricReader haengt an jeden
+        # Counter automatisch "_total" an (Spec-Verhalten, empirisch
+        # verifiziert). "sgr.trades.total" wuerde daher als
+        # "sgr_trades_total_total" exportieren (Doppel-Suffix) - "executed"
+        # statt "total" vermeidet das, ohne die Bedeutung zu aendern.
+        self.trades_total = counter("sgr.trades.executed", "Total trades executed")
         self.trades_winning = counter("sgr.trades.winning", "Winning trades")
         self.trades_losing = counter("sgr.trades.losing", "Losing trades")
 
@@ -134,12 +164,10 @@ class SGRMetrics:
         self.strategy_total_return = gauge(
             "sgr.strategy.backtest_total_return_pct",
             "Total return from the most recent validation backtest",
-            "%",
         )
         self.strategy_max_drawdown = gauge(
             "sgr.strategy.backtest_max_drawdown_pct",
             "Max drawdown from the most recent validation backtest",
-            "%",
         )
         self.strategy_backtest_trades = gauge(
             "sgr.strategy.backtest_total_trades",
@@ -151,9 +179,11 @@ class SGRMetrics:
             "sgr.market_data.candles_received", "OHLCV candles received"
         )
 
-        # System Metrics
-        self.api_requests_total = counter("sgr.api.requests_total", "Total API requests")
-        self.api_errors_total = counter("sgr.api.errors_total", "API errors")
+        # System Metrics (gleicher Doppel-Suffix-Grund wie bei trades_total
+        # oben: "_total" im OTel-Instrumentnamen + automatischer
+        # Counter-Suffix des Exporters).
+        self.api_requests_total = counter("sgr.api.requests", "Total API requests")
+        self.api_errors_total = counter("sgr.api.errors", "API errors")
 
         log.info("metrics.sgr_metrics_initialized", tenant_id=self._tenant_id)
 
@@ -235,3 +265,33 @@ def record_candle_received(symbol: str, timeframe: str) -> None:
     """Records candle reception."""
     m = get_metrics()
     m.candles_received.add(1, {"symbol": symbol, "timeframe": timeframe})
+
+
+def record_position_snapshot(
+    symbol: str,
+    side: str,
+    trading_mode: str,
+    exchange: str,
+    size: float,
+    exposure_usd: float,
+    leverage: float,
+    unrealized_pnl_usd: float,
+) -> None:
+    """Records the current state of a single open position.
+
+    Aufrufer: MonitoringEngine._collect() - einmal pro offener Position
+    und Sammel-Intervall. Fuettert das Asset/Position-Breakdown-Panel im
+    Grafana-Dashboard (symbol/side/trading_mode/exchange als Labels,
+    tenant automatisch via _TenantScopedInstrument).
+    """
+    m = get_metrics()
+    labels = {
+        "symbol": symbol,
+        "side": side,
+        "trading_mode": trading_mode,
+        "exchange": exchange,
+    }
+    m.position_size.set(size, labels)
+    m.position_exposure.set(exposure_usd, labels)
+    m.position_leverage.set(leverage, labels)
+    m.position_unrealized_pnl.set(unrealized_pnl_usd, labels)

@@ -25,6 +25,7 @@ from sgr.core.logging import get_logger
 from sgr.monitoring.metrics import (
     get_metrics,
     record_portfolio_snapshot,
+    record_position_snapshot,
     record_risk_snapshot,
 )
 
@@ -53,6 +54,14 @@ class MonitoringEngine:
         self._interval = interval_seconds
         self._task: asyncio.Task | None = None
         self._running = False
+        # Merkt sich die Label-Kombination (symbol, side, exchange) aller
+        # im letzten Zyklus gemeldeten offenen Positionen. Eine Position,
+        # die im aktuellen Zyklus nicht mehr auftaucht (geschlossen), wird
+        # explizit auf 0 gesetzt statt einfach nicht mehr geschrieben zu
+        # werden - sonst wuerde ihr letzter (offener) Gauge-Wert in
+        # Prometheus/Grafana unveraendert stehen bleiben und eine laengst
+        # geschlossene Position faelschlich als weiterhin offen anzeigen.
+        self._last_position_keys: set[tuple[str, str, str]] = set()
 
     async def start(self) -> None:
         config = get_config()
@@ -115,9 +124,7 @@ class MonitoringEngine:
                             portfolio_value=portfolio_value,
                             cash=cash,
                             daily_pnl=getattr(risk_metrics, "daily_pnl", 0),
-                            daily_pnl_pct=float(
-                                getattr(risk_metrics, "daily_pnl_pct", 0)
-                            ) * 100,
+                            daily_pnl_pct=float(getattr(risk_metrics, "daily_pnl_pct", 0)) * 100,
                         )
                     except Exception as e:
                         log.debug(
@@ -144,12 +151,24 @@ class MonitoringEngine:
                 record_risk_snapshot(
                     portfolio_heat=float(risk_metrics.portfolio_heat),
                     max_drawdown_pct=float(risk_metrics.drawdown_from_peak) * 100,
-                    leverage=float(getattr(risk_metrics, "leverage", 0)),
+                    # Bugfix (Grafana-Observability-Audit): RiskMetrics
+                    # (sgr/core/types.py) hat kein Feld "leverage" - das
+                    # tatsaechliche Feld heisst "gross_leverage". Die alte
+                    # getattr(..., "leverage", 0)-Zeile griff daher NIE,
+                    # sgr_risk_leverage stand dauerhaft fest auf 0.0, egal
+                    # wie hoch der echte Hebel war (server-verifiziert).
+                    leverage=float(getattr(risk_metrics, "gross_leverage", 0)),
                     open_positions=len(self._portfolio_engine.positions),
                     var_95_pct=float(risk_metrics.var_95) * 100,
                 )
             except Exception as e:
                 log.debug("monitoring.risk_error", error=str(e))
+
+        if self._portfolio_engine:
+            try:
+                self._collect_position_metrics()
+            except Exception as e:
+                log.debug("monitoring.position_error", error=str(e))
 
         if self._strategy_registry:
             try:
@@ -196,14 +215,60 @@ class MonitoringEngine:
                         "monitoring.strategy_performance",
                         strategy=name,
                         backtest_sharpe=result.sharpe_ratio if result else None,
-                        live_sharpe=(
-                            entry.performance.sharpe_ratio if entry.performance else None
-                        ),
+                        live_sharpe=(entry.performance.sharpe_ratio if entry.performance else None),
                         hit_rate=entry.performance.hit_rate if entry.performance else None,
                         can_go_live=entry.validation_status.can_go_live,
                     )
             except Exception as e:
                 log.debug("monitoring.strategy_error", error=str(e))
+
+    def _collect_position_metrics(self) -> None:
+        """Schreibt eine Gauge-Zeile pro aktuell offener Position.
+
+        Fuettert das Asset/Position-Breakdown-Panel im Grafana-Dashboard
+        (Symbol, Side, Groesse, Exposure, Leverage, Unrealized PnL).
+        Positionen, die seit dem letzten Zyklus geschlossen wurden, werden
+        explizit auf 0 gesetzt (siehe _last_position_keys Docstring in
+        __init__) statt einfach nicht mehr aktualisiert zu werden.
+        """
+        positions = self._portfolio_engine.positions
+        current_keys: set[tuple[str, str, str]] = set()
+
+        for position in positions:
+            # position.symbol.exchange (nicht die globale Config-
+            # primary_exchange) - das ist das tatsaechliche Exchange DIESER
+            # Position (siehe Symbol.exchange in sgr/core/types.py), korrekt
+            # auch sobald ein Tenant gleichzeitig auf mehreren Exchanges
+            # handelt.
+            symbol = position.symbol.ccxt_symbol
+            exchange = position.symbol.exchange.value
+            side = position.side.value
+            current_keys.add((symbol, side, exchange))
+            record_position_snapshot(
+                symbol=symbol,
+                side=side,
+                trading_mode=self._trading_mode,
+                exchange=exchange,
+                size=float(position.quantity),
+                exposure_usd=float(position.notional_value),
+                leverage=float(position.leverage),
+                unrealized_pnl_usd=float(position.unrealized_pnl),
+            )
+
+        closed_keys = self._last_position_keys - current_keys
+        for symbol, side, exch in closed_keys:
+            record_position_snapshot(
+                symbol=symbol,
+                side=side,
+                trading_mode=self._trading_mode,
+                exchange=exch,
+                size=0.0,
+                exposure_usd=0.0,
+                leverage=0.0,
+                unrealized_pnl_usd=0.0,
+            )
+
+        self._last_position_keys = current_keys
 
 
 def create_metrics_app():

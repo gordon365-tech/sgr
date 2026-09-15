@@ -168,9 +168,7 @@ class TestKillSwitchBlocking:
         bypass_kill_switch=True wuerde sich die Closing-Order selbst
         blockieren."""
         _pool, adapter = mock_pool
-        adapter.place_order = AsyncMock(
-            return_value=_make_order_result(_make_order_request())
-        )
+        adapter.place_order = AsyncMock(return_value=_make_order_result(_make_order_request()))
         engine._kill_switch.is_active = True  # type: ignore[misc]
         order = _make_order_request()
 
@@ -680,9 +678,7 @@ class TestPreflightIntegration:
         mocker: pytest_mock.MockerFixture,
     ) -> None:
         _pool, adapter = mock_pool
-        order = _make_order_request(
-            order_type=OrderType.MARKET, trading_mode=TradingMode.LIVE
-        )
+        order = _make_order_request(order_type=OrderType.MARKET, trading_mode=TradingMode.LIVE)
         filled = _make_order_result(order, status=OrderStatus.FILLED)
         adapter.place_order = AsyncMock(return_value=filled)
         mocker.patch("sgr.execution.engine.get_event_bus")
@@ -846,9 +842,7 @@ class TestShutdownSafety:
 
         await engine.shutdown()
 
-        adapter.cancel_order.assert_awaited_once_with(
-            "EX-INFLIGHT", order.symbol.ccxt_symbol
-        )
+        adapter.cancel_order.assert_awaited_once_with("EX-INFLIGHT", order.symbol.ccxt_symbol)
         assert engine._safety.all_inflight() == {}
 
     async def test_shutdown_skips_already_terminal_orders(
@@ -949,13 +943,21 @@ class TestMetricsRecording:
         mocker.patch("sgr.core.event_bus.get_event_bus")
 
         before = orders_submitted_total.labels(
-            exchange="binance", symbol="BTC/USDT:binance", side="buy", trading_mode="paper"
+            exchange="binance",
+            symbol="BTC/USDT:binance",
+            side="buy",
+            trading_mode="paper",
+            tenant="default",
         )._value.get()
 
         await engine.execute(order)
 
         after = orders_submitted_total.labels(
-            exchange="binance", symbol="BTC/USDT:binance", side="buy", trading_mode="paper"
+            exchange="binance",
+            symbol="BTC/USDT:binance",
+            side="buy",
+            trading_mode="paper",
+            tenant="default",
         )._value.get()
         assert after == before + 1
 
@@ -974,13 +976,21 @@ class TestMetricsRecording:
         mocker.patch("sgr.core.event_bus.get_event_bus")
 
         before = orders_filled_total.labels(
-            exchange="binance", symbol="BTC/USDT:binance", side="buy", trading_mode="paper"
+            exchange="binance",
+            symbol="BTC/USDT:binance",
+            side="buy",
+            trading_mode="paper",
+            tenant="default",
         )._value.get()
 
         await engine.execute(order)
 
         after = orders_filled_total.labels(
-            exchange="binance", symbol="BTC/USDT:binance", side="buy", trading_mode="paper"
+            exchange="binance",
+            symbol="BTC/USDT:binance",
+            side="buy",
+            trading_mode="paper",
+            tenant="default",
         )._value.get()
         assert after == before + 1
 
@@ -993,13 +1003,19 @@ class TestMetricsRecording:
         order = _make_order_request()
 
         before = orders_rejected_total.labels(
-            exchange="binance", symbol="BTC/USDT:binance", reason="kill_switch_active"
+            exchange="binance",
+            symbol="BTC/USDT:binance",
+            reason="kill_switch_active",
+            tenant="default",
         )._value.get()
 
         await engine.execute(order)
 
         after = orders_rejected_total.labels(
-            exchange="binance", symbol="BTC/USDT:binance", reason="kill_switch_active"
+            exchange="binance",
+            symbol="BTC/USDT:binance",
+            reason="kill_switch_active",
+            tenant="default",
         )._value.get()
         assert after == before + 1
 
@@ -1026,12 +1042,18 @@ class TestMetricsRecording:
         order = _make_order_request()
 
         before = orders_rejected_total.labels(
-            exchange="binance", symbol="BTC/USDT:binance", reason="preflight_failed"
+            exchange="binance",
+            symbol="BTC/USDT:binance",
+            reason="preflight_failed",
+            tenant="default",
         )._value.get()
 
         await engine.execute(order)
 
         after = orders_rejected_total.labels(
-            exchange="binance", symbol="BTC/USDT:binance", reason="preflight_failed"
+            exchange="binance",
+            symbol="BTC/USDT:binance",
+            reason="preflight_failed",
+            tenant="default",
         )._value.get()
         assert after == before + 1

@@ -43,6 +43,7 @@ from sgr.core.types import (
     Symbol,
     TradingMode,
 )
+from sgr.monitoring.metrics import record_trade_executed
 
 log = get_logger(__name__)
 
@@ -355,6 +356,23 @@ class PortfolioEngine:
             }
         )
 
+        # Grafana-Observability-Audit: sgr_trades_executed_total/
+        # sgr_trades_winning_total/sgr_trades_losing_total (metrics.py)
+        # waren vor diesem Fix definiert, aber an KEINER Stelle im Code
+        # jemals inkrementiert worden - der natuerliche Aufrufpunkt ist
+        # hier, wo realized_pnl fuer einen geschlossenen Trade bereits
+        # feststeht. Rein additiv/lesend fuer den Trading-Ablauf - ein
+        # Fehler hier darf das Schliessen der Position niemals verhindern
+        # (Fail-Safe-Prinzip wie ueberall sonst in sgr/monitoring/).
+        try:
+            record_trade_executed(
+                side=position.side.value,
+                pnl=realized_pnl,
+                winning=realized_pnl > 0,
+            )
+        except Exception as e:
+            log.warning("portfolio.trade_metric_record_failed", error=str(e))
+
     # ------------------------------------------------------------------
     # Price Updates
     # ------------------------------------------------------------------
@@ -540,9 +558,7 @@ class PortfolioEngine:
                 error=str(e),
             )
 
-    async def _persist_position_close(
-        self, position_id: Any, realized_pnl: Decimal
-    ) -> None:
+    async def _persist_position_close(self, position_id: Any, realized_pnl: Decimal) -> None:
         """Markiert eine Position in der DB als geschlossen. Best-effort."""
         if self._position_repo is None:
             return
