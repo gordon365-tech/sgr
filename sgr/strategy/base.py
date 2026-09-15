@@ -107,6 +107,19 @@ class ValidationStatus:
     paper_trading_passed: bool = False
     live_approved: bool = False
     notes: str = ""
+    # True nur, wenn dieser Status per manuellem Operator-Override
+    # entstand (siehe sgr.api.main.apply_strategy_force_activate_override(),
+    # STRATEGY_FORCE_ACTIVATE env var) statt durch eine tatsaechlich
+    # bestandene Validierung. Strukturierter Marker statt String-Matching
+    # auf "notes" - sgr.risk.live_trading_gate.check_live_trading_allowed()
+    # verweigert Live-Orders fuer jede Strategie mit is_operator_override=True,
+    # UNABHAENGIG davon, was can_go_live/live_approved sagen (ein Override
+    # darf can_go_live=True setzen, damit Paper Trading laeuft, aber live_
+    # approved bleibt in jedem Override-Pfad hart auf False - dieses Feld
+    # ist die zusaetzliche, faelschungssichere zweite Sicherung dagegen,
+    # dass ein kuenftiger Aufrufer live_approved versehentlich mit
+    # ueberschreibt).
+    is_operator_override: bool = False
 
     @property
     def can_go_live(self) -> bool:

@@ -122,6 +122,7 @@ class PortfolioEngine:
         trading_mode: TradingMode,
         initial_cash: Decimal = Decimal("10000"),
         position_repository: Any = None,
+        tenant_id: str | None = None,
     ) -> None:
         self._trading_mode = trading_mode
         self._state = PortfolioState(trading_mode, initial_cash)
@@ -129,6 +130,24 @@ class PortfolioEngine:
         # Optional: PositionRepository fuer Crash-Recovery und Phase 7B
         # Reconciliation. None = rein in-memory (Tests, Backtesting).
         self._position_repo: Any = position_repository
+        # Multi-Tenant-Isolation (Audit nach Commit 5/6): OHNE tenant_id
+        # schrieb _persist_position_upsert() jede Position mit
+        # user_id=NULL in die DB, UND restore_from_persistence() las beim
+        # naechsten Worker-Neustart ausnahmslos ALLE offenen Positionen
+        # ueber ALLE Tenants (get_open_positions() ohne user_id-Filter) in
+        # den in-memory State DIESES Prozesses ein - bei getrennten
+        # Worker-Prozessen pro Tenant (Gordon/Sumo, siehe Commit 5) haette
+        # das Gordons Positionen faelschlich in Sumos Portfolio geladen
+        # (und umgekehrt), sobald beide gleichzeitig offene Positionen
+        # haben und einer der beiden Worker neu startet. Die zugehoerigen
+        # DB-Row-Level-Security-Policies (user_isolation_positions, siehe
+        # init-db.sql) greifen dabei NICHT als Sicherheitsnetz: die App
+        # verbindet sich als Tabelleneigentuemer "sgr" ohne
+        # FORCE ROW LEVEL SECURITY und setzt an keiner Stelle
+        # app.current_user_id/app.is_admin - RLS ist aktuell rein
+        # dekorativ (siehe Go-Live-Report). tenant_id=None erhaelt das
+        # bisherige Single-Tenant-Verhalten (kein Filter) unveraendert.
+        self._tenant_id = tenant_id
         # Entry-Fee pro offener Position (Symbol -> noch nicht durch einen
         # Close verrechnete Fee-Anteile). realized_pnl/net_pnl wurde vorher
         # ausschliesslich mit der Exit-Fee berechnet (result.fees beim
@@ -443,7 +462,9 @@ class PortfolioEngine:
                 "PositionRepository. Fail-closed: kein impliziter Empty-Start."
             )
 
-        rows = await self._position_repo.get_open_positions(self._trading_mode)
+        rows = await self._position_repo.get_open_positions(
+            self._trading_mode, user_id=self._tenant_id
+        )
 
         restored = 0
         for row in rows:
@@ -509,6 +530,7 @@ class PortfolioEngine:
                     "opened_at": position.opened_at,
                     "strategy_name": position.strategy_name,
                     "trading_mode": position.trading_mode.value,
+                    "user_id": self._tenant_id,
                 }
             )
         except Exception as e:

@@ -90,7 +90,8 @@ class ExecutionEngine:
         # get_config() im selben Prozess verfuegbar.
         from sgr.core.config import get_config
 
-        self._kill_switch = get_kill_switch(trading_mode, tenant_id=get_config().tenant_id)
+        self._tenant_id = get_config().tenant_id
+        self._kill_switch = get_kill_switch(trading_mode, tenant_id=self._tenant_id)
         # Optional: OrderRepository fuer Persistenz. None = rein
         # In-Memory/Event-basiert (Tests, isolierte Nutzung) - additiv,
         # analog zu PortfolioEngine._position_repo. Ohne Injektion
@@ -131,6 +132,36 @@ class ExecutionEngine:
                 f"Order trading_mode {order.trading_mode} "
                 f"does not match engine mode {self._trading_mode}"
             )
+
+        # Live Trading Safety Gate (siehe sgr/risk/live_trading_gate.py
+        # Modul-Docstring): No-op fuer PAPER, aber fuer LIVE die letzte,
+        # harte Absicherung VOR dem Kill-Switch-Check und jedem
+        # Exchange-Call - verweigert insbesondere jede Strategie, die nur
+        # per STRATEGY_FORCE_ACTIVATE-Operator-Override aktiv ist. Kein
+        # bypass_kill_switch-Sonderfall: eine schliessende Order des
+        # PositionLiquidator ist immer noch eine LIVE-Order und muss
+        # denselben Nachweis (live_approved, kein Override) erbringen.
+        from sgr.risk.live_trading_gate import check_live_trading_allowed
+        from sgr.strategy.registry import StrategyRegistry
+
+        gate_result = check_live_trading_allowed(
+            order,
+            registry=StrategyRegistry.get(),
+            kill_switch=self._kill_switch,
+            exchange_pool=self._pool,
+        )
+        if not gate_result.allowed:
+            log.critical(
+                "execution_engine.blocked_by_live_trading_gate",
+                order_id=str(order.id),
+                reason=gate_result.reason,
+            )
+            record_order_rejected(
+                exchange=order.symbol.exchange.value,
+                symbol=str(order.symbol),
+                reason="live_trading_gate",
+            )
+            return self._rejected_result(order, gate_result.reason or "Live trading blocked")
 
         # Kill Switch (letzte Absicherung vor Exchange-Call)
         if self._kill_switch.is_active and not bypass_kill_switch:
@@ -223,6 +254,26 @@ class ExecutionEngine:
                 )
             return result
 
+        # Strategy-Attribution in raw_response uebertragen, BEVOR das
+        # Result an _on_fill()/PortfolioEngine.on_order_filled() geht.
+        # order.metadata["strategy"] (siehe RiskEngine.build_order_request())
+        # ist der einzige Ort, an dem der Strategiename zu diesem Zeitpunkt
+        # noch bekannt ist - result.raw_response stammt vom Adapter (bei
+        # echten ccxt-Adaptern die rohe Exchange-Antwort, die die Exchange
+        # selbst natuerlich nicht kennt) und wuerde diese Information sonst
+        # verlieren. PortfolioEngine._open_position() liest
+        # raw_response.get("strategy", "unknown") fuer positions.strategy_name -
+        # ohne diese Zeile war das IMMER "unknown", auch produktiv (siehe
+        # tests/integration/test_orchestrator_pipeline.py Happy-Path-Test).
+        result = result.model_copy(
+            update={
+                "raw_response": {
+                    **result.raw_response,
+                    "strategy": order.metadata.get("strategy", "unknown"),
+                }
+            }
+        )
+
         log.info(
             "execution_engine.order_submitted",
             order_id=str(order.id),
@@ -292,6 +343,7 @@ class ExecutionEngine:
                     "trading_mode": self._trading_mode.value,
                     "strategy_name": str(order.metadata.get("strategy", "unknown")),
                     "submitted_at": result.submitted_at,
+                    "user_id": self._tenant_id,
                 }
             )
         except Exception as e:
@@ -352,6 +404,18 @@ class ExecutionEngine:
                 current = await adapter.get_order(
                     current.exchange_order_id,
                     order.symbol.ccxt_symbol,
+                )
+                # adapter.get_order() liefert raw_response direkt von der
+                # Exchange (die kein "strategy"-Feld kennt) - der Tag aus
+                # execute()/_execute_internal() ginge sonst bei jedem Poll
+                # wieder verloren (siehe dortiger Kommentar).
+                current = current.model_copy(
+                    update={
+                        "raw_response": {
+                            **current.raw_response,
+                            "strategy": order.metadata.get("strategy", "unknown"),
+                        }
+                    }
                 )
             except ExchangeError as e:
                 log.warning(

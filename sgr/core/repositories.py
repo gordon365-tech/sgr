@@ -327,18 +327,26 @@ class PositionRepository:
         Returns: position_id (str)
         """
         async with get_session() as session:
-            stmt = (
-                select(PositionModel)
-                .where(
-                    and_(
-                        PositionModel.symbol == position_data["symbol"],
-                        PositionModel.exchange == position_data["exchange"],
-                        PositionModel.trading_mode == position_data["trading_mode"],
-                        PositionModel.is_open.is_(True),
-                    )
-                )
-                .limit(1)
-            )
+            # user_id MUSS Teil des Lookups sein, sonst findet ein Tenant
+            # die offene Position eines ANDEREN Tenants auf demselben
+            # Symbol/Exchange/Mode und aktualisiert (ueberschreibt) dessen
+            # Zeile statt eine eigene anzulegen (gefunden beim Multi-
+            # Tenant-Isolation-Audit, siehe PortfolioEngine.__init__
+            # Kommentar zu tenant_id) - kann bei zwei Tenants, die
+            # gleichzeitig dasselbe Symbol handeln, sonst Positionen
+            # zwischen Tenants vertauschen/ueberschreiben.
+            conditions = [
+                PositionModel.symbol == position_data["symbol"],
+                PositionModel.exchange == position_data["exchange"],
+                PositionModel.trading_mode == position_data["trading_mode"],
+                PositionModel.is_open.is_(True),
+            ]
+            user_id = position_data.get("user_id")
+            if user_id is not None:
+                conditions.append(PositionModel.user_id == user_id)
+            else:
+                conditions.append(PositionModel.user_id.is_(None))
+            stmt = select(PositionModel).where(and_(*conditions)).limit(1)
             result = await session.execute(stmt)
             existing = result.scalar_one_or_none()
 
@@ -402,17 +410,24 @@ class PositionRepository:
         symbol: str,
         exchange: str,
         trading_mode: TradingMode,
+        user_id: str | None = None,
     ) -> dict[str, Any] | None:
-        """Aktuell offene Position fuer ein Symbol, falls vorhanden."""
+        """Aktuell offene Position fuer ein Symbol, falls vorhanden.
+        user_id: siehe get_open_positions()/upsert_open() - ohne Filter
+        koennte dies bei zwei Tenants auf demselben Symbol die falsche
+        Tenant-Position zurueckgeben. Derzeit kein Produktionsaufrufer
+        (Stand Multi-Tenant-Isolation-Audit), Parameter dennoch ergaenzt,
+        damit ein kuenftiger Aufrufer nicht in dieselbe Falle laeuft."""
         async with get_session() as session:
-            stmt = select(PositionModel).where(
-                and_(
-                    PositionModel.symbol == symbol,
-                    PositionModel.exchange == exchange,
-                    PositionModel.trading_mode == trading_mode.value,
-                    PositionModel.is_open.is_(True),
-                )
-            )
+            conditions = [
+                PositionModel.symbol == symbol,
+                PositionModel.exchange == exchange,
+                PositionModel.trading_mode == trading_mode.value,
+                PositionModel.is_open.is_(True),
+            ]
+            if user_id is not None:
+                conditions.append(PositionModel.user_id == user_id)
+            stmt = select(PositionModel).where(and_(*conditions))
             result = await session.execute(stmt)
             row = result.scalar_one_or_none()
             return self._to_dict(row) if row is not None else None

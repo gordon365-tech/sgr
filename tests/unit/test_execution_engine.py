@@ -55,6 +55,7 @@ def _make_symbol() -> Symbol:
 def _make_order_request(
     order_type: OrderType = OrderType.MARKET,
     trading_mode: TradingMode = TradingMode.PAPER,
+    strategy: str | None = "test_strategy",
 ) -> OrderRequest:
     from uuid import uuid4
 
@@ -65,6 +66,13 @@ def _make_order_request(
         order_type=order_type,
         quantity=Decimal("0.1"),
         trading_mode=trading_mode,
+        # strategy-Attribution (siehe sgr/risk/live_trading_gate.py):
+        # noetig, damit LIVE-Orders in dieser Datei das Gate ueberhaupt
+        # erreichen koennen, das sonst JEDE LIVE-Order ohne
+        # metadata["strategy"] sofort verweigert - siehe live_engine
+        # Fixture, die "test_strategy" als genuin live_approved
+        # registriert. Fuer PAPER-Order folgenlos (Gate ist dort No-op).
+        metadata={"strategy": strategy} if strategy else {},
     )
 
 
@@ -588,13 +596,49 @@ def live_engine(mock_pool: tuple[MagicMock, AsyncMock]) -> ExecutionEngine:
     engine-Fixture). _preflight bleibt hier absichtlich der echte
     PreflightValidator - einzelne Tests ersetzen ihn gezielt per
     Dependency-Injection, wo ein bestimmtes Preflight-Ergebnis
-    erzwungen werden soll."""
+    erzwungen werden soll.
+
+    Registriert "test_strategy" als genuin live_approved in der
+    StrategyRegistry (globaler Singleton, siehe Docstring oben zum
+    Kill-Switch-Singleton - dieselbe Test-Leakage-Gefahr gilt hier,
+    daher clear() vor UND nach jeder Nutzung), damit LIVE-Orders in
+    dieser Datei das sgr/risk/live_trading_gate.py-Gate ueberhaupt
+    erreichen und die eigentlich getestete Logik (Kill Switch,
+    Preflight) exerziert wird, statt bereits am Gate abgewiesen zu
+    werden."""
+    from sgr.strategy.base import ValidationStatus
+    from sgr.strategy.registry import StrategyRegistry
+
+    class _LiveTestStrategy:
+        name = "test_strategy"
+        version = "1.0.0"
+        supported_regimes: list = []
+
+        def generate_signal(self, context):  # pragma: no cover
+            return None
+
+    registry = StrategyRegistry.get()
+    registry.clear()
+    registry.register_instance(_LiveTestStrategy())
+    registry.mark_validated(
+        "test_strategy",
+        ValidationStatus(
+            backtest_passed=True,
+            walk_forward_passed=True,
+            paper_trading_passed=True,
+            live_approved=True,
+            is_operator_override=False,
+        ),
+    )
+    registry._entries["test_strategy"].is_active = True
+
     pool, _adapter = mock_pool
     eng = ExecutionEngine(pool, TradingMode.LIVE)
     fake_kill_switch = MagicMock()
     fake_kill_switch.is_active = False
     eng._kill_switch = fake_kill_switch
-    return eng
+    yield eng
+    registry.clear()
 
 
 class TestPreflightIntegration:

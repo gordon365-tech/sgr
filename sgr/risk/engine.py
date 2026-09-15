@@ -686,4 +686,20 @@ class RiskEngine:
             quantity=assessment.approved_quantity,
             limit_price=limit_price,
             trading_mode=self._trading_mode,
+            # strategy_name muss hier gesetzt werden, nicht erst beim
+            # Persistieren/Portfolio-Update: ExecutionEngine._persist_
+            # order_create() liest order.metadata.get("strategy", "unknown")
+            # fuer die orders.strategy_name-Spalte, und
+            # PortfolioEngine._open_position() liest
+            # result.raw_response.get("strategy", "unknown") fuer
+            # positions.strategy_name - beide waren bisher IMMER "unknown",
+            # weil OrderRequest.metadata nirgends befuellt wurde (gefunden
+            # beim Reparieren von tests/integration/test_orchestrator_
+            # pipeline.py: der Happy-Path-Test erwartete zu Recht
+            # position.strategy_name == "test_strategy", bekam aber
+            # "unknown"). Ohne dies ist bei mehreren gleichzeitig aktiven
+            # Strategien (z.B. trend_following_v1 UND mean_reversion_v1 per
+            # STRATEGY_FORCE_ACTIVATE) in DB/Portfolio nicht mehr
+            # unterscheidbar, welche Strategie welchen Trade verursacht hat.
+            metadata={"strategy": signal.strategy_name},
         )

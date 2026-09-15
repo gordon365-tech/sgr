@@ -165,6 +165,7 @@ async def apply_strategy_force_activate_override(
             walk_forward_passed=True,
             paper_trading_passed=True,
             live_approved=False,
+            is_operator_override=True,
             notes=(
                 "MANUAL OVERRIDE (STRATEGY_FORCE_ACTIVATE env var): echte "
                 f"Validierung bestand NICHT ({real_notes!r}). Forciert aktiv "
@@ -415,7 +416,9 @@ async def lifespan(
         from sgr.portfolio.engine import PortfolioEngine
 
         portfolio_engine = PortfolioEngine(
-            config.trading_mode, position_repository=repos.positions
+            config.trading_mode,
+            position_repository=repos.positions,
+            tenant_id=config.tenant_id,
         )
         app.state.portfolio_engine = portfolio_engine
 
