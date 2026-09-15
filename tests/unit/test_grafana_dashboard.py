@@ -378,6 +378,58 @@ class TestDashboardDynamicAssets:
         exprs = " ".join(t.get("expr", "") for t in panel["targets"])
         assert "$symbol" in exprs
 
+    def test_symbol_variable_is_not_sourced_from_position_metrics(self, dashboard: dict) -> None:
+        """Regressionsschutz fuer den urspruenglichen Audit-Fund: $symbol
+        war leer, weil es aus sgr_position_size gespeist wurde - einer
+        Metrik, die NUR bei offenen Positionen ueberhaupt Zeitreihen hat.
+        $symbol muss stattdessen aus sgr_asset_universe_status kommen,
+        die unabhaengig von offenen Positionen das gesamte entdeckte
+        Marktuniversum abbildet (siehe sgr/market_data/asset_universe.py)."""
+        variables = dashboard["templating"]["list"]
+        symbol_var = next(v for v in variables if v["name"] == "symbol")
+        assert "sgr_asset_universe_status" in symbol_var["definition"]
+        assert "sgr_position_size" not in symbol_var["definition"]
+
+    def test_tenant_variable_offers_gordon_and_sumo_by_name(self, dashboard: dict) -> None:
+        """Task-Vorgabe: der Benutzer muss mit wenigen Klicks zwischen
+        All/Gordon/Sumo wechseln koennen - ein reines label_values()-Query
+        wuerde nur die rohen Tenant-UUIDs als Text zeigen."""
+        variables = dashboard["templating"]["list"]
+        tenant_var = next(v for v in variables if v["name"] == "tenant")
+        option_texts = {o["text"] for o in tenant_var["options"]}
+        assert "Gordon" in option_texts
+        assert "Sumo" in option_texts
+        assert tenant_var["includeAll"] is True
+
+
+class TestPositionBreakdownColumns:
+    """Task-Vorgabe #8: Position Breakdown soll mindestens Tenant,
+    Exchange, Symbol, Position Size, Entry Price, Current Price, Leverage,
+    Unrealized PnL zeigen - nur Spalten mit tatsaechlich vorhandenen
+    Daten, keine Dummy-Werte."""
+
+    REQUIRED_METRICS = (
+        "sgr_position_size",
+        "sgr_position_exposure_usd",
+        "sgr_position_leverage",
+        "sgr_position_unrealized_pnl_usd",
+        "sgr_position_entry_price_usd",
+        "sgr_position_current_price_usd",
+    )
+
+    def test_all_required_position_metrics_are_queried(self, dashboard: dict) -> None:
+        panel = next(p for p in dashboard["panels"] if p["title"] == "Position Breakdown")
+        exprs = " ".join(t.get("expr", "") for t in panel["targets"])
+        for metric in self.REQUIRED_METRICS:
+            assert metric in exprs, f"Position Breakdown does not query {metric}"
+
+    def test_entry_and_current_price_columns_are_labeled(self, dashboard: dict) -> None:
+        panel = next(p for p in dashboard["panels"] if p["title"] == "Position Breakdown")
+        organize = next(t for t in panel["transformations"] if t["id"] == "organize")
+        rename = organize["options"]["renameByName"]
+        assert "Entry Price (USD)" in rename.values()
+        assert "Current Price (USD)" in rename.values()
+
 
 class TestDashboardPanelTypesAreAppropriate:
     def test_kill_switch_is_a_stat_panel(self, dashboard: dict) -> None:

@@ -5,6 +5,8 @@ Config must validate constraints at startup – fail fast, never silently.
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
 from sgr.core.config import (
@@ -58,6 +60,33 @@ class TestSGRConfig:
         c2 = get_config()
         assert c1 is c2  # same object
         get_config.cache_clear()
+
+
+class TestPaperInitialCapital:
+    """
+    Root-Cause-Fund (Asset-Universe/Paper-Capital-Audit): main.py's
+    lifespan() instanziierte PortfolioEngine bisher OHNE initial_cash zu
+    uebergeben - der Klassendefault wurde deshalb immer verwendet, egal
+    was konfiguriert war (es gab bis dahin gar keine env var dafuer).
+    Diese Tests decken die Config-Seite der Behebung ab; die main.py-
+    Verdrahtung selbst siehe test_main_lifespan.py (falls vorhanden)
+    bzw. wurde live am laufenden Stack verifiziert (siehe Abschlussbericht).
+    """
+
+    def test_default_matches_previous_hardcoded_behavior(self) -> None:
+        config = SGRConfig()
+        assert config.paper_initial_capital == Decimal("10000")
+
+    def test_configurable_via_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("PAPER_INITIAL_CAPITAL", "25000")
+        config = SGRConfig()
+        assert config.paper_initial_capital == Decimal("25000")
+
+    def test_zero_or_negative_capital_rejected(self) -> None:
+        with pytest.raises(Exception):
+            SGRConfig(paper_initial_capital=Decimal("0"))
+        with pytest.raises(Exception):
+            SGRConfig(paper_initial_capital=Decimal("-100"))
 
 
 class TestSGRConfigTenantId:

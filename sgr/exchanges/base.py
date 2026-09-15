@@ -231,6 +231,84 @@ class ExchangeInfo:
         self.symbol_limits = symbol_limits if symbol_limits is not None else {}
 
 
+class MarketInfo:
+    """
+    Rich per-market metadata for asset discovery (siehe sgr/market_data/
+    asset_universe.py) - bewusst ein eigener, ausfuehrlicherer Domain-Type
+    statt ExchangeInfo.symbols (nur eine flache Liste von Symbol-Strings)
+    zu erweitern: get_exchange_info()/ExchangeInfo wird an vielen
+    bestehenden Stellen (Preflight, Risk) mit der aktuellen, schlanken
+    Form konsumiert - eine Erweiterung dort haette Risiko fuer
+    bestehende Call-Sites bedeutet, ohne dass diese den zusaetzlichen
+    Payload brauchen.
+
+    Felder wie active/market_type/contract/linear stammen direkt aus dem
+    von ccxt bereits geladenen markets-Dict (kein Zusatz-Request) bzw.
+    (fuer Pionex, siehe Modul-Docstring in pionex_client.py) aus der
+    dortigen /api/v1/common/symbols-Antwort. listed_at wird NUR gesetzt,
+    wenn die Exchange selbst einen Zeitstempel liefert (ccxt "created"-
+    Feld bei Binance) - sonst None, niemals erfunden.
+    """
+
+    __slots__ = (
+        "exchange_id",
+        "symbol",
+        "base_asset",
+        "quote_asset",
+        "market_type",
+        "active",
+        "contract",
+        "linear",
+        "settle",
+        "amount_precision",
+        "price_precision",
+        "min_amount",
+        "min_notional",
+        "listed_at",
+        "discovered_at",
+    )
+
+    def __init__(
+        self,
+        exchange_id: ExchangeID,
+        symbol: str,
+        base_asset: str,
+        quote_asset: str,
+        market_type: str,
+        active: bool,
+        discovered_at: datetime,
+        contract: bool = False,
+        linear: bool | None = None,
+        settle: str | None = None,
+        amount_precision: int | None = None,
+        price_precision: int | None = None,
+        min_amount: Decimal | None = None,
+        min_notional: Decimal | None = None,
+        listed_at: datetime | None = None,
+    ) -> None:
+        self.exchange_id = exchange_id
+        self.symbol = symbol
+        self.base_asset = base_asset
+        self.quote_asset = quote_asset
+        self.market_type = market_type
+        self.active = active
+        self.contract = contract
+        self.linear = linear
+        self.settle = settle
+        self.amount_precision = amount_precision
+        self.price_precision = price_precision
+        self.min_amount = min_amount
+        self.min_notional = min_notional
+        self.listed_at = listed_at
+        self.discovered_at = discovered_at
+
+    def __repr__(self) -> str:
+        return (
+            f"MarketInfo({self.exchange_id.value}, {self.symbol}, "
+            f"type={self.market_type}, active={self.active})"
+        )
+
+
 class OpenInterest:
     """Futures open interest for a symbol."""
 

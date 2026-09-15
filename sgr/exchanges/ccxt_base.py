@@ -65,6 +65,7 @@ from sgr.exchanges.base import (
     ExchangeInfo,
     ExchangeMaintenanceError,
     InsufficientFundsError,
+    MarketInfo,
     MarketStatus,
     NotSupportedFeatureError,
     OpenInterest,
@@ -250,6 +251,79 @@ class CCXTBaseAdapter:
             )
 
         return self._exchange_info
+
+    async def discover_markets(self, force_refresh: bool = False) -> list[MarketInfo]:
+        """
+        Vollstaendige Markt-Discovery fuer das Asset Universe (siehe
+        sgr/market_data/asset_universe.py) - im Unterschied zu
+        get_exchange_info() (schlanke, dauerhaft gecachte Symbolliste
+        fuer Preflight-Zwecke) liefert diese Methode EIN MarketInfo pro
+        Markt inkl. active/type/contract/linear/precision/limits/
+        listed_at, direkt aus ccxt's bereits im Speicher gehaltenem
+        markets-Dict extrahiert.
+
+        force_refresh=True ruft load_markets(reload=True) auf (ein
+        einzelner, bereits von ccxt intern gebatchter REST-Call fuer die
+        gesamte Marktliste - NICHT zu verwechseln mit fetch_tickers(),
+        das bei einer frueheren Discovery-Verifikation einen kurzzeitigen
+        Binance-IP-Ban ausloeste, siehe sgr/api/main.py
+        LIVE_MARKET_DATA_SYMBOLS-Kommentar). Ohne force_refresh wird das
+        bei connect() bereits geladene markets-Dict wiederverwendet -
+        kein zusaetzlicher Netzwerk-Call.
+        """
+        self._require_connected()
+
+        if force_refresh:
+            try:
+                await self._ccxt.load_markets(reload=True)
+            except Exception as e:
+                raise self._map_error(e) from e
+
+        markets = self._ccxt.markets or {}
+        now = datetime.now(tz=UTC)
+        result: list[MarketInfo] = []
+
+        for symbol, market in markets.items():
+            if "/" not in symbol:
+                continue
+            base = market.get("base")
+            quote = market.get("quote")
+            if not base or not quote:
+                continue
+
+            precision = market.get("precision") or {}
+            limits = market.get("limits") or {}
+            amount_limits = limits.get("amount") or {}
+            cost_limits = limits.get("cost") or {}
+
+            created_raw = market.get("created")
+            listed_at = (
+                datetime.fromtimestamp(created_raw / 1000, tz=UTC)
+                if isinstance(created_raw, (int, float))
+                else None
+            )
+
+            result.append(
+                MarketInfo(
+                    exchange_id=self.exchange_id,
+                    symbol=f"{base}/{quote}",
+                    base_asset=base,
+                    quote_asset=quote,
+                    market_type=str(market.get("type") or "unknown"),
+                    active=bool(market.get("active")),
+                    discovered_at=now,
+                    contract=bool(market.get("contract")),
+                    linear=market.get("linear"),
+                    settle=market.get("settle"),
+                    amount_precision=self._safe_int(precision.get("amount")),
+                    price_precision=self._safe_int(precision.get("price")),
+                    min_amount=self._safe_decimal(amount_limits.get("min")),
+                    min_notional=self._safe_decimal(cost_limits.get("min")),
+                    listed_at=listed_at,
+                )
+            )
+
+        return result
 
     def _extract_symbol_limits(self, markets: dict[str, Any]) -> dict[str, SymbolLimits]:
         """
@@ -597,9 +671,7 @@ class CCXTBaseAdapter:
             if order.reduce_only:
                 params["reduceOnly"] = True
 
-            existing = await self._find_existing_order_by_client_id(
-                client_order_id, symbol
-            )
+            existing = await self._find_existing_order_by_client_id(client_order_id, symbol)
             if existing is not None:
                 log.info(
                     "exchange.duplicate_order_detected_via_client_id",

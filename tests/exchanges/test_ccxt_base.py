@@ -648,9 +648,7 @@ class TestAccount:
         assert status.is_online is True
         assert status.raw_status == "ok"
 
-    async def test_get_market_status_returns_offline_on_maintenance(
-        self, adapter, monkeypatch
-    ):
+    async def test_get_market_status_returns_offline_on_maintenance(self, adapter, monkeypatch):
         fake = FakeCCXTExchange()
         fake.has = {"fetchStatus": True}
         fake.fetch_status = AsyncMock(return_value={"status": "maintenance"})
@@ -791,9 +789,7 @@ class TestOrderManagement:
         fake.fetch_order.assert_not_awaited()
         fake.create_order.assert_awaited_once()
 
-    async def test_place_order_dedup_returns_existing_order_when_found(
-        self, adapter, monkeypatch
-    ):
+    async def test_place_order_dedup_returns_existing_order_when_found(self, adapter, monkeypatch):
         """Wenn fetchOrder eine bereits existierende Order unter der
         clientOrderId findet (z.B. nach einem Retry-Szenario), wird KEINE
         neue Order erstellt - verhindert echte Doppel-Orders."""
@@ -1296,3 +1292,93 @@ class TestRetryBehavior:
         with pytest.raises(ExchangeConnectionError):
             await adapter.get_ticker("BTC/USDT")
         assert fake.fetch_ticker.call_count == 3  # max_attempts=3 for get_ticker
+
+
+class TestDiscoverMarkets:
+    """sgr.market_data.asset_universe baut auf discover_markets() auf -
+    siehe dortiges Modul fuer die Klassifikations-Kaskade."""
+
+    async def test_extracts_rich_market_info(self, adapter, monkeypatch):
+        fake = FakeCCXTExchange()
+        fake.markets = {
+            "BTC/USDT:USDT": {
+                "base": "BTC",
+                "quote": "USDT",
+                "type": "swap",
+                "active": True,
+                "contract": True,
+                "linear": True,
+                "settle": "USDT",
+                "created": 1_569_398_400_000,
+                "precision": {"amount": 3, "price": 1},
+                "limits": {
+                    "amount": {"min": "0.001"},
+                    "cost": {"min": "5"},
+                },
+            }
+        }
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+
+        markets = await adapter.discover_markets()
+
+        assert len(markets) == 1
+        m = markets[0]
+        assert m.symbol == "BTC/USDT"  # kanonisch, settle-Suffix entfernt
+        assert m.base_asset == "BTC"
+        assert m.quote_asset == "USDT"
+        assert m.market_type == "swap"
+        assert m.active is True
+        assert m.contract is True
+        assert m.linear is True
+        assert m.settle == "USDT"
+        assert m.amount_precision == 3
+        assert m.price_precision == 1
+        assert m.min_amount == Decimal("0.001")
+        assert m.min_notional == Decimal("5")
+        assert m.listed_at is not None
+        assert m.listed_at.year == 2019  # 1569398400000ms -> 2019-09-25
+
+    async def test_missing_optional_fields_defaults_defensively(self, adapter, monkeypatch):
+        fake = FakeCCXTExchange()
+        fake.markets = {"BTC/USDT": {"base": "BTC", "quote": "USDT"}}
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+
+        markets = await adapter.discover_markets()
+
+        assert len(markets) == 1
+        m = markets[0]
+        assert m.active is False  # kein "active"-Feld -> fail-closed
+        assert m.market_type == "unknown"
+        assert m.amount_precision is None
+        assert m.min_amount is None
+        assert m.listed_at is None
+
+    async def test_market_without_base_or_quote_is_skipped(self, adapter, monkeypatch):
+        fake = FakeCCXTExchange()
+        fake.markets = {
+            "BTC/USDT": {"base": "BTC", "quote": "USDT", "active": True},
+            "BROKEN": {},
+        }
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+
+        markets = await adapter.discover_markets()
+
+        assert len(markets) == 1
+        assert markets[0].symbol == "BTC/USDT"
+
+    async def test_force_refresh_reloads_markets(self, adapter, monkeypatch):
+        fake = FakeCCXTExchange()
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+        fake.load_markets.reset_mock()
+
+        await adapter.discover_markets(force_refresh=True)
+
+        fake.load_markets.assert_awaited_once_with(reload=True)
+
+    async def test_requires_connection(self, adapter):
+        with pytest.raises(ExchangeConnectionError):
+            await adapter.discover_markets()

@@ -124,6 +124,28 @@ class SGRMetrics:
         self.position_unrealized_pnl = gauge(
             "sgr.position.unrealized_pnl_usd", "Position unrealized profit/loss"
         )
+        self.position_entry_price = gauge(
+            "sgr.position.entry_price_usd", "Position average entry price"
+        )
+        self.position_current_price = gauge(
+            "sgr.position.current_price_usd", "Position current mark price"
+        )
+
+        # Asset Universe (Market Discovery, siehe sgr/market_data/
+        # asset_universe.py): eine Zeitreihe pro entdecktem Markt ueber
+        # alle unterstuetzten Exchanges hinweg, unabhaengig davon, ob
+        # SGR gerade eine Position darin haelt. Wert = Rang der
+        # DISCOVERED/SUPPORTED/TRADABLE/SUBSCRIBED/ACTIVE-Kaskade
+        # (siehe asset_universe.RANK) - status zusaetzlich als Label
+        # fuer direktes Filtern/Anzeigen in Grafana. Das ist bewusst die
+        # Datenquelle fuer Grafanas $symbol-Variable (label_values(...)) -
+        # sgr.position.size traegt NUR aktuell offene Positionen und war
+        # deshalb leer, solange keine Position offen ist (siehe Audit-
+        # Fund: $symbol war in Grafana leer).
+        self.asset_universe_status = gauge(
+            "sgr.asset.universe_status",
+            "Asset universe classification rank (0=discovered .. 4=active)",
+        )
 
         # Trading Metrics
         #
@@ -276,6 +298,8 @@ def record_position_snapshot(
     exposure_usd: float,
     leverage: float,
     unrealized_pnl_usd: float,
+    entry_price_usd: float = 0.0,
+    current_price_usd: float = 0.0,
 ) -> None:
     """Records the current state of a single open position.
 
@@ -283,6 +307,12 @@ def record_position_snapshot(
     und Sammel-Intervall. Fuettert das Asset/Position-Breakdown-Panel im
     Grafana-Dashboard (symbol/side/trading_mode/exchange als Labels,
     tenant automatisch via _TenantScopedInstrument).
+
+    entry_price_usd/current_price_usd sind optional (Default 0.0) statt
+    Pflichtfelder, damit der bestehende Aufruf-/Zero-Reset-Pfad (siehe
+    MonitoringEngine._collect_position_metrics - eine geschlossene
+    Position wird explizit auf 0 gesetzt) unveraendert funktioniert, ohne
+    an jeder Stelle beide neuen Werte mitschleppen zu muessen.
     """
     m = get_metrics()
     labels = {
@@ -295,3 +325,31 @@ def record_position_snapshot(
     m.position_exposure.set(exposure_usd, labels)
     m.position_leverage.set(leverage, labels)
     m.position_unrealized_pnl.set(unrealized_pnl_usd, labels)
+    m.position_entry_price.set(entry_price_usd, labels)
+    m.position_current_price.set(current_price_usd, labels)
+
+
+def record_asset_universe_snapshot(entries: list[Any]) -> None:
+    """Records one gauge row per discovered market (siehe
+    sgr/market_data/asset_universe.py AssetUniverseEntry/RANK).
+
+    entries: list[AssetUniverseEntry] - als `list[Any]` typisiert, um
+    einen Importzyklus zu vermeiden (asset_universe.py importiert
+    bereits aus sgr.exchanges.base; ein Rueckimport von
+    sgr.monitoring.metrics dorthin ist nicht noetig, hier reicht
+    strukturelle Nutzung der bekannten Attribute).
+    """
+    from sgr.market_data.asset_universe import RANK
+
+    m = get_metrics()
+    for entry in entries:
+        market = entry.market
+        labels = {
+            "exchange": market.exchange_id.value,
+            "symbol": market.symbol,
+            "base_asset": market.base_asset,
+            "quote_asset": market.quote_asset,
+            "market_type": market.market_type,
+            "status": entry.status,
+        }
+        m.asset_universe_status.set(float(RANK.get(entry.status, 0)), labels)

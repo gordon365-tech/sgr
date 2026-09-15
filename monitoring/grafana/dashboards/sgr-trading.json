@@ -861,6 +861,30 @@
                 "value": 2
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Entry Price (USD)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Current Price (USD)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
           }
         ]
       },
@@ -916,6 +940,22 @@
           "refId": "D",
           "instant": true,
           "format": "table"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_position_entry_price_usd{symbol=~\"$symbol\", tenant=~\"$tenant\"}",
+          "legendFormat": "",
+          "refId": "E",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_position_current_price_usd{symbol=~\"$symbol\", tenant=~\"$tenant\"}",
+          "legendFormat": "",
+          "refId": "F",
+          "instant": true,
+          "format": "table"
         }
       ],
       "title": "Position Breakdown",
@@ -937,7 +977,9 @@
               "Value #A": true,
               "Value #B": true,
               "Value #C": true,
-              "Value #D": true
+              "Value #D": true,
+              "Value #E": true,
+              "Value #F": true
             },
             "indexByName": {
               "symbol": 0,
@@ -946,9 +988,11 @@
               "trading_mode": 3,
               "tenant": 4,
               "Size": 5,
-              "Exposure (USD)": 6,
-              "Leverage": 7,
-              "Unrealized PnL (USD)": 8
+              "Entry Price (USD)": 6,
+              "Current Price (USD)": 7,
+              "Exposure (USD)": 8,
+              "Leverage": 9,
+              "Unrealized PnL (USD)": 10
             },
             "renameByName": {
               "symbol": "Symbol",
@@ -959,7 +1003,9 @@
               "Value #A": "Size",
               "Value #B": "Exposure (USD)",
               "Value #C": "Leverage",
-              "Value #D": "Unrealized PnL (USD)"
+              "Value #D": "Unrealized PnL (USD)",
+              "Value #E": "Entry Price (USD)",
+              "Value #F": "Current Price (USD)"
             }
           }
         }
@@ -1182,7 +1228,7 @@
           "value": "$__all"
         },
         "datasource": "Prometheus",
-        "definition": "label_values(sgr_position_size, symbol)",
+        "definition": "label_values(sgr_asset_universe_status, symbol)",
         "hide": 0,
         "includeAll": true,
         "label": "Symbol",
@@ -1190,7 +1236,7 @@
         "name": "symbol",
         "options": [],
         "query": {
-          "query": "label_values(sgr_position_size, symbol)",
+          "query": "label_values(sgr_asset_universe_status, symbol)",
           "refId": "symbol-variable"
         },
         "refresh": 2,
@@ -1200,29 +1246,31 @@
         "type": "query"
       },
       {
-        "allValue": ".*",
         "current": {
           "selected": true,
           "text": "All",
           "value": "$__all"
         },
-        "datasource": "Prometheus",
-        "definition": "label_values(sgr_position_size, tenant)",
         "hide": 0,
         "includeAll": true,
         "label": "Tenant",
         "multi": true,
         "name": "tenant",
-        "options": [],
-        "query": {
-          "query": "label_values(sgr_position_size, tenant)",
-          "refId": "tenant-variable"
-        },
-        "refresh": 2,
-        "regex": "",
+        "options": [
+          {
+            "selected": false,
+            "text": "Gordon",
+            "value": "a47d994d-35cc-4619-83bb-86fd0cb48447"
+          },
+          {
+            "selected": false,
+            "text": "Sumo",
+            "value": "144f7bb0-113d-4c66-b5d3-7a34ab1d551a"
+          }
+        ],
+        "query": "Gordon : a47d994d-35cc-4619-83bb-86fd0cb48447, Sumo : 144f7bb0-113d-4c66-b5d3-7a34ab1d551a",
         "skipUrlSync": false,
-        "sort": 1,
-        "type": "query"
+        "type": "custom"
       }
     ]
   },

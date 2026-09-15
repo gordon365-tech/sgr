@@ -29,6 +29,7 @@ Teststrategie (zwei Teile, analog zur Modul-Struktur):
 
 from __future__ import annotations
 
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -143,6 +144,10 @@ def _patch_lifespan_dependencies(
     config.api.host = "127.0.0.1"
     config.api.port = 8000
     config.primary_exchange = primary_exchange
+    # Distinkter Wert (nicht der PortfolioEngine-Klassendefault 10000) -
+    # macht den Regressionstest fuer die initial_cash-Verdrahtung
+    # eindeutig (siehe test_portfolio_engine_receives_configured_initial_cash).
+    config.paper_initial_capital = Decimal("12345")
     # MagicMock()-Attribute sind standardmaessig truthy/nicht-None - ohne
     # diese explizite Zeile wuerde config.tenant_id ein MagicMock-Objekt
     # sein und den "if config.tenant_id is not None:"-Zweig in lifespan()
@@ -179,6 +184,11 @@ def _patch_lifespan_dependencies(
     risk_engine.initialize = AsyncMock()
 
     portfolio_engine = MagicMock()
+    # MagicMock(return_value=...) statt patch(..., return_value=...), damit
+    # der Test den Klassen-Mock selbst (Aufruf-Argumente, siehe
+    # test_portfolio_engine_receives_configured_initial_cash) inspizieren
+    # kann, nicht nur die von ihm gelieferte Instanz.
+    portfolio_engine_class = MagicMock(return_value=portfolio_engine)
 
     registry = MagicMock()
     registry.inject_repository = MagicMock()
@@ -204,6 +214,10 @@ def _patch_lifespan_dependencies(
     md_engine.stop = AsyncMock()
     md_engine.is_running = True
 
+    asset_universe_engine = MagicMock()
+    asset_universe_engine.start = AsyncMock()
+    asset_universe_engine.stop = AsyncMock()
+
     mocks = {
         "config": config,
         "repos": repos,
@@ -219,6 +233,8 @@ def _patch_lifespan_dependencies(
         "reconciliation_engine": reconciliation_engine,
         "recovery_manager": recovery_manager,
         "md_engine": md_engine,
+        "asset_universe_engine": asset_universe_engine,
+        "PortfolioEngine": portfolio_engine_class,
     }
 
     patchers = [
@@ -232,7 +248,7 @@ def _patch_lifespan_dependencies(
         patch("sgr.market_data.feature_store.FeatureStore", return_value=feature_store),
         patch("sgr.exchanges.factory.ExchangePool", return_value=pool),
         patch("sgr.risk.engine.RiskEngine", return_value=risk_engine),
-        patch("sgr.portfolio.engine.PortfolioEngine", return_value=portfolio_engine),
+        patch("sgr.portfolio.engine.PortfolioEngine", new=portfolio_engine_class),
         patch("sgr.strategy.registry.StrategyRegistry.get", return_value=registry),
         patch("sgr.strategy.engine.StrategyEngine", return_value=strategy_engine),
         patch("sgr.execution.engine.ExecutionEngine", return_value=execution_engine),
@@ -243,6 +259,10 @@ def _patch_lifespan_dependencies(
         ),
         patch("sgr.core.resilience.RecoveryManager", return_value=recovery_manager),
         patch("sgr.market_data.engine.MarketDataEngine", return_value=md_engine),
+        patch(
+            "sgr.market_data.asset_universe.AssetUniverseEngine",
+            return_value=asset_universe_engine,
+        ),
         # StartupSafetyChecker erwartet ein echtes SGRConfig-Objekt (reale
         # Decimal/float-Vergleiche), nicht den hier verwendeten MagicMock.
         # Diese Tests decken die Lifespan-Infrastruktur-Verdrahtung ab, nicht
@@ -279,6 +299,7 @@ class TestLifespanStartupShutdownPaperMode:
                 mocks["recovery_manager"].recover_after_crash.assert_awaited_once()
                 mocks["md_engine"].subscribe.assert_called()
                 mocks["md_engine"].start.assert_awaited_once()
+                mocks["asset_universe_engine"].start.assert_awaited_once()
 
                 assert app.state.exchange_pool is mocks["pool"]
                 assert app.state.risk_engine is mocks["risk_engine"]
@@ -290,16 +311,46 @@ class TestLifespanStartupShutdownPaperMode:
                 assert app.state.feature_store is mocks["feature_store"]
                 assert app.state.market_data_engine is mocks["md_engine"]
                 assert app.state.repositories is mocks["repos"]
+                assert app.state.asset_universe_engine is mocks["asset_universe_engine"]
 
             # --------- Shutdown-Assertions ---------
             mocks["strategy_engine"].stop.assert_awaited_once()
             mocks["md_engine"].stop.assert_awaited_once()
+            mocks["asset_universe_engine"].stop.assert_awaited_once()
             mocks["pool"].close_all.assert_awaited_once()
             mocks["feature_store"].close.assert_awaited_once()
             mocks["bus"].close.assert_awaited_once()
         finally:
             for p in patchers:
                 p.stop()
+
+    async def test_portfolio_engine_receives_configured_initial_cash(self) -> None:
+        """Root-Cause-Fund (Paper-Capital-Audit): lifespan() instanziierte
+        PortfolioEngine bisher OHNE initial_cash - der Klassendefault
+        (10000) wurde immer verwendet, unabhaengig von jeder Konfiguration.
+        Regressionsschutz: config.paper_initial_capital muss tatsaechlich
+        bei PortfolioEngine ankommen."""
+        patchers, mocks = _patch_lifespan_dependencies(paper_mode=True, has_adapters=True)
+
+        app = FastAPI()
+        app.state = AppState()  # type: ignore[assignment]
+
+        for p in patchers:
+            p.start()
+        try:
+            async with lifespan(app):
+                pass
+        finally:
+            for p in patchers:
+                p.stop()
+
+        mocks["PortfolioEngine"].assert_called_once_with(
+            mocks["config"].trading_mode,
+            initial_cash=mocks["config"].paper_initial_capital,
+            position_repository=mocks["repos"].positions,
+            tenant_id=mocks["config"].tenant_id,
+        )
+        assert mocks["PortfolioEngine"].call_args.kwargs["initial_cash"] == Decimal("12345")
 
     async def test_lifecycle_without_adapters_skips_market_data_start(self) -> None:
         patchers, mocks = _patch_lifespan_dependencies(paper_mode=True, has_adapters=False)
@@ -752,9 +803,7 @@ class TestLifespanTenantId:
                     from sgr.core.types import CandleEvent
 
                     candle_calls = [
-                        c
-                        for c in mocks["bus"].subscribe.call_args_list
-                        if c.args[0] is CandleEvent
+                        c for c in mocks["bus"].subscribe.call_args_list if c.args[0] is CandleEvent
                     ]
                     assert len(candle_calls) == 1
                     call = candle_calls[0]

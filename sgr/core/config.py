@@ -234,6 +234,19 @@ class SGRConfig(BaseSettings):
     app_name: str = "SGR"
     version: str = "0.1.0"
 
+    # Paper-Trading-Startkapital pro Tenant-Worker (siehe
+    # sgr.portfolio.engine.PortfolioEngine.__init__ initial_cash).
+    # Root-Cause-Fund (Asset-Universe/Paper-Capital-Audit): main.py's
+    # lifespan() instanziierte PortfolioEngine bisher OHNE initial_cash
+    # zu uebergeben - der Klassendefault (Decimal("10000")) wurde
+    # deshalb IMMER verwendet, unabhaengig von jeder Konfiguration. Es
+    # gab bis hierher ueberhaupt keine env var, die das Testkapital
+    # haette veraendern koennen. Default bleibt 10000 (identisch zum
+    # bisherigen, faktischen Verhalten - kein stiller Kapitalwechsel fuer
+    # bestehende Deployments), aber ab jetzt tatsaechlich per
+    # PAPER_INITIAL_CAPITAL env var konfigurierbar.
+    paper_initial_capital: Decimal = Field(default=Decimal("10000"), gt=0)
+
     # Welche Exchange der Lifecycle standardmaessig verwendet (Market Data
     # Subscriptions + Exchange Pool). Default bleibt PIONEX fuer
     # Abwaertskompatibilitaet; per PRIMARY_EXCHANGE=binance env var

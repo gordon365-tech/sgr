@@ -253,6 +253,8 @@ class MonitoringEngine:
                 exposure_usd=float(position.notional_value),
                 leverage=float(position.leverage),
                 unrealized_pnl_usd=float(position.unrealized_pnl),
+                entry_price_usd=float(position.entry_price),
+                current_price_usd=float(position.current_price),
             )
 
         closed_keys = self._last_position_keys - current_keys

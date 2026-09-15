@@ -174,9 +174,7 @@ async def apply_strategy_force_activate_override(
                 "Go-Live-Signal, kein Live-Trading-Freigabe."
             ),
         )
-        registry.mark_validated(
-            name, override_status, backtest_result=entry.last_validation_result
-        )
+        registry.mark_validated(name, override_status, backtest_result=entry.last_validation_result)
         await strategy_repo.set_validated(name, True)
         log.warning(
             "sgr.api.strategy_force_activate_override",
@@ -230,9 +228,7 @@ class AppState:
 
 
 @asynccontextmanager
-async def lifespan(
-    app: FastAPI, role: LifespanRole = "worker"
-) -> AsyncIterator[None]:
+async def lifespan(app: FastAPI, role: LifespanRole = "worker") -> AsyncIterator[None]:
     """
     Startup + Shutdown aller Systemkomponenten.
     Fehler beim Startup → Server startet nicht (fail fast).
@@ -378,8 +374,7 @@ async def lifespan(
                 # Pionex hat kein Testnet: Paper Mode braucht keine echten Keys
                 # (PionexAdapter.connect() simuliert lokal, siehe pionex.py)
                 if config.trading_mode == TradingMode.PAPER or (
-                    config.credentials.pionex_live_api_key
-                    and config.credentials.pionex_live_secret
+                    config.credentials.pionex_live_api_key and config.credentials.pionex_live_secret
                 ):
                     await pool.initialize([primary_exchange], config.trading_mode)
             else:
@@ -388,9 +383,7 @@ async def lifespan(
                 # Live-Keys im LIVE-Modus. get_credentials() wirft ValueError,
                 # wenn die entsprechenden Env-Vars nicht gesetzt sind.
                 try:
-                    config.credentials.get_credentials(
-                        primary_exchange.value, config.trading_mode
-                    )
+                    config.credentials.get_credentials(primary_exchange.value, config.trading_mode)
                     await pool.initialize([primary_exchange], config.trading_mode)
                 except ValueError:
                     log.warning(
@@ -417,6 +410,7 @@ async def lifespan(
 
         portfolio_engine = PortfolioEngine(
             config.trading_mode,
+            initial_cash=config.paper_initial_capital,
             position_repository=repos.positions,
             tenant_id=config.tenant_id,
         )
@@ -493,9 +487,7 @@ async def lifespan(
         from sgr.execution.engine import ExecutionEngine
         from sgr.orchestrator.engine import TradingOrchestrator
 
-        execution_engine = ExecutionEngine(
-            pool, config.trading_mode, order_repository=repos.orders
-        )
+        execution_engine = ExecutionEngine(pool, config.trading_mode, order_repository=repos.orders)
         app.state.execution_engine = execution_engine
 
         orchestrator = TradingOrchestrator(
@@ -647,6 +639,41 @@ async def lifespan(
         await worker_metrics_publisher.start()
         app.state.worker_metrics_publisher = worker_metrics_publisher
 
+        # 12. Asset Universe Engine (Market Discovery, siehe
+        # sgr/market_data/asset_universe.py Modul-Docstring): periodisch
+        # (Default alle 6h, sofortiger erster Lauf) welche Maerkte auf
+        # Binance/Pionex tatsaechlich existieren, getrennt von der Frage,
+        # was SGR gerade tatsaechlich handelt (LIVE_MARKET_DATA_SYMBOLS
+        # bleibt die alleinige Quelle fuer "was bekommt Candle-Feeds" -
+        # Discovery darf das NIEMALS automatisch erweitern, siehe
+        # Modul-Docstring "Discovery darf Paper Trading nicht
+        # gefaehrden"). Fuettert Grafanas $symbol-Variable, die vorher
+        # leer war, solange keine Position offen war (label_values() auf
+        # sgr_position_size statt auf dieser neuen, positions-
+        # unabhaengigen Metrik).
+        from sgr.market_data.asset_universe import AssetUniverseEngine
+
+        binance_adapter = None
+        try:
+            binance_adapter = pool.get(ExchangeID.BINANCE, config.trading_mode)
+        except KeyError:
+            log.info("asset_universe.binance_adapter_unavailable")
+
+        asset_universe_engine = AssetUniverseEngine(
+            binance_adapter=binance_adapter,
+            strategy_registry=registry,
+            subscribed_symbols={
+                # LIVE_MARKET_DATA_SYMBOLS nutzt ccxt's Futures-Symbolform
+                # ("BTC/USDT:USDT") - MarketInfo.symbol ist die
+                # settle-freie kanonische Form ("BTC/USDT", siehe
+                # Symbol.ccxt_symbol) - hier normalisiert, damit der
+                # SUBSCRIBED-Abgleich tatsaechlich greift.
+                ExchangeID.BINANCE: {s.split(":")[0] for s in LIVE_MARKET_DATA_SYMBOLS},
+            },
+        )
+        await asset_universe_engine.start()
+        app.state.asset_universe_engine = asset_universe_engine
+
     log.info(
         "sgr.api.ready",
         role=role,
@@ -661,6 +688,7 @@ async def lifespan(
     log.info("sgr.api.shutting_down", role=role)
 
     if role == "worker":
+        await asset_universe_engine.stop()
         await worker_metrics_publisher.stop()
         await monitoring_engine.stop()
         await strategy_engine.stop()
