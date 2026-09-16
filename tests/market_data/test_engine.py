@@ -16,8 +16,17 @@ from decimal import Decimal
 from unittest.mock import AsyncMock
 
 from sgr.core.types import Candle, ExchangeID, Symbol, TradingMode
-from sgr.exchanges.base import ExchangeConnectionError, InsufficientFundsError
-from sgr.market_data.engine import _POLL_INTERVALS, MarketDataEngine, SymbolFeed
+from sgr.exchanges.base import (
+    ExchangeBannedError,
+    ExchangeConnectionError,
+    InsufficientFundsError,
+)
+from sgr.market_data.engine import (
+    _POLL_INTERVALS,
+    _REDIS_KEY_EXCHANGE_BAN,
+    MarketDataEngine,
+    SymbolFeed,
+)
 from sgr.market_data.types import FeatureSet
 
 SYMBOL_STR = "BTC/USDT"
@@ -236,6 +245,44 @@ class TestSymbolFeedInitialize:
         await feed.initialize(pool)
         assert len(feed._candle_buffer) == 250
         assert feed._candle_buffer[-1] == candles[-1]
+
+
+class TestSymbolFeedInitializeExchangeBan:
+    """
+    Startup (initialize() pro Symbol = voller History-Fetch, ueber
+    hunderte Symbole x zwei Tenant-Worker-Prozesse gleichzeitig) ist der
+    Burst-Fall mit dem hoechsten Ban-Risiko - siehe
+    TestSymbolFeedExchangeBanCoordination fuer den analogen, bereits
+    vorhandenen Schutz im steady-state update()-Polling-Pfad.
+    """
+
+    async def test_initialize_skips_when_redis_reports_active_ban(self):
+        candles = make_candles(5)
+        redis_client = AsyncMock()
+        future_epoch = (datetime.now(tz=UTC) + timedelta(minutes=5)).timestamp()
+        redis_client.get.return_value = str(future_epoch)
+        feed, pool = make_feed(adapter_responses=[candles], redis_client=redis_client)
+
+        await feed.initialize(pool)
+
+        assert feed._initialized is False
+        assert pool._adapter.calls == []  # kein Fetch-Versuch
+
+    async def test_initialize_records_ban_to_redis_on_exchange_banned_error(self):
+        redis_client = AsyncMock()
+        redis_client.get.return_value = None
+        feed, pool = make_feed(redis_client=redis_client)
+        banned_until = datetime.now(tz=UTC) + timedelta(minutes=20)
+        pool._adapter._raises = ExchangeBannedError("binance", banned_until, "418 teapot")
+
+        await feed.initialize(pool)
+
+        assert feed._initialized is False
+        redis_client.set.assert_awaited_once()
+        args, kwargs = redis_client.set.call_args
+        assert args[0] == f"{_REDIS_KEY_EXCHANGE_BAN}:binance"
+        assert float(args[1]) == banned_until.timestamp()
+        assert kwargs["ex"] >= 1
 
 
 # ---------------------------------------------------------------------
@@ -519,6 +566,96 @@ class TestSymbolFeedUpdate:
         result = await feed.update(pool)
         # Gap-fill error is swallowed inside _handle_gaps; update still
         # proceeds and computes features from the buffer it already has.
+        assert result is True
+
+
+# ---------------------------------------------------------------------
+# SymbolFeed cross-process exchange-ban coordination (shared Redis key)
+# ---------------------------------------------------------------------
+
+
+class TestSymbolFeedExchangeBanCoordination:
+    async def test_update_skips_fetch_when_redis_reports_active_ban(self):
+        """Ein anderer Worker-Prozess (gleiche Host-IP) hat den Ban bereits
+        in Redis eingetragen - dieser Feed darf gar nicht erst fetchen.
+        Ban erst NACH initialize() gesetzt (initialize() hat seinen
+        eigenen, separat getesteten Ban-Check - siehe
+        TestSymbolFeedInitializeExchangeBan)."""
+        initial = make_candles(3)
+        redis_client = AsyncMock()
+        redis_client.get.return_value = None
+        feed, pool = make_feed(adapter_responses=[initial], redis_client=redis_client)
+        await feed.initialize(pool)
+        calls_before = len(pool._adapter.calls)
+
+        future_epoch = (datetime.now(tz=UTC) + timedelta(minutes=5)).timestamp()
+        redis_client.get.return_value = str(future_epoch)
+
+        result = await feed.update(pool)
+
+        assert result is False
+        assert len(pool._adapter.calls) == calls_before  # kein Fetch-Versuch
+        redis_client.get.assert_awaited_with(f"{_REDIS_KEY_EXCHANGE_BAN}:binance")
+
+    async def test_update_proceeds_when_redis_ban_expired(self):
+        initial = make_candles(3)
+        new = make_candles(2, start=initial[-1].timestamp + timedelta(hours=1))
+        redis_client = AsyncMock()
+        past_epoch = (datetime.now(tz=UTC) - timedelta(minutes=5)).timestamp()
+        redis_client.get.return_value = str(past_epoch)
+        feed, pool = make_feed(adapter_responses=[initial, new], redis_client=redis_client)
+        await feed.initialize(pool)
+
+        result = await feed.update(pool)
+
+        assert result is True
+
+    async def test_update_proceeds_when_no_ban_recorded(self):
+        initial = make_candles(3)
+        new = make_candles(2, start=initial[-1].timestamp + timedelta(hours=1))
+        redis_client = AsyncMock()
+        redis_client.get.return_value = None
+        feed, pool = make_feed(adapter_responses=[initial, new], redis_client=redis_client)
+        await feed.initialize(pool)
+
+        result = await feed.update(pool)
+
+        assert result is True
+
+    async def test_update_records_ban_to_redis_on_exchange_banned_error(self):
+        """Trifft dieser Worker selbst auf einen Ban, muss er ihn geteilt
+        in Redis schreiben, damit der andere Tenant-Worker (Gordon/Sumo,
+        gleiche IP) ihn nicht erst selbst neu entdecken muss."""
+        initial = make_candles(3)
+        redis_client = AsyncMock()
+        redis_client.get.return_value = None
+        feed, pool = make_feed(adapter_responses=[initial], redis_client=redis_client)
+        await feed.initialize(pool)
+        banned_until = datetime.now(tz=UTC) + timedelta(minutes=20)
+        pool._adapter._raises = ExchangeBannedError("binance", banned_until, "418 teapot")
+
+        result = await feed.update(pool)
+
+        assert result is False
+        redis_client.set.assert_awaited_once()
+        args, kwargs = redis_client.set.call_args
+        assert args[0] == f"{_REDIS_KEY_EXCHANGE_BAN}:binance"
+        assert float(args[1]) == banned_until.timestamp()
+        assert kwargs["ex"] >= 1
+
+    async def test_ban_check_failure_does_not_block_update(self):
+        """Redis nicht erreichbar waehrend der Ban-Pruefung -> fail-safe
+        wie ueberall sonst in dieser Klasse: Live-Feed laeuft normal
+        weiter, nur die Cross-Worker-Koordination bleibt aus."""
+        initial = make_candles(3)
+        new = make_candles(2, start=initial[-1].timestamp + timedelta(hours=1))
+        redis_client = AsyncMock()
+        redis_client.get.side_effect = RuntimeError("redis down")
+        feed, pool = make_feed(adapter_responses=[initial, new], redis_client=redis_client)
+        await feed.initialize(pool)
+
+        result = await feed.update(pool)
+
         assert result is True
 
 

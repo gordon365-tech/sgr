@@ -46,7 +46,7 @@ from sgr.core.types import (
     Symbol,
     TradingMode,
 )
-from sgr.exchanges.base import ExchangeError
+from sgr.exchanges.base import ExchangeBannedError, ExchangeError
 from sgr.exchanges.factory import ExchangePool
 from sgr.market_data.feature_engineering import FeatureEngineer
 from sgr.market_data.feature_store import FeatureStore
@@ -74,6 +74,15 @@ _POLL_INTERVALS: dict[str, float] = {
 # Zeitversatz zwischen dem Start einzelner Poll-Loops.
 _MAX_CONCURRENT_INIT = 5
 _POLL_START_STAGGER_SECONDS = 0.5
+
+# Cross-Prozess-Ban-Koordination: Gordon und Sumo laufen als getrennte
+# Worker-Prozesse auf derselben Host-IP und pollen unabhaengig voneinander
+# dieselbe Exchange. Ohne diesen Redis-Key haemmert nach einem IP-Ban
+# (z.B. Binance HTTP 418) jeder Prozess unabhaengig weiter auf die Exchange,
+# da keiner vom Ban des anderen weiss. Key wird beim ersten erkannten Ban
+# gesetzt (siehe SymbolFeed.update()) und von JEDEM Worker vor jedem
+# Fetch-Versuch geprueft.
+_REDIS_KEY_EXCHANGE_BAN = "sgr:market:exchange_ban"
 
 # Candle-History pro Timeframe für Feature-Berechnung
 _HISTORY_REQUIRED: dict[str, int] = {
@@ -128,7 +137,25 @@ class SymbolFeed:
         Ein DB-Lesefehler ist fail-safe: fällt zurück auf den bisherigen
         Exchange-only Pfad, blockiert den Feed nie (siehe Modul-Prinzip
         "fail-safe over fail-closed" für Persistence-Hooks).
+
+        Prueft VOR jedem DB-Read/Exchange-Call den geteilten Redis-Ban-
+        Status (siehe update()/_exchange_ban_remaining_seconds()): gerade
+        beim (Neu-)Start eines Workers mit einem grossen Symbol-Universum
+        (hunderte Symbole, initialize() pro Symbol = voller History-Fetch)
+        ist das Ban-Risiko am groessten, da beide Tenant-Worker-Prozesse
+        gleichzeitig gegen dieselbe Exchange anlaufen - ohne diesen Check
+        haette gerade dieser Burst-Fall (im Gegensatz zum steady-state
+        update()-Polling) den Ban weiterhin unkoordiniert ausgeloest.
         """
+        if (remaining := await self._exchange_ban_remaining_seconds()) is not None:
+            log.debug(
+                "market_data.feed.skip_banned",
+                symbol=self.symbol,
+                exchange=self.exchange_id.value,
+                remaining_seconds=round(remaining, 1),
+            )
+            return
+
         db_candles: list[Candle] = []
         try:
             latest_db_ts = await self._candles.get_latest_timestamp(
@@ -206,6 +233,16 @@ class SymbolFeed:
 
             await self._persist_candles(candles)
 
+        except ExchangeBannedError as e:
+            log.warning(
+                "market_data.feed.exchange_banned",
+                symbol=self.symbol,
+                timeframe=self.timeframe,
+                exchange=self.exchange_id.value,
+                banned_until=e.banned_until.isoformat(),
+                retry_after_seconds=round(e.retry_after_seconds, 1),
+            )
+            await self._record_exchange_ban(e)
         except ExchangeError as e:
             log.error(
                 "market_data.feed.init_failed",
@@ -223,6 +260,16 @@ class SymbolFeed:
             await self.initialize(pool)
             if not self._initialized:
                 return False
+
+        banned_remaining = await self._exchange_ban_remaining_seconds()
+        if banned_remaining is not None:
+            log.debug(
+                "market_data.feed.skip_banned",
+                symbol=self.symbol,
+                exchange=self.exchange_id.value,
+                remaining_seconds=round(banned_remaining, 1),
+            )
+            return False
 
         try:
             adapter = pool.get(self.exchange_id, self.trading_mode)
@@ -288,6 +335,15 @@ class SymbolFeed:
                 )
                 return True
 
+        except ExchangeBannedError as e:
+            log.warning(
+                "market_data.feed.exchange_banned",
+                symbol=self.symbol,
+                exchange=self.exchange_id.value,
+                banned_until=e.banned_until.isoformat(),
+                retry_after_seconds=round(e.retry_after_seconds, 1),
+            )
+            await self._record_exchange_ban(e)
         except ExchangeError as e:
             if e.retryable:
                 log.warning(
@@ -303,6 +359,55 @@ class SymbolFeed:
                 )
 
         return False
+
+    async def _exchange_ban_remaining_seconds(self) -> float | None:
+        """
+        Prueft den geteilten Redis-Ban-Status fuer diese Exchange.
+        Best-effort: Redis nicht erreichbar/kein Ban-Eintrag -> None
+        (kein Ban bekannt), niemals ein Fehler nach aussen - ein
+        Koordinations-Ausfall darf den Live-Feed nicht blockieren.
+        """
+        redis_client = self._store.redis_client
+        if redis_client is None:
+            return None
+        try:
+            raw = await redis_client.get(f"{_REDIS_KEY_EXCHANGE_BAN}:{self.exchange_id.value}")
+            if raw is None:
+                return None
+            banned_until_ts = float(raw)
+            remaining = banned_until_ts - datetime.now(tz=UTC).timestamp()
+            return remaining if remaining > 0 else None
+        except Exception as e:
+            log.warning(
+                "market_data.feed.exchange_ban_check_failed",
+                exchange=self.exchange_id.value,
+                error=str(e),
+            )
+            return None
+
+    async def _record_exchange_ban(self, error: ExchangeBannedError) -> None:
+        """
+        Schreibt den Ban geteilt in Redis (TTL = verbleibende Ban-Dauer),
+        damit der jeweils andere Tenant-Worker-Prozess (gleiche Host-IP)
+        denselben Ban sofort sieht statt ihn selbst erst durch einen
+        eigenen fehlgeschlagenen Request neu zu entdecken. Best-effort.
+        """
+        redis_client = self._store.redis_client
+        if redis_client is None:
+            return
+        ttl_seconds = max(int(error.retry_after_seconds) + 1, 1)
+        try:
+            await redis_client.set(
+                f"{_REDIS_KEY_EXCHANGE_BAN}:{self.exchange_id.value}",
+                str(error.banned_until.timestamp()),
+                ex=ttl_seconds,
+            )
+        except Exception as e:
+            log.warning(
+                "market_data.feed.exchange_ban_record_failed",
+                exchange=self.exchange_id.value,
+                error=str(e),
+            )
 
     async def _update_ticker_cache(self, pool: ExchangePool) -> None:
         """

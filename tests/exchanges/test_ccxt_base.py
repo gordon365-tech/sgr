@@ -27,6 +27,7 @@ from sgr.core.types import (
     TradingMode,
 )
 from sgr.exchanges.base import (
+    ExchangeBannedError,
     ExchangeConnectionError,
     ExchangeMaintenanceError,
     InsufficientFundsError,
@@ -1193,6 +1194,37 @@ class TestErrorMapping:
     def test_rate_limit_exceeded(self, adapter):
         mapped = adapter._map_error(ccxt.RateLimitExceeded("slow down"))
         assert isinstance(mapped, RateLimitError)
+
+    def test_ip_ban_detected_before_generic_classification(self, adapter):
+        """
+        Binance HTTP 418 IP-Ban ("Way too many requests; IP(...) banned
+        until <epoch_ms>...") kommt bei ccxt je nach Version/Exchange als
+        RateLimitExceeded, DDoSProtection oder generischer NetworkError an
+        - alle drei sind Subklassen von ccxt.NetworkError. Der
+        Message-basierte Ban-Check muss VOR jeder isinstance-Klassifikation
+        greifen, sonst landet der Ban faelschlich als gewoehnlicher, schnell
+        retrybarer ExchangeConnectionError (siehe ExchangeBannedError-
+        Docstring: ein Retry-Sturm waehrend eines aktiven Bans ist
+        kontraproduktiv).
+        """
+        banned_until_ms = int(datetime(2026, 9, 16, 5, 0, 0, tzinfo=UTC).timestamp() * 1000)
+        exc = ccxt.NetworkError(
+            f'binance 418 I\'m a teapot {{"code":-1003,"msg":"Way too many requests; '
+            f'IP(1.2.3.4) banned until {banned_until_ms}. Please use the websocket for '
+            f'live updates to avoid bans."}}'
+        )
+        mapped = adapter._map_error(exc)
+
+        assert isinstance(mapped, ExchangeBannedError)
+        assert mapped.retryable is False  # kein Fast-Retry gegen aktiven Ban
+        assert mapped.banned_until == datetime(2026, 9, 16, 5, 0, 0, tzinfo=UTC)
+
+    def test_ip_ban_not_falsely_detected_without_ban_message(self, adapter):
+        """Ein gewoehnlicher RateLimitExceeded ohne 'banned until' im Text
+        bleibt weiterhin ein normaler RateLimitError."""
+        mapped = adapter._map_error(ccxt.RateLimitExceeded("slow down"))
+        assert isinstance(mapped, RateLimitError)
+        assert not isinstance(mapped, ExchangeBannedError)
 
     def test_network_error(self, adapter):
         mapped = adapter._map_error(ccxt.NetworkError("down"))

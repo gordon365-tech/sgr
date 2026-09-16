@@ -280,6 +280,23 @@ class TradingOrchestrator:
         try:
             candle = event.candle
             symbol_key = f"{candle.symbol.exchange.value}:{candle.symbol.ccxt_symbol}"
+        except Exception as e:
+            log.error("orchestrator.on_candle_event.error", error=str(e), exc_info=True)
+            return
+
+        # Mark-to-Market fuer bereits offene Positionen auf JEDEM Candle,
+        # unabhaengig davon, ob dieser Candle unten ein neues Signal
+        # erzeugt. run_cycle() aktualisiert current_price/unrealized_pnl
+        # nur fuer das Symbol eines tatsaechlich generierten Signals - eine
+        # bereits offene Position ohne neues Signal (der Normalfall) wuerde
+        # sonst nie neu bewertet. Eigener try/except: ein Fehler hier darf
+        # weder die Candle-Verarbeitung noch run_cycle() unten blockieren.
+        try:
+            await self._portfolio_engine.update_prices({candle.symbol.ccxt_symbol: candle.close})
+        except Exception as e:
+            log.error("orchestrator.on_candle_event.update_prices_failed", error=str(e))
+
+        try:
             await self.run_cycle(symbol_key, candle.timeframe)
         except Exception as e:
             log.error("orchestrator.on_candle_event.error", error=str(e), exc_info=True)

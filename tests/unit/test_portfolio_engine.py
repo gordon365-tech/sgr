@@ -101,7 +101,7 @@ class TestShortPositionOpen:
         await engine.on_order_filled(_fill(Side.SELL, price=Decimal("50000")))
 
         # Preis faellt -> Short-Position sollte im Gewinn sein.
-        engine.update_prices({"BTC/USDT": Decimal("48000")})
+        await engine.update_prices({"BTC/USDT": Decimal("48000")})
 
         position = engine._state._positions[str(_symbol())]
         assert position.side == PositionSide.SHORT

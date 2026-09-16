@@ -27,7 +27,7 @@ Adapter Verantwortlichkeiten:
 from __future__ import annotations
 
 from abc import abstractmethod
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
@@ -398,6 +398,30 @@ class ExchangeConnectionError(ExchangeError):
             exchange=exchange,
             retryable=True,
         )
+
+
+class ExchangeBannedError(ExchangeError):
+    """
+    IP temporarily banned by the exchange (e.g. Binance HTTP 418 / code -1003).
+
+    NOT retryable: the generic tenacity backoff in ccxt_base.py retries
+    within seconds, which is pointless (and counterproductive - repeats the
+    request into an active ban) against a ban that lasts minutes. Callers
+    (SymbolFeed.update()) are expected to record `banned_until` in a shared
+    location (Redis) so sibling worker processes on the same host/IP stop
+    calling this exchange too, instead of each independently rediscovering
+    the same ban.
+    """
+
+    def __init__(self, exchange: str, banned_until: datetime, detail: str = "") -> None:
+        retry_after = max((banned_until - datetime.now(UTC)).total_seconds(), 0.0)
+        super().__init__(
+            f"IP banned on {exchange} until {banned_until.isoformat()}: {detail}",
+            exchange=exchange,
+            retryable=False,
+        )
+        self.banned_until = banned_until
+        self.retry_after_seconds = retry_after
 
 
 class ExchangeMaintenanceError(ExchangeError):

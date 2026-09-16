@@ -381,15 +381,25 @@ class PortfolioEngine:
     # Price Updates
     # ------------------------------------------------------------------
 
-    def update_prices(self, prices: dict[str, Decimal]) -> None:
+    async def update_prices(self, prices: dict[str, Decimal]) -> None:
         """
         Aktualisiert aktuelle Preise für alle Positionen.
         Berechnet Unrealized PnL neu.
-        Wird vom Market Data Engine periodisch aufgerufen.
+
+        Wird von TradingOrchestrator.on_candle_event() für JEDEN
+        eingehenden Candle aufgerufen (nicht nur wenn dieser Candle ein
+        neues Signal erzeugt) - siehe orchestrator/engine.py. Ohne diesen
+        Aufruf blieb current_price/unrealized_pnl einer offenen Position
+        auf dem Stand ihrer Eroeffnung eingefroren, sobald die Strategie
+        auf diesem Symbol kein neues Signal mehr erzeugte (der Normalfall
+        fuer eine bereits offene Position) - Portfolio-Wert, Daily-PnL und
+        die darauf basierenden Risk-Metriken (Drawdown, Portfolio-Heat)
+        waren dadurch dauerhaft falsch, nicht nur verzoegert.
 
         Args:
             prices: {"BTC/USDT": Decimal("50000"), ...}
         """
+        updated_positions: list[Position] = []
         for symbol_key, position in list(self._state._positions.items()):
             symbol_str = position.symbol.ccxt_symbol
             if symbol_str not in prices:
@@ -414,8 +424,17 @@ class PortfolioEngine:
                 trading_mode=position.trading_mode,
             )
             self._state._positions[symbol_key] = updated
+            updated_positions.append(updated)
 
         self._state.update_peak()
+
+        # Persistenz best-effort, gleiches Fail-Safe-Muster wie an anderen
+        # _persist_position_upsert()-Aufrufstellen dieser Klasse: ein
+        # DB-Fehler hier darf den Live-Preis-Stand im In-Memory-State
+        # (bereits oben aktualisiert, u.a. Basis fuer die Prometheus-
+        # Metriken) nicht rueckgaengig machen oder verzoegern.
+        for position in updated_positions:
+            await self._persist_position_upsert(position)
 
     # ------------------------------------------------------------------
     # Queries

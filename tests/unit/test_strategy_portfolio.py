@@ -672,7 +672,7 @@ class TestPortfolioEngine:
         pnl = Decimal(trade["realized_pnl"])
         assert pnl == Decimal("4895.0000")
 
-    def test_update_prices_updates_unrealized(self) -> None:
+    async def test_update_prices_updates_unrealized(self) -> None:
         engine = PortfolioEngine(TradingMode.PAPER, initial_cash=Decimal("100000"))
         # Manually insert position
         sym = _make_symbol()
@@ -688,7 +688,7 @@ class TestPortfolioEngine:
         )
         engine._state._positions[str(sym)] = pos
 
-        engine.update_prices({"BTC/USDT": Decimal("55000")})
+        await engine.update_prices({"BTC/USDT": Decimal("55000")})
         updated = engine.positions[0]
         assert updated.current_price == Decimal("55000")
         assert updated.unrealized_pnl == Decimal("5000")  # +10%

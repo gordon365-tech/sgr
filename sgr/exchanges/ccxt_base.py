@@ -28,6 +28,7 @@ Threading model:
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -60,6 +61,7 @@ from sgr.core.types import (
 )
 from sgr.exchanges.base import (
     Balance,
+    ExchangeBannedError,
     ExchangeConnectionError,
     ExchangeError,
     ExchangeInfo,
@@ -1033,6 +1035,24 @@ class CCXTBaseAdapter:
 
             type(exc).__name__
             exc_str = str(exc).lower()
+
+            # IP-Ban-Erkennung (z.B. Binance HTTP 418 / Code -1003
+            # "Way too many requests; IP(...) banned until <epoch_ms>").
+            # Ueber den Nachrichtentext statt ueber isinstance geprueft,
+            # weil ccxt diesen Fall je nach Exchange/Version uneinheitlich
+            # als RateLimitExceeded, DDoSProtection oder generischen
+            # NetworkError liefert - der Banned-until-Zeitstempel steht in
+            # allen Faellen im Klartext in der Fehlermeldung. Muss VOR den
+            # isinstance-Checks unten laufen, da diese sonst zuerst greifen
+            # und den Ban als gewoehnlichen (schnell retrybaren) Connection-
+            # Error klassifizieren wuerden - siehe ExchangeBannedError-
+            # Docstring fuer die Konsequenz (Retry-Sturm gegen aktiven Ban).
+            ban_match = re.search(r"banned until (\d+)", exc_str)
+            if ban_match:
+                banned_until = datetime.fromtimestamp(
+                    int(ban_match.group(1)) / 1000, tz=UTC
+                )
+                return ExchangeBannedError(self.exchange_id.value, banned_until, str(exc))
 
             if isinstance(exc, ccxt.RateLimitExceeded):
                 return RateLimitError(self.exchange_id.value)
