@@ -64,6 +64,7 @@ Abbildung eines bestehenden Integrationsluecke.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING
@@ -303,17 +304,44 @@ class AssetUniverseEngine:
         subscribed_symbols: dict[ExchangeID, set[str]],
         discovery_interval_seconds: float = 6 * 3600.0,
         republish_interval_seconds: float = 15.0,
+        on_discovery: Callable[[dict[ExchangeID, set[str]]], Awaitable[None]] | None = None,
     ) -> None:
+        """
+        subscribed_symbols: Mindest-Sicherheitsnetz pro Exchange (z.B. die
+        urspruenglich kuratierte LIVE_MARKET_DATA_SYMBOLS-Liste fuer
+        Binance) - wird mit dem dynamisch ermittelten TRADABLE-Set
+        vereinigt, NICHT dadurch ersetzt (siehe Task-Vorgabe "Autonomous
+        Paper Trading Rollout": alle tatsaechlich handelbaren Symbole
+        sollen subscribed werden, keine kuenstliche Reduktion - aber die
+        bereits bestehenden, historisch kuratierten Symbole muessen
+        bestehen bleiben, auch falls eine Discovery-Runde sie aus
+        welchem Grund auch immer nicht als TRADABLE einstuft).
+
+        on_discovery: optionaler Callback, der nach jedem ECHTEN
+        Discovery-Zyklus (nicht nach einem reinen Republish) mit dem
+        aktuellen SUBSCRIBED-Symbolset pro Exchange aufgerufen wird -
+        main.py verdrahtet dies mit MarketDataEngine.
+        reconcile_subscriptions(), damit neu entdeckte/entfernte Symbole
+        automatisch echte Candle-Feeds bekommen bzw. verlieren (Task-
+        Vorgabe: "Wenn sich das Asset Universe veraendert, muss die
+        Strategieauswertung diese Aenderung automatisch uebernehmen").
+        """
         self._binance_adapter = binance_adapter
         self._strategy_registry = strategy_registry
         self._subscribed_symbols = subscribed_symbols
         self._discovery_interval = discovery_interval_seconds
         self._republish_interval = republish_interval_seconds
+        self._on_discovery = on_discovery
         self._task: asyncio.Task | None = None
         self._running = False
         self._last_snapshot: list[AssetUniverseEntry] = []
         self._last_exportable: list[AssetUniverseEntry] = []
         self._last_discovery_at: float = 0.0
+        # Hintergrund-Tasks fuer on_discovery (siehe _run_once) - Set statt
+        # Einzelfeld, weil ein neuer Discovery-Zyklus theoretisch starten
+        # kann, bevor der vorherige on_discovery-Task (Feed-Reconciliation
+        # fuer hunderte Symbole) fertig ist.
+        self._background_tasks: set[asyncio.Task] = set()
 
     @property
     def last_snapshot(self) -> list[AssetUniverseEntry]:
@@ -336,6 +364,12 @@ class AssetUniverseEngine:
             except asyncio.CancelledError:
                 pass
             self._task = None
+
+        for task in list(self._background_tasks):
+            task.cancel()
+        if self._background_tasks:
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+        self._background_tasks.clear()
 
     async def _loop(self) -> None:
         while self._running:
@@ -366,16 +400,45 @@ class AssetUniverseEngine:
 
         has_active_strategy = bool(self._strategy_registry and self._strategy_registry.get_active())
 
+        binance_subscribed: set[str] = set()
+
         if self._binance_adapter is not None:
             markets = await discover_binance_markets(self._binance_adapter)
-            subscribed = self._subscribed_symbols.get(ExchangeID.BINANCE, set())
+            safety_net = self._subscribed_symbols.get(ExchangeID.BINANCE, set())
+
+            # Zwei-Pass-Klassifikation (Task-Vorgabe "alle 922 Symbole,
+            # keine kuenstliche Reduzierung auf die bereits bestehenden
+            # Subscriptions"): Pass 1 ermittelt, welche Maerkte ueberhaupt
+            # TRADABLE waeren (subscribed_symbols hier bewusst leer -
+            # noch nicht bekannt, DAS ist ja gerade die Frage). Das
+            # Ergebnis + das bestehende Sicherheitsnetz (LIVE_MARKET_DATA_
+            # SYMBOLS, siehe __init__-Docstring) wird zum tatsaechlichen
+            # SUBSCRIBED-Zielset - Pass 2 klassifiziert damit final (jeder
+            # TRADABLE Binance-Markt erreicht dadurch automatisch
+            # mindestens SUBSCRIBED, kein separat kuratierter Filter mehr
+            # noetig).
+            pass1 = [
+                classify_asset_status(
+                    m,
+                    expected_market_type="swap",
+                    execution_supported=True,
+                    subscribed_symbols=set(),
+                    has_active_strategy=has_active_strategy,
+                )
+                for m in markets
+            ]
+            tradable_rank = RANK[AssetStatus.TRADABLE]
+            binance_subscribed = {
+                e.market.symbol for e in pass1 if RANK.get(e.status, 0) >= tradable_rank
+            } | safety_net
+
             for m in markets:
                 entries.append(
                     classify_asset_status(
                         m,
                         expected_market_type="swap",
                         execution_supported=True,
-                        subscribed_symbols=subscribed,
+                        subscribed_symbols=binance_subscribed,
                         has_active_strategy=has_active_strategy,
                     )
                 )
@@ -425,3 +488,33 @@ class AssetUniverseEngine:
             total=len(entries),
             by_status=by_status,
         )
+
+        if self._on_discovery is not None:
+            # ALS HINTERGRUND-TASK, NICHT awaited: der Callback loest
+            # MarketDataEngine.reconcile_subscriptions() aus, das fuer
+            # hunderte neue Symbole einen vollen History-Fetch pro Feed
+            # ausfuehrt (mit Semaphore gedrosselt, aber dennoch potenziell
+            # mehrere Minuten). Wuerde das hier awaited, wuerde
+            # AssetUniverseEngine.start() - und damit lifespan() beim
+            # Worker-Start - fuer die gesamte Dauer blockieren und den
+            # Healthcheck-Start-Period ueberschreiten (server-verifiziert
+            # als reales Risiko waehrend des Rollouts, siehe
+            # Abschlussbericht). _run_once() selbst (Discovery +
+            # Klassifikation + Metrik-Export) bleibt synchron/schnell -
+            # nur die Feed-Reconciliation entkoppelt.
+            task = asyncio.create_task(
+                self._run_on_discovery_callback(binance_subscribed),
+                name="asset_universe_on_discovery",
+            )
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+
+    async def _run_on_discovery_callback(self, binance_subscribed: set[str]) -> None:
+        assert self._on_discovery is not None
+        try:
+            await self._on_discovery({ExchangeID.BINANCE: binance_subscribed})
+        except Exception as e:
+            # Fail-safe (wie ueberall in diesem Modul): ein Fehler bei der
+            # Markt-Daten-Neuverdrahtung darf die Discovery selbst (und
+            # damit das Dashboard/$symbol) niemals stoeren.
+            log.error("asset_universe_engine.on_discovery_failed", error=str(e))

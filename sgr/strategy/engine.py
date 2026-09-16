@@ -40,7 +40,15 @@ from sgr.core.types import (
 )
 from sgr.market_data.feature_store import FeatureStore
 from sgr.market_data.types import MarketContext
+from sgr.monitoring.metrics import (
+    record_market_regime,
+    record_signal_generated,
+    record_signal_rejected,
+    record_strategy_evaluation,
+)
+from sgr.strategy.regime_classifier import REGIME_RANK, classify_regime
 from sgr.strategy.registry import StrategyRegistry
+from sgr.strategy.symbol_gate import SymbolStrategyGate
 
 log = get_logger(__name__)
 
@@ -119,6 +127,39 @@ class StrategyEngine:
             )
             return None
 
+        # 1b. Regime automatisch klassifizieren, wenn der Aufrufer keins
+        # mitgibt (regime=UNKNOWN, der Default-Wert von run_cycle()).
+        #
+        # Root-Cause-Fund (Autonomous-Paper-Trading-Rollout): KEIN
+        # Aufrufer im Produktionscode hat regime jemals mit einem
+        # echten Wert belegt - Orchestrator.on_candle_event() ruft
+        # run_cycle(symbol_key, timeframe) ohne regime-Argument auf,
+        # das dadurch immer auf UNKNOWN blieb. get_active(regime=UNKNOWN)
+        # filtert JEDE registrierte Strategie heraus (UNKNOWN ist in
+        # keiner supported_regimes-Liste enthalten) - StrategyEngine
+        # konnte dadurch strukturell NIE ein Signal erzeugen, unabhaengig
+        # von Marktbedingungen oder Aktivierungsstatus. Automatische
+        # Klassifizierung hier (statt eine Aenderung an jedem Aufrufer)
+        # behebt das an der Wurzel, ohne die Signatur von run_cycle()/
+        # on_candle_event() aendern zu muessen - ein explizit vom
+        # Aufrufer uebergebenes Regime (regime != UNKNOWN, z.B. in
+        # Tests oder einem manuellen Trigger) wird weiterhin respektiert
+        # und NICHT ueberschrieben.
+        if regime == MarketRegime.UNKNOWN:
+            regime, regime_confidence = classify_regime(features.indicators)
+            log.debug(
+                "strategy_engine.regime_classified",
+                symbol_key=symbol_key,
+                regime=regime.value,
+                confidence=regime_confidence,
+            )
+
+        try:
+            record_strategy_evaluation(symbol_key)
+            record_market_regime(symbol_key, regime.value, REGIME_RANK.get(regime, 0))
+        except Exception as e:
+            log.debug("strategy_engine.evaluation_metric_failed", error=str(e))
+
         # 2. MarketContext aufbauen
         features_with_regime = features.model_copy(update={"regime": regime})
         context = MarketContext(
@@ -137,9 +178,24 @@ class StrategyEngine:
             )
             return None
 
+        # 3b. Pro-Symbol-Validierungsergebnis pruefen (Autonomous-
+        # Strategy-Universe-Rollout, Phase 12 Production Integration -
+        # siehe sgr/strategy/symbol_gate.py Docstring fuer das
+        # Fallback-Prinzip: kein Batch-Ergebnis fuer dieses Symbol ->
+        # bestehendes Verhalten unveraendert, kein Blockieren durch
+        # fehlende Daten).
+        gate = SymbolStrategyGate.get()
+        try:
+            await gate.refresh_if_stale()
+        except Exception as e:
+            log.debug("strategy_engine.symbol_gate_refresh_failed", error=str(e))
+        symbol_str = features.symbol.ccxt_symbol
+
         # 4. Alle Strategien synchron auswerten (pure functions, kein I/O)
         signals: list[Signal] = []
         for strategy in active:
+            if not gate.is_allowed(symbol_str, strategy.name):
+                continue
             try:
                 signal = strategy.generate_signal(context)
                 if signal and signal.confidence >= _MIN_SIGNAL_CONFIDENCE:
@@ -150,6 +206,12 @@ class StrategyEngine:
                         direction=signal.direction.value,
                         confidence=f"{signal.confidence:.2%}",
                     )
+                    try:
+                        record_signal_generated(
+                            strategy.name, signal.direction.value, signal.confidence
+                        )
+                    except Exception as e:
+                        log.debug("strategy_engine.signal_metric_failed", error=str(e))
             except Exception as e:
                 log.error(
                     "strategy_engine.strategy_error",
@@ -164,6 +226,10 @@ class StrategyEngine:
         # 5. Signal-Aggregation
         best = self._aggregate(signals)
         if best is None:
+            try:
+                record_signal_rejected(symbol_key, "conflicting_signals")
+            except Exception as e:
+                log.debug("strategy_engine.rejection_metric_failed", error=str(e))
             return None
 
         # 6. Event Bus

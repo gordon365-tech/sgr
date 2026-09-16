@@ -749,3 +749,18 @@ The system can now be deployed to production with confidence that:
 ---
 
 **Status: READY FOR PRODUCTION DEPLOYMENT** ✅
+
+---
+
+## Update 2026-09-16: Production Stack Audit, Redeploy & Security Fixes
+
+Ein Ist-Zustand-Audit des laufenden Stacks (nicht nur Code-Review) fand und behob:
+
+- **Postgres (5432) und Redis (6379) waren an `0.0.0.0` gebunden** (öffentlich erreichbar, Redis zusätzlich ohne Auth) — jetzt auf `127.0.0.1` beschränkt (`docker/docker-compose.prod.yml`). Grafana (3001) und die API (8000) bleiben bewusst erreichbar (eigene Auth).
+- **`RiskEngine.inject_redis()` wurde nie aus `main.py` aufgerufen** → `/health/trading` und die Risk-API-Router lasen dauerhaft `"unknown"` statt des echten Kill-Switch-/Risk-Zustands. In-Memory-Trading-Blockade war davon nicht betroffen (funktionierte immer korrekt), nur die Cross-Prozess-Sichtbarkeit fehlte. Fix ergänzt, propagiert automatisch auch in den internen `KillSwitch`.
+- Grafana-Datenquelle/Dashboard-Queries gegen die tatsächlich in `sgr/monitoring/trading_metrics.py` und `sgr/monitoring/metrics.py` exportierten Metriknamen verifiziert — bestehendes Dashboard (37 Panels) unverändert erhalten, verwaister Zweit-Datasource-Eintrag entfernt, Admin-Passwort synchronisiert.
+- Marktdaten-Pipeline (`BacktestDataLoader`, `SymbolFeed`/`MarketDataEngine`) geprüft: DB-First-Persistenz (TimescaleDB via `CandleRepository.upsert_batch()`, `ON CONFLICT DO NOTHING` auf `uq_candle`) ist bereits korrekt implementiert, Exchange-Fill nur für fehlende Daten. Keine Änderung nötig.
+
+**Redeploy:** `sgr-api`/`sgr-worker`-Images neu gebaut (Hinweis: `Dockerfile.worker` referenziert `FROM sgr-api:latest` — muss nach, nicht parallel zu, dem API-Image gebaut werden, sonst wird ein veraltetes Basis-Image verwendet; dabei live beobachtet und korrigiert). Postgres, Redis, API, Worker-Gordon, Worker-Sumo neu gestartet und verifiziert (siehe Abschlussbericht in der Session für den vollständigen Status).
+
+**Bewusst nicht verändert:** Redis-Authentifizierung (nur Netzwerk-Isolation behoben, kein `requirepass` ergänzt — hätte alle Redis-Clients im Code angefasst, höheres Regressionsrisiko ohne vollständige Testabdeckung in der verfügbaren Zeit). Empfehlung: als separate, dedizierte Änderung nachziehen.

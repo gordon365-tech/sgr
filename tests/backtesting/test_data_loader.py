@@ -719,6 +719,11 @@ class FakePublicCCXTExchange:
 
     def __init__(self, options: dict | None = None) -> None:
         self.options = options or {}
+        # Realistisch: ccxt setzt .markets erst NACH load_markets() -
+        # Default leer, Tests fuer den futures_fallback (siehe
+        # BacktestDataLoader._load_public_history_with_ccxt_id) setzen
+        # dies gezielt vor dem Aufruf.
+        self.markets: dict = {}
         self.load_markets = AsyncMock(return_value={})
         self.close = AsyncMock()
         self.fetch_ohlcv = AsyncMock(return_value=[])
@@ -823,6 +828,59 @@ class TestLoadPublicHistory:
 
         assert first == second
         holder["instance"].load_markets.assert_awaited_once()
+
+    async def test_futures_only_symbol_falls_back_to_settle_suffixed_key(
+        self, monkeypatch
+    ) -> None:
+        """Live-Fund (Autonomous-Strategy-Universe-Rollout): fuer
+        Symbole ohne Spot-Listing (z.B. "1000BONK/USDT") existiert im
+        ccxt-markets-Dict nur der Settle-Suffix-Key ("1000BONK/USDT:USDT"),
+        nicht der bare Key. fetch_ohlcv() muss dann automatisch mit dem
+        Suffix-Key aufgerufen werden statt mit "does not have market
+        symbol" zu scheitern."""
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        end = datetime(2026, 1, 1, 3, tzinfo=UTC)
+        rows = [make_raw_ohlcv_row(start + timedelta(hours=i)) for i in range(2)]
+
+        holder = install_fake_public_ccxt(monkeypatch, "binance")
+        holder["instance"] = FakePublicCCXTExchange()
+        # Bare Key fehlt bewusst - nur der Settle-Suffix-Key existiert,
+        # analog dem live per ccxt-Introspektion bestaetigten Befund.
+        holder["instance"].markets = {"1000BONK/USDT:USDT": {}}
+        holder["instance"].fetch_ohlcv = AsyncMock(side_effect=[rows, []])
+
+        loader = BacktestDataLoader()
+        result = await loader.load_public_history(
+            "1000BONK/USDT", "1h", start, end, exchange_id=ExchangeID.BINANCE
+        )
+
+        assert len(result) == 2
+        first_call_symbol = holder["instance"].fetch_ohlcv.await_args_list[0].args[0]
+        assert first_call_symbol == "1000BONK/USDT:USDT"
+
+    async def test_symbol_with_spot_listing_is_not_affected_by_fallback(
+        self, monkeypatch
+    ) -> None:
+        """Regressionsschutz in die andere Richtung: wenn der bare Key
+        existiert (z.B. BTC/USDT, ETH/USDT - die bereits etablierte,
+        validierte Baseline), darf der Fallback NICHT greifen, auch wenn
+        zusaetzlich ein Settle-Suffix-Key existiert."""
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        end = datetime(2026, 1, 1, 3, tzinfo=UTC)
+        rows = [make_raw_ohlcv_row(start + timedelta(hours=i)) for i in range(2)]
+
+        holder = install_fake_public_ccxt(monkeypatch, "binance")
+        holder["instance"] = FakePublicCCXTExchange()
+        holder["instance"].markets = {"BTC/USDT": {}, "BTC/USDT:USDT": {}}
+        holder["instance"].fetch_ohlcv = AsyncMock(side_effect=[rows, []])
+
+        loader = BacktestDataLoader()
+        await loader.load_public_history(
+            "BTC/USDT", "1h", start, end, exchange_id=ExchangeID.BINANCE
+        )
+
+        first_call_symbol = holder["instance"].fetch_ohlcv.await_args_list[0].args[0]
+        assert first_call_symbol == "BTC/USDT"
 
     async def test_parses_symbol_correctly(self, monkeypatch):
         start = datetime(2026, 1, 1, tzinfo=UTC)

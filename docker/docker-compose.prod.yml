@@ -83,7 +83,13 @@ services:
     ports:
       # Internal access nur von anderen Containers
       # Falls lokales psql noetig: expose aber NICHT im default docker-compose
-      - "5432:5432"  # Remove in true production (use unix socket instead)
+      # Security-Audit 2026-09-16: war zuvor an 0.0.0.0 gebunden (auf allen
+      # Interfaces oeffentlich erreichbar, nur durch das DB-Passwort
+      # geschuetzt). Jetzt auf localhost beschraenkt - bleibt fuer
+      # Admin-/Debug-Zugriff per SSH auf den Host erreichbar, sgr-api/
+      # worker erreichen Postgres ohnehin ueber den internen Docker-
+      # Netzwerk-Servicenamen "postgres", nicht ueber diesen Host-Port.
+      - "127.0.0.1:5432:5432"
       
     healthcheck:
       # $$-Escaping erzwingt Shell-Expansion zur Laufzeit IM Container
@@ -145,7 +151,13 @@ services:
       - redisdata:/data
       
     ports:
-      - "6379:6379"  # Remove in true production
+      # Security-Audit 2026-09-16: war an 0.0.0.0 gebunden UND ganz ohne
+      # Auth erreichbar (kein "requirepass" konfiguriert, obwohl
+      # REDIS_PASSWORD in .env.prod existiert - nie an den redis-Service
+      # durchgereicht). Auf localhost beschraenkt, analog zu Postgres
+      # oben - sgr-api/worker erreichen Redis ueber den internen
+      # Servicenamen "redis", nicht ueber diesen Host-Port.
+      - "127.0.0.1:6379:6379"
       
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]

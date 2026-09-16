@@ -910,12 +910,26 @@ class TestRiskEngineLimits:
         self,
         risk_engine: RiskEngine,
         sample_signal: Signal,
-        open_position: Position,
+        eth_symbol: Symbol,
     ) -> None:
         """Soft Limit (hohe Heat) → REDUCED, nicht REJECTED."""
         await risk_engine.initialize()
 
-        # Viele Positionen simulieren (hohe Heat)
+        # Viele Positionen simulieren (hohe Heat) - bewusst auf eth_symbol
+        # (nicht sample_signal.symbol = btc_symbol), damit der separate
+        # Duplicate-Position-Check (siehe TestDuplicatePositionRejection)
+        # dieses Signal nicht bereits vorher abfaengt und den eigentlich
+        # zu testenden Soft-Limit-Pfad verdeckt.
+        open_position = Position(
+            symbol=eth_symbol,
+            side=PositionSide.LONG,
+            quantity=Decimal("0.1"),
+            entry_price=Decimal("50000"),
+            current_price=Decimal("51000"),
+            opened_at=datetime.now(tz=UTC),
+            strategy_name="trend_v1",
+            trading_mode=TradingMode.PAPER,
+        )
         many_positions = [open_position] * 5  # 5 Positionen
 
         assessment = await risk_engine.evaluate(
@@ -1026,14 +1040,20 @@ class TestLeverageGuard:
         self,
         risk_engine: RiskEngine,
         sample_signal: Signal,
-        btc_symbol: Symbol,
+        eth_symbol: Symbol,
     ) -> None:
         """Portfolio 100k, Position-Notional 51k -> Leverage ~0.51x, unter
-        Default-Limit 3.0x -> kein Leverage-Breach."""
+        Default-Limit 3.0x -> kein Leverage-Breach.
+
+        Die bestehende Position nutzt bewusst eth_symbol statt btc_symbol
+        (= sample_signal.symbol): dieser Test prueft ausschliesslich die
+        Leverage-Berechnung, nicht den separaten "Position bereits offen"-
+        Check (siehe TestDuplicatePositionRejection) - beide Symbole
+        zaehlen identisch in die aggregierte Portfolio-Leverage ein."""
         await risk_engine.initialize()
 
         modest_position = Position(
-            symbol=btc_symbol,
+            symbol=eth_symbol,
             side=PositionSide.LONG,
             quantity=Decimal("1.0"),
             entry_price=Decimal("50000"),
@@ -1058,14 +1078,19 @@ class TestLeverageGuard:
         self,
         risk_engine: RiskEngine,
         sample_signal: Signal,
-        btc_symbol: Symbol,
+        eth_symbol: Symbol,
     ) -> None:
         """Portfolio 100k, Position-Notional 400k -> Leverage 4.0x, über
-        Default-Limit 3.0x -> REJECTED + Kill Switch ausgelöst."""
+        Default-Limit 3.0x -> REJECTED + Kill Switch ausgelöst.
+
+        eth_symbol statt btc_symbol fuer denselben Grund wie im Test
+        oberhalb - dieser Test soll den Leverage-Hard-Limit-Pfad pruefen,
+        nicht versehentlich vom separaten Duplicate-Position-Check
+        abgefangen werden."""
         await risk_engine.initialize()
 
         leveraged_position = Position(
-            symbol=btc_symbol,
+            symbol=eth_symbol,
             side=PositionSide.LONG,
             quantity=Decimal("8.0"),
             entry_price=Decimal("50000"),
@@ -1099,6 +1124,154 @@ class TestLeverageGuard:
         auf 0.0 statt es implizit vom Pydantic-Default abhängen zu lassen."""
         metrics = risk_engine._empty_metrics(Decimal("50000"))
         assert metrics.gross_leverage == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Duplicate Position Rejection (Autonomous-Paper-Trading-Rollout, Task-
+# Vorgabe "Keine Strategieblindheit": mehrfaches Oeffnen derselben
+# Position / gleichzeitige gegensaetzliche Positionen ohne explizite
+# Unterstuetzung muss die Risk Engine als letzte Instanz verhindern.)
+# ---------------------------------------------------------------------------
+
+
+class TestDuplicatePositionRejection:
+    async def test_long_signal_rejected_when_long_position_already_open(
+        self,
+        risk_engine: RiskEngine,
+        sample_signal: Signal,
+        btc_symbol: Symbol,
+    ) -> None:
+        await risk_engine.initialize()
+        existing = Position(
+            symbol=btc_symbol,
+            side=PositionSide.LONG,
+            quantity=Decimal("0.1"),
+            entry_price=Decimal("50000"),
+            current_price=Decimal("50500"),
+            opened_at=datetime.now(tz=UTC),
+            strategy_name="trend_v1",
+            trading_mode=TradingMode.PAPER,
+        )
+
+        assessment = await risk_engine.evaluate(
+            signal=sample_signal,  # LONG auf btc_symbol
+            open_positions=[existing],
+            portfolio_value=Decimal("100000"),
+            available_capital=Decimal("50000"),
+            current_price=Decimal("50500"),
+        )
+
+        assert assessment.decision == RiskDecision.REJECTED
+        assert "already open" in (assessment.rejection_reason or "").lower()
+
+    async def test_opposite_signal_rejected_when_position_already_open(
+        self,
+        risk_engine: RiskEngine,
+        btc_symbol: Symbol,
+    ) -> None:
+        """Ein SHORT-Signal gegen eine bestehende LONG-Position wird
+        ebenfalls blockiert - keine automatische Hedge-Unterstuetzung
+        (siehe Task-Vorgabe 'gleichzeitige gegensaetzliche Positionen
+        ohne explizite Unterstuetzung')."""
+        await risk_engine.initialize()
+        existing = Position(
+            symbol=btc_symbol,
+            side=PositionSide.LONG,
+            quantity=Decimal("0.1"),
+            entry_price=Decimal("50000"),
+            current_price=Decimal("50500"),
+            opened_at=datetime.now(tz=UTC),
+            strategy_name="trend_v1",
+            trading_mode=TradingMode.PAPER,
+        )
+        short_signal = Signal(
+            timestamp=datetime.now(tz=UTC),
+            strategy_name="mean_reversion_v1",
+            symbol=btc_symbol,
+            direction=SignalDirection.SHORT,
+            confidence=0.75,
+            regime=MarketRegime.RANGING,
+        )
+
+        assessment = await risk_engine.evaluate(
+            signal=short_signal,
+            open_positions=[existing],
+            portfolio_value=Decimal("100000"),
+            available_capital=Decimal("50000"),
+            current_price=Decimal("50500"),
+        )
+
+        assert assessment.decision == RiskDecision.REJECTED
+        assert "already open" in (assessment.rejection_reason or "").lower()
+
+    async def test_close_signal_not_blocked_by_duplicate_check(
+        self,
+        risk_engine: RiskEngine,
+        btc_symbol: Symbol,
+    ) -> None:
+        """Ein CLOSE-Signal auf ein Symbol mit offener Position darf NIE
+        vom Duplicate-Check blockiert werden - sonst waere keine
+        Positionsreduktion mehr moeglich."""
+        await risk_engine.initialize()
+        existing = Position(
+            symbol=btc_symbol,
+            side=PositionSide.LONG,
+            quantity=Decimal("0.1"),
+            entry_price=Decimal("50000"),
+            current_price=Decimal("50500"),
+            opened_at=datetime.now(tz=UTC),
+            strategy_name="trend_v1",
+            trading_mode=TradingMode.PAPER,
+        )
+        close_signal = Signal(
+            timestamp=datetime.now(tz=UTC),
+            strategy_name="trend_v1",
+            symbol=btc_symbol,
+            direction=SignalDirection.CLOSE,
+            confidence=0.90,
+            regime=MarketRegime.TRENDING_UP,
+        )
+
+        assessment = await risk_engine.evaluate(
+            signal=close_signal,
+            open_positions=[existing],
+            portfolio_value=Decimal("100000"),
+            available_capital=Decimal("50000"),
+            current_price=Decimal("50500"),
+        )
+
+        assert "already open" not in (assessment.rejection_reason or "").lower()
+
+    async def test_signal_for_different_symbol_not_blocked(
+        self,
+        risk_engine: RiskEngine,
+        sample_signal: Signal,
+        eth_symbol: Symbol,
+    ) -> None:
+        """Eine offene Position auf ETH/USDT darf ein LONG-Signal auf
+        BTC/USDT (sample_signal) nicht blockieren - der Check ist
+        symbol-spezifisch, kein pauschales 'irgendeine Position offen'."""
+        await risk_engine.initialize()
+        existing = Position(
+            symbol=eth_symbol,
+            side=PositionSide.LONG,
+            quantity=Decimal("1.0"),
+            entry_price=Decimal("3000"),
+            current_price=Decimal("3050"),
+            opened_at=datetime.now(tz=UTC),
+            strategy_name="trend_v1",
+            trading_mode=TradingMode.PAPER,
+        )
+
+        assessment = await risk_engine.evaluate(
+            signal=sample_signal,
+            open_positions=[existing],
+            portfolio_value=Decimal("100000"),
+            available_capital=Decimal("50000"),
+            current_price=Decimal("50000"),
+        )
+
+        assert "already open" not in (assessment.rejection_reason or "").lower()
 
 
 # ---------------------------------------------------------------------------

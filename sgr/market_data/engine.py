@@ -469,7 +469,11 @@ class MarketDataEngine:
         self._engineer = FeatureEngineer()
         self._store = feature_store or FeatureStore()
         self._feeds: dict[str, SymbolFeed] = {}  # key: "{symbol}:{timeframe}"
-        self._tasks: list[asyncio.Task[None]] = []
+        # dict statt list (Autonomous-Paper-Trading-Rollout): reconcile_
+        # subscriptions() muss einzelne Feed-Tasks gezielt canceln koennen
+        # (nicht mehr nur "alle auf einmal" wie beim urspruenglichen
+        # stop()-Pfad) - siehe dortigen Docstring.
+        self._tasks: dict[str, asyncio.Task[None]] = {}
         self._running = False
 
     def subscribe(
@@ -548,7 +552,7 @@ class MarketDataEngine:
                 self._poll_loop(feed, interval, initial_delay=stagger_seconds),
                 name=f"market_data:{key}",
             )
-            self._tasks.append(task)
+            self._tasks[key] = task
             stagger_seconds += _POLL_START_STAGGER_SECONDS
 
         log.info(
@@ -560,13 +564,107 @@ class MarketDataEngine:
     async def stop(self) -> None:
         """Stoppt alle Polling-Loops gracefully."""
         self._running = False
-        for task in self._tasks:
+        for task in self._tasks.values():
             task.cancel()
         if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
+            await asyncio.gather(*self._tasks.values(), return_exceptions=True)
         self._tasks.clear()
         await self._store.close()
         log.info("market_data.engine.stopped")
+
+    async def reconcile_subscriptions(
+        self,
+        target: set[tuple[str, str]],
+        exchange_id: ExchangeID,
+    ) -> None:
+        """
+        Bringt die aktiven Feeds in Uebereinstimmung mit `target`
+        (Menge aus (symbol, timeframe)-Paaren) - fuegt fehlende Feeds
+        hinzu, entfernt nicht mehr benoetigte. Im Unterschied zu
+        subscribe() sicher NACH start() aufrufbar (Autonomous-Paper-
+        Trading-Rollout: das Asset Universe aendert sich waehrend der
+        Laufzeit - sgr.market_data.asset_universe.AssetUniverseEngine
+        ruft dies nach jedem echten Discovery-Zyklus auf, siehe dortige
+        Verdrahtung in main.py).
+
+        Neue Symbole werden automatisch beruecksichtigt (Task-Vorgabe:
+        "Wenn sich das Asset Universe veraendert, muss die
+        Strategieauswertung diese Aenderung automatisch uebernehmen").
+        Entfernte/nicht mehr handelbare Symbole werden nicht mehr
+        gepollt (Task-Vorgabe: "duerfen nicht weiter gehandelt werden") -
+        ihr zugehoeriger Feed-Task wird gecancelt, kein neuer Candle
+        erreicht danach mehr den Orchestrator fuer dieses Symbol.
+
+        Dieselben Rate-Limit-Schutzmechanismen wie start() (begrenzte
+        Parallelitaet beim initialen History-Fetch, gestaffelter
+        Poll-Loop-Start) gelten auch fuer neu hinzugefuegte Feeds.
+        """
+        target_keys = {f"{symbol}:{tf}" for symbol, tf in target}
+        current_keys = set(self._feeds.keys())
+
+        to_remove = current_keys - target_keys
+        to_add = target_keys - current_keys
+
+        for key in to_remove:
+            task = self._tasks.pop(key, None)
+            if task is not None:
+                task.cancel()
+            self._feeds.pop(key, None)
+
+        # Neue Feeds anlegen (noch nicht initialisiert/gepollt).
+        new_feeds: list[SymbolFeed] = []
+        for key in to_add:
+            symbol, tf = key.rsplit(":", 1)
+            feed = SymbolFeed(
+                symbol=symbol,
+                timeframe=tf,
+                exchange_id=exchange_id,
+                trading_mode=self._trading_mode,
+                feature_engineer=self._engineer,
+                feature_store=self._store,
+            )
+            self._feeds[key] = feed
+            new_feeds.append(feed)
+
+        if not self._running:
+            # Engine noch nicht gestartet (z.B. erster Discovery-Lauf vor
+            # dem allerersten start()) - start() selbst uebernimmt
+            # Initialisierung + Poll-Loop-Start fuer alle self._feeds.
+            log.info(
+                "market_data.reconcile.deferred_to_start",
+                added=len(to_add),
+                removed=len(to_remove),
+            )
+            return
+
+        if new_feeds:
+            init_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_INIT)
+
+            async def _bounded_initialize(feed: SymbolFeed) -> None:
+                async with init_semaphore:
+                    await feed.initialize(self._pool)
+
+            await asyncio.gather(
+                *(_bounded_initialize(f) for f in new_feeds), return_exceptions=True
+            )
+
+            stagger_seconds = 0.0
+            for feed in new_feeds:
+                key = f"{feed.symbol}:{feed.timeframe}"
+                interval = _POLL_INTERVALS.get(feed.timeframe, 60.0)
+                task = asyncio.create_task(
+                    self._poll_loop(feed, interval, initial_delay=stagger_seconds),
+                    name=f"market_data:{key}",
+                )
+                self._tasks[key] = task
+                stagger_seconds += _POLL_START_STAGGER_SECONDS
+
+        log.info(
+            "market_data.reconcile.applied",
+            added=len(to_add),
+            removed=len(to_remove),
+            total_feeds=len(self._feeds),
+        )
 
     async def _poll_loop(
         self, feed: SymbolFeed, interval: float, initial_delay: float = 0.0

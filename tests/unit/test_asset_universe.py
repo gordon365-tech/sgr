@@ -431,3 +431,152 @@ class TestAssetUniverseEngine:
         assert discover_pionex_mock.await_count == 1
         assert record_mock.call_count == 2
         assert record_mock.call_args_list[0] == record_mock.call_args_list[1]
+
+
+class TestDynamicBinanceSubscription:
+    """Autonomous-Paper-Trading-Rollout: ALLE tatsaechlich tradable
+    Binance-Symbole muessen automatisch SUBSCRIBED werden, nicht nur
+    die urspruenglich kuratierten (siehe Task-Vorgabe 'keine kuenstliche
+    Reduzierung auf die bereits bestehenden Subscriptions')."""
+
+    async def test_tradable_symbol_outside_safety_net_is_auto_subscribed(
+        self, monkeypatch
+    ) -> None:
+        """Ein Symbol, das NICHT in der urspruenglichen Sicherheitsnetz-
+        Liste steht, aber alle TRADABLE-Kriterien erfuellt, muss trotzdem
+        automatisch SUBSCRIBED erreichen (Zwei-Pass-Klassifikation)."""
+        import sgr.market_data.asset_universe as au_module
+
+        new_market = _market(symbol="NEWCOIN/USDT", base="NEWCOIN")
+        adapter = MagicMock()
+        adapter.discover_markets = AsyncMock(return_value=[new_market])
+        monkeypatch.setattr(au_module, "discover_pionex_markets", AsyncMock(return_value=[]))
+        monkeypatch.setattr("sgr.monitoring.metrics.record_asset_universe_snapshot", MagicMock())
+
+        engine = AssetUniverseEngine(
+            binance_adapter=adapter,
+            strategy_registry=None,
+            # NEWCOIN/USDT ist NICHT im Sicherheitsnetz enthalten.
+            subscribed_symbols={ExchangeID.BINANCE: {"BTC/USDT", "ETH/USDT"}},
+        )
+
+        await engine._run_once()
+
+        entry = next(e for e in engine.last_snapshot if e.market.symbol == "NEWCOIN/USDT")
+        assert entry.status == AssetStatus.SUBSCRIBED
+
+    async def test_safety_net_symbol_missing_precision_data_is_not_forced_tradable(
+        self, monkeypatch
+    ) -> None:
+        """Sicherheitsnetz-Mitgliedschaft darf NIE die TRADABLE-
+        Voraussetzungen (Precision/Limits vorhanden) uebergehen - sonst
+        koennten Orders ohne echte Praezisionsdaten konstruiert werden.
+        Ein Markt ohne amount_precision bleibt bei SUPPORTED, auch wenn
+        sein Symbol im Sicherheitsnetz steht."""
+        import sgr.market_data.asset_universe as au_module
+
+        broken_market = _market(symbol="BTC/USDT", amount_precision=None)
+        adapter = MagicMock()
+        adapter.discover_markets = AsyncMock(return_value=[broken_market])
+        monkeypatch.setattr(au_module, "discover_pionex_markets", AsyncMock(return_value=[]))
+        monkeypatch.setattr("sgr.monitoring.metrics.record_asset_universe_snapshot", MagicMock())
+
+        engine = AssetUniverseEngine(
+            binance_adapter=adapter,
+            strategy_registry=None,
+            subscribed_symbols={ExchangeID.BINANCE: {"BTC/USDT"}},
+        )
+
+        await engine._run_once()
+
+        entry = next(e for e in engine.last_snapshot if e.market.symbol == "BTC/USDT")
+        assert entry.status == AssetStatus.SUPPORTED
+
+    async def test_safety_net_symbol_included_in_discovery_target_even_when_not_rediscovered(
+        self, monkeypatch
+    ) -> None:
+        """Der eigentliche Zweck des Sicherheitsnetzes: das an
+        on_discovery() (-> MarketDataEngine.reconcile_subscriptions())
+        uebergebene Zielset enthaelt Sicherheitsnetz-Symbole IMMER, auch
+        wenn sie in einem einzelnen Discovery-Zyklus gar nicht unter den
+        gefundenen Maerkten waren (z.B. transienter Exchange-Hickup) -
+        die bestehenden BTC/USDT-/ETH/USDT-Feeds duerfen dadurch nie
+        verwaist zurueckbleiben (Task-Vorgabe #10)."""
+        import sgr.market_data.asset_universe as au_module
+
+        # BTC/USDT taucht in dieser Discovery-Runde gar nicht auf.
+        other_market = _market(symbol="OTHER/USDT", base="OTHER")
+        adapter = MagicMock()
+        adapter.discover_markets = AsyncMock(return_value=[other_market])
+        monkeypatch.setattr(au_module, "discover_pionex_markets", AsyncMock(return_value=[]))
+        monkeypatch.setattr("sgr.monitoring.metrics.record_asset_universe_snapshot", MagicMock())
+
+        received: list[dict] = []
+
+        async def on_discovery(subscribed: dict) -> None:
+            received.append(subscribed)
+
+        engine = AssetUniverseEngine(
+            binance_adapter=adapter,
+            strategy_registry=None,
+            subscribed_symbols={ExchangeID.BINANCE: {"BTC/USDT"}},
+            on_discovery=on_discovery,
+        )
+
+        await engine._run_once()
+        assert len(engine._background_tasks) == 1
+        await next(iter(engine._background_tasks))
+
+        assert "BTC/USDT" in received[0][ExchangeID.BINANCE]
+        assert "OTHER/USDT" in received[0][ExchangeID.BINANCE]
+
+    async def test_on_discovery_callback_receives_computed_subscription_set(
+        self, monkeypatch
+    ) -> None:
+        import sgr.market_data.asset_universe as au_module
+
+        market_a = _market(symbol="AAA/USDT", base="AAA")
+        market_b = _market(symbol="BBB/USDT", base="BBB", market_type="spot")  # nicht TRADABLE
+        adapter = MagicMock()
+        adapter.discover_markets = AsyncMock(return_value=[market_a, market_b])
+        monkeypatch.setattr(au_module, "discover_pionex_markets", AsyncMock(return_value=[]))
+        monkeypatch.setattr("sgr.monitoring.metrics.record_asset_universe_snapshot", MagicMock())
+
+        received: list[dict] = []
+
+        async def on_discovery(subscribed: dict) -> None:
+            received.append(subscribed)
+
+        engine = AssetUniverseEngine(
+            binance_adapter=adapter,
+            strategy_registry=None,
+            subscribed_symbols={ExchangeID.BINANCE: set()},
+            on_discovery=on_discovery,
+        )
+
+        await engine._run_once()
+        assert len(engine._background_tasks) == 1
+        await next(iter(engine._background_tasks))
+
+        assert len(received) == 1
+        assert received[0][ExchangeID.BINANCE] == {"AAA/USDT"}  # BBB ist spot, nicht swap
+
+    async def test_on_discovery_callback_error_does_not_break_run_once(self, monkeypatch) -> None:
+        import sgr.market_data.asset_universe as au_module
+
+        monkeypatch.setattr(au_module, "discover_pionex_markets", AsyncMock(return_value=[]))
+        monkeypatch.setattr("sgr.monitoring.metrics.record_asset_universe_snapshot", MagicMock())
+
+        async def failing_callback(subscribed: dict) -> None:
+            raise RuntimeError("boom")
+
+        engine = AssetUniverseEngine(
+            binance_adapter=None,
+            strategy_registry=None,
+            subscribed_symbols={},
+            on_discovery=failing_callback,
+        )
+
+        await engine._run_once()  # darf nicht raisen
+        assert len(engine._background_tasks) == 1
+        await next(iter(engine._background_tasks))  # darf ebenfalls nicht raisen

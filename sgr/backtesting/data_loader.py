@@ -196,10 +196,41 @@ class BacktestDataLoader:
         try:
             await public_client.load_markets()
 
+            # Fallback fuer futures-only Symbole ohne Spot-Listing
+            # (Autonomous-Strategy-Universe-Rollout, live am Server
+            # gefunden): dieser Client laedt standardmaessig SPOT-Maerkte
+            # (kein options={'defaultType': 'future'}), waehrend ein
+            # grosser Teil des dynamisch entdeckten Binance-Universums
+            # (z.B. "1000BONK/USDT", "1000PEPE/USDT") NUR als USDT-M-
+            # Perpetual existiert, nicht als Spot-Paar - der bare Symbol-
+            # Key ("1000BONK/USDT") ist fuer diese Symbole in ccxt's
+            # markets-Dict gar nicht vorhanden ("does not have market
+            # symbol"). Empirisch bestaetigt: derselbe Bug-Typ wie der
+            # bereits behobene Live-Feed-Fund (sgr/api/main.py
+            # _on_asset_universe_discovery) - ccxt registriert USDT-M-
+            # Perpetuals unter einem eigenen Key MIT Settle-Suffix
+            # (":USDT"). Fallback NUR wenn der bare Key fehlt UND der
+            # Suffix-Key existiert - fuer alle Symbole mit Spot-Listing
+            # (z.B. BTC/USDT, ETH/USDT) bleibt der bare Key unveraendert
+            # die Datenquelle, damit die bereits etablierte, validierte
+            # Baseline dieser Symbole (StrategyValidationRunner,
+            # DEFAULT_SYMBOLS) durch diesen Fix NICHT verschoben wird.
+            resolved_symbol = symbol
+            markets = getattr(public_client, "markets", None) or {}
+            if symbol not in markets:
+                futures_symbol = f"{symbol}:USDT"
+                if futures_symbol in markets:
+                    resolved_symbol = futures_symbol
+                    log.info(
+                        "backtesting.data_loader.futures_fallback",
+                        requested_symbol=symbol,
+                        resolved_symbol=resolved_symbol,
+                    )
+
             async def fetch_batch(since: datetime, limit: int) -> list[Candle]:
                 since_ms = int(since.timestamp() * 1000)
                 raw = await public_client.fetch_ohlcv(
-                    symbol, timeframe=timeframe, since=since_ms, limit=limit
+                    resolved_symbol, timeframe=timeframe, since=since_ms, limit=limit
                 )
                 sym = self._parse_symbol_str(symbol, exchange_id)
                 return sorted(

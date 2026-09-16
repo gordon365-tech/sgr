@@ -158,11 +158,37 @@ class SGRMetrics:
         self.trades_winning = counter("sgr.trades.winning", "Winning trades")
         self.trades_losing = counter("sgr.trades.losing", "Losing trades")
 
+        # Cumulative realized PnL (Gauge, nicht Counter: kann fallen -
+        # jeder verlustreiche Trade senkt den kumulierten Wert. Ein
+        # Prometheus-Counter darf per Definition nie sinken, waere hier
+        # also falsch). Tenant-Ebene bewusst ohne Symbol/Strategie-
+        # Aufschluesselung (Kardinalitaet, siehe Autonomous-Paper-
+        # Trading-Vorgabe "nicht unnoetig hochdimensioniert") - Detail
+        # auf Positionsebene liefert bereits sgr.position.unrealized_pnl_usd
+        # fuer offene Positionen.
+        self.realized_pnl = gauge(
+            "sgr.trading.realized_pnl_usd", "Cumulative realized profit/loss"
+        )
+
         # Strategy Metrics
         self.strategy_signals = counter(
             "sgr.strategy.signals_generated", "Trading signals generated"
         )
+        self.strategy_signals_rejected = counter(
+            "sgr.strategy.signals_rejected", "Trading signals rejected before reaching risk"
+        )
+        self.strategy_evaluations = counter(
+            "sgr.strategy.evaluations", "Strategy Engine evaluation cycles (per symbol)"
+        )
         self.strategy_win_rate = gauge("sgr.strategy.win_rate_pct", "Strategy win rate", "%")
+
+        # Aktuell klassifiziertes Marktregime pro Symbol (siehe
+        # sgr/strategy/regime_classifier.py "regime_detector_v1"). Wert =
+        # Rang (siehe REGIME_RANK unten) fuer Sortierung/Heatmaps in
+        # Grafana, regime-Name zusaetzlich als Label fuer direktes Filtern.
+        self.market_regime = gauge(
+            "sgr.market.regime", "Currently classified market regime per symbol"
+        )
 
         # Strategy Validation Metrics (Schritt 6: Sharpe/Return/Drawdown aus
         # StrategyValidationRunner duerfen nicht nur geloggt werden - siehe
@@ -267,20 +293,56 @@ def record_risk_snapshot(
     m.var_95.set(var_95_pct, {"status": "live"})
 
 
-def record_trade_executed(side: str, pnl: Decimal, winning: bool) -> None:
-    """Records trade execution."""
+def record_trade_executed(
+    side: str,
+    pnl: Decimal,
+    winning: bool,
+    cumulative_realized_pnl: Decimal | None = None,
+) -> None:
+    """Records trade execution.
+
+    cumulative_realized_pnl: laufende Summe aller realisierten PnL
+    dieses Tenants (siehe PortfolioEngine._record_trade - Summe ueber
+    self._trade_history). Optional (Default None = Gauge wird nicht
+    angefasst), damit bestehende Aufrufer/Tests ohne diesen Wert
+    unveraendert funktionieren.
+    """
     m = get_metrics()
     m.trades_total.add(1, {"side": side})
     if winning:
         m.trades_winning.add(1, {"side": side})
     else:
         m.trades_losing.add(1, {"side": side})
+    if cumulative_realized_pnl is not None:
+        m.realized_pnl.set(float(cumulative_realized_pnl))
 
 
 def record_signal_generated(strategy_name: str, direction: str, confidence: float) -> None:
     """Records signal generation."""
     m = get_metrics()
     m.strategy_signals.add(1, {"strategy": strategy_name, "direction": direction})
+
+
+def record_signal_rejected(symbol: str, reason: str) -> None:
+    """Records a signal that never reached the Risk Engine (z.B.
+    widerspruechliche Strategie-Signale, Konfidenz unter Schwelle)."""
+    m = get_metrics()
+    m.strategy_signals_rejected.add(1, {"symbol": symbol, "reason": reason})
+
+
+def record_strategy_evaluation(symbol: str) -> None:
+    """Records one StrategyEngine.process() Durchlauf fuer ein Symbol -
+    beantwortet 'wie viele Symbole werden tatsaechlich kontinuierlich
+    evaluiert' unabhaengig davon, ob ein Signal entstand."""
+    m = get_metrics()
+    m.strategy_evaluations.add(1, {"symbol": symbol})
+
+
+def record_market_regime(symbol: str, regime: str, rank: int) -> None:
+    """Records the currently classified market regime for a symbol
+    (siehe sgr/strategy/regime_classifier.py)."""
+    m = get_metrics()
+    m.market_regime.set(float(rank), {"symbol": symbol, "regime": regime})
 
 
 def record_candle_received(symbol: str, timeframe: str) -> None:

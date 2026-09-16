@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 from datetime import UTC, datetime
 from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 
@@ -200,3 +201,210 @@ class TestRiskEventRepository:
             trading_mode=TradingMode.PAPER,
             metrics_snapshot={"drawdown": 0.16, "portfolio_value": 8400},
         )
+
+
+class TestStrategySymbolValidationRepositoryResumeSemantics:
+    """
+    Regressionstests fuer den Resume-Bug (gefunden 2026-09-15, live
+    beobachtet): get_processed_symbols() betrachtete vorher JEDE Row mit
+    diesem batch_id als "verarbeitet", auch reine Candidate-Rows
+    (is_best_for_symbol=False), die waehrend der Strategie-Schleife in
+    SymbolStrategyValidationRunner._validate_symbol() geschrieben
+    werden, BEVOR die finale Gewinner-Row (is_best_for_symbol=True) am
+    Ende folgt. Ein per SIGTERM/SIGKILL unterbrochener Prozess liess
+    Symbole dadurch mit ausschliesslich Candidate-Rows zurueck, die ein
+    Resume danach STILLSCHWEIGEND fuer immer uebersprungen hat (live:
+    4 von 718 Symbolen betroffen). Echte DB-Integration-Tests statt
+    Mocks, weil ein reiner Mock des Session-Objekts die tatsaechliche
+    WHERE-Klausel (is_best_for_symbol-Filter) nicht ausfuehrt und einen
+    Regressions-Revert dieses Filters nicht erkennen wuerde.
+    """
+
+    async def _upsert(self, repos, *, batch_id, symbol, strategy, status, is_best) -> None:
+        await repos.strategy_symbol_validations.upsert(
+            symbol=symbol,
+            exchange="binance",
+            timeframe="1h",
+            strategy=strategy,
+            status=status,
+            batch_id=batch_id,
+            is_best_for_symbol=is_best,
+        )
+
+    async def test_symbol_with_only_candidate_rows_is_not_processed(self, repos) -> None:
+        """Test 1: nur Candidate-Rows (is_best_for_symbol=False) ->
+        get_processed_symbols() darf das Symbol NICHT enthalten."""
+        batch_id = f"tr-{uuid4().hex[:16]}"
+        await self._upsert(
+            repos,
+            batch_id=batch_id,
+            symbol="INTERRUPTED/USDT",
+            strategy="mean_reversion_v1",
+            status="no_valid_strategy",
+            is_best=False,
+        )
+        await self._upsert(
+            repos,
+            batch_id=batch_id,
+            symbol="INTERRUPTED/USDT",
+            strategy="trend_following_v1",
+            status="no_valid_strategy",
+            is_best=False,
+        )
+
+        processed = await repos.strategy_symbol_validations.get_processed_symbols(
+            batch_id=batch_id
+        )
+
+        assert "INTERRUPTED/USDT" not in processed
+
+    async def test_symbol_with_final_best_row_is_processed(self, repos) -> None:
+        """Test 2: eine gueltige finale Row mit is_best_for_symbol=True
+        -> Symbol wird als processed erkannt."""
+        batch_id = f"tr-{uuid4().hex[:16]}"
+        await self._upsert(
+            repos,
+            batch_id=batch_id,
+            symbol="FINISHED/USDT",
+            strategy="mean_reversion_v1",
+            status="no_valid_strategy",
+            is_best=True,
+        )
+
+        processed = await repos.strategy_symbol_validations.get_processed_symbols(
+            batch_id=batch_id
+        )
+
+        assert "FINISHED/USDT" in processed
+
+    async def test_multiple_candidates_without_final_row_not_processed(self, repos) -> None:
+        """Test 3: mehrere Candidate-Rows, aber keine finale Row ->
+        Symbol wird erneut verarbeitet (nicht in processed)."""
+        batch_id = f"tr-{uuid4().hex[:16]}"
+        for strategy in [
+            "mean_reversion_v1",
+            "trend_following_v1",
+            "breakout_v1",
+            "momentum_v1",
+        ]:
+            await self._upsert(
+                repos,
+                batch_id=batch_id,
+                symbol="MULTI_CANDIDATE/USDT",
+                strategy=strategy,
+                status="no_valid_strategy",
+                is_best=False,
+            )
+
+        processed = await repos.strategy_symbol_validations.get_processed_symbols(
+            batch_id=batch_id
+        )
+
+        assert "MULTI_CANDIDATE/USDT" not in processed
+
+    async def test_batch_interrupted_mid_strategy_evaluation_reprocesses_symbol(
+        self, repos
+    ) -> None:
+        """Test 4: simuliert einen mitten in der Strategie-Evaluation
+        abgebrochenen Batch (SIGTERM/SIGKILL) - ein Symbol mit
+        Candidate-Rows fuer 2 von 5 Strategien (Prozess starb vor dem
+        Rest UND vor der finalen Row) muss beim Resume erneut
+        VOLLSTAENDIG verarbeitet werden (nicht in get_processed_symbols())."""
+        batch_id = f"tr-{uuid4().hex[:16]}"
+        await self._upsert(
+            repos,
+            batch_id=batch_id,
+            symbol="KILLED_MIDWAY/USDT",
+            strategy="mean_reversion_v1",
+            status="no_valid_strategy",
+            is_best=False,
+        )
+        await self._upsert(
+            repos,
+            batch_id=batch_id,
+            symbol="KILLED_MIDWAY/USDT",
+            strategy="trend_following_v1",
+            status="no_valid_strategy",
+            is_best=False,
+        )
+        # Prozess stirbt hier - breakout_v1/momentum_v1/volatility_
+        # adjusted_momentum_v1 wurden nie evaluiert, die finale Row nie
+        # geschrieben.
+
+        processed = await repos.strategy_symbol_validations.get_processed_symbols(
+            batch_id=batch_id
+        )
+
+        assert "KILLED_MIDWAY/USDT" not in processed
+
+    async def test_fully_completed_symbol_is_skipped_on_resume(self, repos) -> None:
+        """Test 5: ein vollstaendig abgeschlossenes Symbol (Candidate-
+        Rows + finale Row) wird bei einem Resume NICHT erneut
+        verarbeitet."""
+        batch_id = f"tr-{uuid4().hex[:16]}"
+        await self._upsert(
+            repos,
+            batch_id=batch_id,
+            symbol="COMPLETE/USDT",
+            strategy="mean_reversion_v1",
+            status="no_valid_strategy",
+            is_best=False,
+        )
+        await self._upsert(
+            repos,
+            batch_id=batch_id,
+            symbol="COMPLETE/USDT",
+            strategy="trend_following_v1",
+            status="no_valid_strategy",
+            is_best=False,
+        )
+        # Finale Row - der Runner markiert die Gewinner-Strategie explizit.
+        await self._upsert(
+            repos,
+            batch_id=batch_id,
+            symbol="COMPLETE/USDT",
+            strategy="trend_following_v1",
+            status="no_valid_strategy",
+            is_best=True,
+        )
+
+        processed = await repos.strategy_symbol_validations.get_processed_symbols(
+            batch_id=batch_id
+        )
+
+        assert "COMPLETE/USDT" in processed
+
+    async def test_rerunning_a_completed_batch_creates_no_duplicate_final_rows(
+        self, repos
+    ) -> None:
+        """Test 6: ein erneuter upsert() fuer dieselbe (symbol, exchange,
+        timeframe, strategy, batch_id)-Kombination (z.B. weil ein
+        vollstaendig abgeschlossener Batch versehentlich erneut
+        angestossen wird) darf wegen des UNIQUE-Constraints +
+        ON CONFLICT DO UPDATE kein Duplikat erzeugen, nur die bestehende
+        Row aktualisieren."""
+        batch_id = f"tr-{uuid4().hex[:16]}"
+        await self._upsert(
+            repos,
+            batch_id=batch_id,
+            symbol="RERUN/USDT",
+            strategy="trend_following_v1",
+            status="no_valid_strategy",
+            is_best=True,
+        )
+        # Identischer Aufruf ein zweites Mal (simuliert Rerun eines
+        # bereits abgeschlossenen Batches fuer dasselbe Symbol).
+        await self._upsert(
+            repos,
+            batch_id=batch_id,
+            symbol="RERUN/USDT",
+            strategy="trend_following_v1",
+            status="no_valid_strategy",
+            is_best=True,
+        )
+
+        rows = await repos.strategy_symbol_validations.get_by_symbol(
+            symbol="RERUN/USDT", exchange="binance", timeframe="1h", batch_id=batch_id
+        )
+
+        assert len(rows) == 1

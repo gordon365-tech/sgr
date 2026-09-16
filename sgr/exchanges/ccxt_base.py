@@ -781,6 +781,36 @@ class CCXTBaseAdapter:
             submitted_at=now,
             filled_at=now,
             trading_mode=TradingMode.PAPER,
+            # BUG (Post-Live-Verifikation, 2026-09-15): vorher wurde hier
+            # KEIN raw_response gesetzt (Default {} aus OrderResult).
+            # PortfolioEngine._infer_side() liest raw_response.get("side")
+            # und faellt bei leerem Dict IMMER auf Side.BUY zurueck -
+            # jede Paper-SHORT-Position wurde dadurch strukturell als
+            # PositionSide.LONG gespeichert (Cash-Buchung, PnL-Vorzeichen
+            # in update_prices(), und der is_closing-Vergleich in
+            # _update_position() waren dadurch fuer echte Shorts falsch;
+            # _update_position() hat zudem keinen else-Zweig - ein
+            # schliessender Fill wurde bei is_closing=False komplett
+            # stillschweigend verworfen). Live per Log bestaetigt:
+            # "portfolio.position_opened" zeigte "side": "long" fuer
+            # einen bestaetigten SELL/short-Trade (BTC/USDT, FET/USDT,
+            # u.a., 2026-09-15 14:17-14:23 UTC).
+            # Fix: raw_response so befuellen wie der echte ccxt-Pfad
+            # (_parse_order_result(), raw_response=raw mit ccxt's realem
+            # Order-Dict, das ebenfalls ein "side"-Feld in genau dieser
+            # Form traegt) - _infer_side() liest denselben Schluessel,
+            # unabhaengig davon ob Paper oder Live.
+            raw_response={
+                "id": f"PAPER-{order.id}",
+                "status": "closed",
+                "side": order.side.value,
+                "symbol": str(order.symbol),
+                "amount": str(order.quantity),
+                "filled": str(order.quantity),
+                "average": str(fill_price),
+                "price": str(fill_price),
+                "fee": {"cost": str(fees), "currency": "USDT"},
+            },
         )
 
     @_retryable_exchange_call(max_attempts=3)

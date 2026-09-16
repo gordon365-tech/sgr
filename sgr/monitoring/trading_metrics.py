@@ -33,6 +33,14 @@ Metrics Categories:
    - trading_cycles_total
    - trading_cycles_failed_total
    - trading_cycles_duration_seconds
+
+6. STRATEGY SYMBOL VALIDATION METRICS (Autonomous-Strategy-Universe-Rollout)
+   - strategy_validation_total
+   - strategy_active_total
+   - strategy_avg_score / strategy_avg_sharpe / strategy_avg_return_pct /
+     strategy_avg_drawdown_pct
+   - strategy_universe_symbols_total
+   - strategy_validation_duration_seconds
 """
 
 from __future__ import annotations
@@ -264,6 +272,75 @@ trading_cycles_duration_seconds = Histogram(
 
 
 # =============================================================================
+# STRATEGY SYMBOL VALIDATION METRICS
+# =============================================================================
+# Autonomous-Strategy-Universe-Rollout (sgr/strategy/symbol_validation_runner.py):
+# das Ergebnis der Backtest+Walk-Forward-Validierung fuer JEDES Symbol im
+# dynamisch entdeckten Asset Universe (bis zu ~900+ Symbole). BEWUSST
+# KEIN "symbol"-Label auf irgendeiner dieser Metriken - das waere
+# genau die in der Task-Vorgabe explizit verbotene Kardinalitaets-
+# Explosion (900+ Symbole x 5 Strategien x mehrere Metriken = zehn-
+# tausende Zeitreihen). "strategy" (< 10 registrierte Strategien) und
+# "status" (6 feste Werte, siehe SymbolValidationStatus) bleiben
+# niedrig-kardinal. Detaillierte Pro-Symbol-Ergebnisse liegen
+# ausschliesslich in strategy_symbol_validations (Postgres, siehe
+# StrategySymbolValidationRepository) - dafuer siehe die
+# /api/v1/strategy-validation/* Read-Endpoints.
+
+# Counter: Validierungslaeufe pro (Symbol, Strategie)-Paar
+strategy_validation_total = Counter(
+    "sgr_strategy_validation_total",
+    "Total per-symbol strategy validation attempts",
+    ["status", "strategy", "tenant"],
+)
+
+# Gauge: aktuell ACTIVE Symbole pro Strategie (letzter abgeschlossener Batch)
+strategy_active_total = Gauge(
+    "sgr_strategy_active_total",
+    "Number of symbols where this strategy is the validated, active choice",
+    ["strategy", "tenant"],
+)
+
+# Gauge: Durchschnittswerte ueber alle ACTIVE Symbole dieser Strategie
+strategy_avg_score = Gauge(
+    "sgr_strategy_avg_score",
+    "Average composite score across ACTIVE symbols for this strategy",
+    ["strategy", "tenant"],
+)
+strategy_avg_sharpe = Gauge(
+    "sgr_strategy_avg_sharpe",
+    "Average Sharpe ratio across ACTIVE symbols for this strategy",
+    ["strategy", "tenant"],
+)
+strategy_avg_return_pct = Gauge(
+    "sgr_strategy_avg_return_pct",
+    "Average total return percent across ACTIVE symbols for this strategy",
+    ["strategy", "tenant"],
+)
+strategy_avg_drawdown_pct = Gauge(
+    "sgr_strategy_avg_drawdown_pct",
+    "Average max drawdown percent across ACTIVE symbols for this strategy",
+    ["strategy", "tenant"],
+)
+
+# Gauge: Gesamtzusammenfassung des letzten Batches (fuer Grafana-
+# Uebersichts-Panels - Phase 16 "Total/Validated/Active/... Symbols")
+strategy_universe_symbols_total = Gauge(
+    "sgr_strategy_universe_symbols_total",
+    "Number of symbols in the last completed universe validation batch, by outcome status",
+    ["status", "tenant"],
+)
+
+# Histogram: Dauer eines einzelnen (Symbol, Strategie)-Validierungslaufs
+strategy_validation_duration_seconds = Histogram(
+    "sgr_strategy_validation_duration_seconds",
+    "Time to run backtest + walk-forward validation for one (symbol, strategy) pair",
+    ["tenant"],
+    buckets=(0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, float("inf")),
+)
+
+
+# =============================================================================
 # WORKER LIVENESS (Grafana-Observability-Audit: "Worker Health / Heartbeat"
 # aus dem Dashboard-Anforderungskatalog hatte bisher KEINE Entsprechung im
 # Code - sgr-worker exponiert bewusst keinen eigenen HTTP-Port (siehe
@@ -401,3 +478,63 @@ def record_trading_cycle_complete(
         symbol=symbol,
         tenant=tenant_id,
     ).observe(duration_seconds)
+
+
+def record_strategy_validation(status: str, strategy: str) -> None:
+    """Record one per-symbol strategy validation outcome. Called once
+    per (symbol, strategy) attempt from
+    SymbolStrategyValidationRunner - siehe Modul-Docstring oben fuer
+    die bewusste Kardinalitaets-Begrenzung (kein Symbol-Label)."""
+    strategy_validation_total.labels(
+        status=status,
+        strategy=strategy,
+        tenant=_resolve_tenant_id(),
+    ).inc()
+
+
+def record_strategy_validation_duration(duration_seconds: float) -> None:
+    """Record wall-clock time for one (symbol, strategy) backtest +
+    walk-forward validation run."""
+    strategy_validation_duration_seconds.labels(tenant=_resolve_tenant_id()).observe(
+        duration_seconds
+    )
+
+
+def record_strategy_universe_summary(
+    status_counts: dict[str, int],
+    strategy_distribution: dict[str, int],
+    avg_metrics_by_strategy: dict[str, dict[str, float]],
+) -> None:
+    """
+    Setzt die Aggregat-Gauges fuer den zuletzt abgeschlossenen Batch
+    (siehe sgr/strategy/symbol_validation_runner.py BatchSummary).
+    Ersetzt den vorherigen Batch-Stand vollstaendig (set(), nicht inc())
+    - ein neuer Batch-Lauf soll die vorherigen Zahlen ueberschreiben,
+    nicht aufaddieren.
+
+    status_counts: {status_value: count} ueber ALLE Symbole des Batches.
+    strategy_distribution: {strategy_name: count} unter den ACTIVE-Symbolen.
+    avg_metrics_by_strategy: {strategy_name: {"score":, "sharpe":,
+        "return_pct":, "drawdown_pct":}} - Durchschnitt ueber die
+        ACTIVE-Symbole dieser Strategie.
+    """
+    tenant_id = _resolve_tenant_id()
+    for status, count in status_counts.items():
+        strategy_universe_symbols_total.labels(status=status, tenant=tenant_id).set(count)
+
+    for strategy, count in strategy_distribution.items():
+        strategy_active_total.labels(strategy=strategy, tenant=tenant_id).set(count)
+
+    for strategy, metrics in avg_metrics_by_strategy.items():
+        strategy_avg_score.labels(strategy=strategy, tenant=tenant_id).set(
+            metrics.get("score", 0.0)
+        )
+        strategy_avg_sharpe.labels(strategy=strategy, tenant=tenant_id).set(
+            metrics.get("sharpe", 0.0)
+        )
+        strategy_avg_return_pct.labels(strategy=strategy, tenant=tenant_id).set(
+            metrics.get("return_pct", 0.0)
+        )
+        strategy_avg_drawdown_pct.labels(strategy=strategy, tenant=tenant_id).set(
+            metrics.get("drawdown_pct", 0.0)
+        )

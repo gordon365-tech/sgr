@@ -403,6 +403,15 @@ async def lifespan(app: FastAPI, role: LifespanRole = "worker") -> AsyncIterator
 
         risk_engine = RiskEngine(config.trading_mode)
         await risk_engine.initialize()
+        # BUG-FIX (Produktions-Audit 2026-09-16): inject_redis() existierte
+        # bereits (RiskEngine + intern KillSwitch), wurde aber nie von hier
+        # aus aufgerufen - /health/trading und die Risk-API-Router lasen
+        # daher dauerhaft "unknown" statt des echten, im Worker-Prozess
+        # korrekten Kill-Switch-/Risk-Zustands (siehe RiskEngine.inject_redis
+        # Docstring fuer den vollen Befund). feature_store.redis_client ist
+        # an dieser Stelle bereits initialisiert (siehe oben, Schritt 3).
+        if feature_store.redis_client is not None:
+            risk_engine.inject_redis(feature_store.redis_client)
         app.state.risk_engine = risk_engine
 
         # 7. Portfolio Engine
@@ -418,8 +427,11 @@ async def lifespan(app: FastAPI, role: LifespanRole = "worker") -> AsyncIterator
 
         # 8. Strategy Engine
         # Strategien registrieren (Import triggert @register Decorator)
+        import sgr.strategy.breakout  # noqa: F401
         import sgr.strategy.mean_reversion  # noqa: F401
+        import sgr.strategy.momentum  # noqa: F401
         import sgr.strategy.trend_following  # noqa: F401
+        import sgr.strategy.volatility_adjusted_momentum  # noqa: F401
         from sgr.strategy.engine import StrategyEngine
         from sgr.strategy.registry import StrategyRegistry
 
@@ -642,15 +654,24 @@ async def lifespan(app: FastAPI, role: LifespanRole = "worker") -> AsyncIterator
         # 12. Asset Universe Engine (Market Discovery, siehe
         # sgr/market_data/asset_universe.py Modul-Docstring): periodisch
         # (Default alle 6h, sofortiger erster Lauf) welche Maerkte auf
-        # Binance/Pionex tatsaechlich existieren, getrennt von der Frage,
-        # was SGR gerade tatsaechlich handelt (LIVE_MARKET_DATA_SYMBOLS
-        # bleibt die alleinige Quelle fuer "was bekommt Candle-Feeds" -
-        # Discovery darf das NIEMALS automatisch erweitern, siehe
-        # Modul-Docstring "Discovery darf Paper Trading nicht
-        # gefaehrden"). Fuettert Grafanas $symbol-Variable, die vorher
-        # leer war, solange keine Position offen war (label_values() auf
-        # sgr_position_size statt auf dieser neuen, positions-
-        # unabhaengigen Metrik).
+        # Binance/Pionex tatsaechlich existieren.
+        #
+        # Autonomous-Paper-Trading-Rollout (Aenderung ggue. der
+        # urspruenglichen, bewusst konservativen Fassung): vorher fuetterte
+        # dieser Engine NUR Grafanas $symbol-Variable, LIVE_MARKET_DATA_
+        # SYMBOLS blieb die alleinige, statische Quelle fuer Candle-Feeds.
+        # Jetzt (explizite Anweisung: "alle 922 relevanten Symbole
+        # analysieren, keine kuenstliche Reduzierung auf die bereits
+        # bestehenden Subscriptions") treibt der on_discovery-Callback
+        # unten zusaetzlich MarketDataEngine.reconcile_subscriptions() an -
+        # jeder Markt, der die TRADABLE-Kaskade erreicht, bekommt
+        # automatisch einen echten 1h-Feed. LIVE_MARKET_DATA_SYMBOLS bleibt
+        # das Sicherheitsnetz (siehe AssetUniverseEngine.__init__-
+        # Docstring), nicht mehr die Obergrenze. Trading-Subscription
+        # (Candle-Feed) und Trading-AKTIVIERUNG (validierte, aktivierte
+        # Strategie) bleiben weiterhin getrennt (siehe Schritt 8 oben,
+        # StrategyRegistry.get_active()) - ein neu subscribed-tes Symbol
+        # loest fuer sich allein noch keinen Trade aus.
         from sgr.market_data.asset_universe import AssetUniverseEngine
 
         binance_adapter = None
@@ -658,6 +679,45 @@ async def lifespan(app: FastAPI, role: LifespanRole = "worker") -> AsyncIterator
             binance_adapter = pool.get(ExchangeID.BINANCE, config.trading_mode)
         except KeyError:
             log.info("asset_universe.binance_adapter_unavailable")
+
+        async def _on_asset_universe_discovery(subscribed: dict[ExchangeID, set[str]]) -> None:
+            # binance_symbols kommt aus AssetUniverseEngine/MarketInfo.symbol
+            # in der settle-freien kanonischen Form ("PONKE/USDT", siehe
+            # Symbol.ccxt_symbol - dieselbe Form, die auch das Grafana
+            # $symbol-Filter und alle Position-Metriken nutzen).
+            #
+            # BUG (live am Server gefunden, Autonomous-Paper-Trading-
+            # Rollout): ccxt laedt fuer Binance USDT-M Perpetuals einen
+            # EIGENEN Markt-Key MIT Settle-Suffix ("PONKE/USDT:USDT"). Fuer
+            # Coins ohne Spot-Listing existiert die settle-freie Form
+            # ueberhaupt nicht -> reconcile_subscriptions() schlaegt fehl
+            # ("does not have market symbol"). Fuer Coins MIT zusaetzlichem
+            # Spot-Listing (z.B. ACH, ZEC) existiert die settle-freie Form
+            # SEHR WOHL, referenziert dann aber den SPOT-Markt statt des
+            # beabsichtigten Perpetual-Markts - ein stiller Wechsel auf
+            # falsche (Spot- statt Future-)Preisdaten fuer ein als "swap"
+            # klassifiziertes Symbol. Empirisch verifiziert per
+            # ccxt.binance({'options': {'defaultType': 'future'}}).markets:
+            # "ACH/USDT" UND "ACH/USDT:USDT" existieren beide parallel.
+            #
+            # Fix: exakt dieselbe volle ccxt-Futures-Form wie im
+            # urspruenglichen LIVE_MARKET_DATA_SYMBOLS (":USDT"-Suffix)
+            # herstellen, BEVOR an reconcile_subscriptions() uebergeben
+            # wird. Sicher, weil AssetUniverseEngine's Binance-Zweig
+            # ausschliesslich USDT-quotierte "swap"-Maerkte klassifiziert
+            # (siehe classify_asset_status: quote_asset != "USDT" und
+            # market_type != expected_market_type scheitern beide vorher).
+            # MarketInfo.symbol/das Grafana $symbol-Label bleiben bewusst
+            # UNVERAENDERT in der settle-freien Form - nur der tatsaechliche
+            # Exchange-Aufruf braucht die volle Form.
+            binance_symbols = subscribed.get(ExchangeID.BINANCE, set())
+            target = {(f"{symbol}:USDT", "1h") for symbol in binance_symbols}
+            # Bestehende Zusatz-Subscription (BTC/USDT auf 4h) erhalten,
+            # siehe urspruengliche LIVE_MARKET_DATA_SYMBOLS-Subscription-
+            # Schleife weiter oben in dieser Funktion.
+            if "BTC/USDT" in binance_symbols:
+                target.add(("BTC/USDT:USDT", "4h"))
+            await md_engine.reconcile_subscriptions(target, ExchangeID.BINANCE)
 
         asset_universe_engine = AssetUniverseEngine(
             binance_adapter=binance_adapter,
@@ -670,6 +730,7 @@ async def lifespan(app: FastAPI, role: LifespanRole = "worker") -> AsyncIterator
                 # SUBSCRIBED-Abgleich tatsaechlich greift.
                 ExchangeID.BINANCE: {s.split(":")[0] for s in LIVE_MARKET_DATA_SYMBOLS},
             },
+            on_discovery=_on_asset_universe_discovery,
         )
         await asset_universe_engine.start()
         app.state.asset_universe_engine = asset_universe_engine
@@ -797,6 +858,7 @@ def create_app() -> FastAPI:
         reconciliation,
         risk,
         strategy,
+        strategy_validation,
         system,
         trading,
         websocket,
@@ -808,6 +870,11 @@ def create_app() -> FastAPI:
     app.include_router(portfolio.router, prefix="/api/v1/portfolio", tags=["portfolio"])
     app.include_router(risk.router, prefix="/api/v1/risk", tags=["risk"])
     app.include_router(strategy.router, prefix="/api/v1/strategy", tags=["strategy"])
+    app.include_router(
+        strategy_validation.router,
+        prefix="/api/v1/strategy-validation",
+        tags=["strategy-validation"],
+    )
     app.include_router(orders.router, prefix="/api/v1/orders", tags=["orders"])
     app.include_router(system.router, prefix="/api/v1/system", tags=["system"])
     app.include_router(trading.router, prefix="/api/v1/trading", tags=["trading"])

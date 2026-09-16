@@ -157,12 +157,26 @@ class TestDashboardJsonStructure:
 
 class TestDashboardIsFocusedNotBloated:
     """Anforderung: EIN uebersichtliches Dashboard, keine 30-40 kleinen
-    Panels (siehe Task-Vorgabe 'Grafana Design')."""
+    Panels (siehe Task-Vorgabe 'Grafana Design').
+
+    Budget bewusst von <=20 auf <=26 (Autonomous-Paper-Trading-Rollout,
+    Abschnitt 'Grafana') und weiter auf <=34 (Autonomous-Strategy-
+    Universe-Rollout, Phase 16 'Grafana') angehoben: die Task-Vorgabe
+    verlangt explizit zusaetzliche Sichtbarkeit - zuerst fuer den
+    autonomen Betrieb (aktiv analysierte Symbole, Marktregime, aktive
+    Strategie, generierte/abgelehnte Signale, durch Risk blockierte
+    Signale, Paper Orders, realisierter/unrealisierter PnL - Reihe
+    "Autonomous Trading Engine"), danach fuer die 900+-Symbol-
+    Strategievalidierung (Total/Validated/Active/No-Valid-Strategy/
+    Data-Insufficient/Success-Rate, Best-Strategy-Distribution,
+    Avg-Sharpe/Return/Drawdown je Strategie - Reihe "Strategy Universe
+    Validation"). Kein pauschales Aufweichen - jede neue Reihe deckt
+    genau die dafuer geforderten Punkte ab, nicht mehr."""
 
     def test_content_panel_count_is_reasonable(self, dashboard: dict) -> None:
         content_panels = _all_panels(dashboard)
-        assert 0 < len(content_panels) <= 20, (
-            f"Expected a focused dashboard (<=20 content panels), got {len(content_panels)}"
+        assert 0 < len(content_panels) <= 34, (
+            f"Expected a focused dashboard (<=34 content panels), got {len(content_panels)}"
         )
 
     def test_no_duplicate_panel_titles(self, dashboard: dict) -> None:

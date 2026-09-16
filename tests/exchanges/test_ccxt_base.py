@@ -867,6 +867,28 @@ class TestOrderManagement:
         result = await adapter.place_order(req)
         assert result.average_fill_price < Decimal("64900.0")  # sell: bid - slippage
 
+    async def test_simulate_order_raw_response_carries_true_side(self, adapter, monkeypatch):
+        """Regression test (Post-Live-Verifikation, 2026-09-15): eine
+        SELL-Paper-Order muss raw_response["side"] == "sell" tragen -
+        PortfolioEngine._infer_side() liest genau dieses Feld, um zu
+        entscheiden, ob eine Position als LONG oder SHORT gespeichert
+        wird. Vorher lieferte _simulate_order() KEIN raw_response
+        (Default {}), wodurch _infer_side() jede Paper-Position
+        strukturell als LONG behandelte, unabhaengig vom echten Signal -
+        live bestaetigt (BTC/USDT, FET/USDT u.a., 2026-09-15 14:17-14:23
+        UTC: "portfolio.position_opened" zeigte "side": "long" fuer
+        einen SELL/short-Trade)."""
+        install_fake_ccxt(monkeypatch)
+        await adapter.connect()
+
+        sell_req = make_order_request(side=Side.SELL, trading_mode=TradingMode.PAPER)
+        sell_result = await adapter.place_order(sell_req)
+        assert sell_result.raw_response["side"] == "sell"
+
+        buy_req = make_order_request(side=Side.BUY, trading_mode=TradingMode.PAPER)
+        buy_result = await adapter.place_order(buy_req)
+        assert buy_result.raw_response["side"] == "buy"
+
     async def test_simulate_order_ticker_failure_uses_limit_price_fallback(
         self, adapter, monkeypatch
     ):

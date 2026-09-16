@@ -55,6 +55,7 @@ from sgr.core.types import (
     RiskDecision,
     RiskMetrics,
     Signal,
+    SignalDirection,
     TradingMode,
 )
 from sgr.monitoring.trading_metrics import record_risk_rejection
@@ -129,8 +130,25 @@ class RiskEngine:
         Injiziert einen Redis-Client fuer die Cross-Prozess-Sichtbarkeit
         der RiskMetrics (sgr-api Read-Only-Zugriff). Optional - ohne
         Aufruf verhaelt sich die Engine exakt wie zuvor (kein Redis-Write).
+
+        BUG-FIX (Produktions-Audit 2026-09-16): dieser Call wurde bisher
+        NIRGENDS aus main.py heraus aufgerufen - weder fuer die RiskEngine
+        selbst noch fuer ihren internen KillSwitch (self._kill_switch hat
+        ein eigenes, separates inject_redis(), siehe kill_switch.py).
+        Konsequenz, live am Server verifiziert: /health/trading meldete
+        dauerhaft kill_switch_active="unknown", obwohl der Kill Switch im
+        Worker-Prozess korrekt und sicherheitsrelevant AKTIV war (Grund:
+        "Open positions 10 exceeds max 10") - der In-Memory-Zustand war
+        jederzeit korrekt und hat Trades weiterhin richtig blockiert, nur
+        die Cross-Prozess-Sichtbarkeit (Redis, von /health/trading und den
+        API-Routern gelesen) blieb leer. Dieser Fix injiziert den Redis-
+        Client hier IMMER auch in den intern bereits vorhandenen
+        KillSwitch mit, damit ein einziger inject_redis()-Aufruf in
+        main.py beide Mechanismen aktiviert, statt zwei separate Call-
+        Sites zu benoetigen.
         """
         self._redis = redis_client
+        self._kill_switch.inject_redis(redis_client)
 
     # ------------------------------------------------------------------
     # Main Entry Point
@@ -230,6 +248,32 @@ class RiskEngine:
                 f"{signal.symbol.ccxt_symbol}/{signal.strategy_name}",
                 portfolio_value,
             )
+
+        # 1c. Doppelte Position auf demselben Symbol verhindern (Task-
+        # Vorgabe "Keine Strategieblindheit": mehrfaches Oeffnen derselben
+        # Position, mehrfaches Risiko auf demselben Asset, gleichzeitige
+        # gegensaetzliche Positionen ohne explizite Unterstuetzung).
+        #
+        # Root-Cause-Fund: TradingStrategy.generate_signal() darf laut
+        # Protokoll (sgr/strategy/base.py) nicht wissen, ob bereits eine
+        # Position offen ist ("das macht Strategy Engine", so der
+        # Docstring dort) - StrategyEngine.process() pruefte das aber
+        # tatsaechlich nie, RiskEngine (die "letzte Instanz", siehe
+        # Task-Vorgabe) erhaelt open_positions bereits als Parameter,
+        # nutzte es bisher nur fuer Heat/Leverage/Korrelations-Aggregate,
+        # nie fuer eine Pro-Symbol-Dopplungspruefung. Nur LONG/SHORT
+        # (neue/zusaetzliche Exposure) werden blockiert - ein CLOSE-Signal
+        # auf ein bestehendes Symbol muss immer durchkommen, sonst waere
+        # keine Positionsreduktion mehr moeglich.
+        if signal.direction in (SignalDirection.LONG, SignalDirection.SHORT):
+            existing_symbols = {str(p.symbol) for p in open_positions}
+            if str(signal.symbol) in existing_symbols:
+                return self._reject(
+                    signal.id,
+                    f"Position already open for {signal.symbol.ccxt_symbol} - "
+                    f"avoid pyramiding/opposite exposure without explicit support",
+                    portfolio_value,
+                )
 
         # 2. Portfolio Metriken berechnen
         metrics = self._compute_metrics(portfolio_value, open_positions)

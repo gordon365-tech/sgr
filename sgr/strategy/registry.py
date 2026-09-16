@@ -309,3 +309,23 @@ class StrategyRegistry:
         self._entries.clear()
         self._strategy_repo = None
         log.warning("strategy_registry.cleared", note="FOR TESTING ONLY")
+
+    def unregister(self, name: str) -> None:
+        """
+        Entfernt EINEN Eintrag vollstaendig (im Unterschied zu
+        deactivate(), das den Eintrag nur inaktiv setzt, aber behaelt).
+
+        Fuer sgr.strategy.parameter_optimizer: eine Parameter-Suche
+        registriert pro Kandidaten-Parametersatz eine temporaere Trial-
+        Instanz unter einem synthetischen Namen (z.B.
+        "mean_reversion_v1__trial_a1b2c3"), backtestet sie ueber den
+        bestehenden BacktestingEngine-Pfad, und muss den Eintrag danach
+        wieder entfernen - sonst wuerde jeder Optimierungslauf (9+
+        Kandidaten pro Strategie, 718 Symbole) die Registry unbegrenzt
+        mit Leichen-Eintraegen anwachsen lassen. clear() ist dafuer nicht
+        geeignet (loescht ALLE Strategien, auch die echten produktiven).
+
+        Kein Fehler, wenn name nicht existiert (idempotent - ein
+        Cleanup-Aufruf nach einem bereits fehlgeschlagenen Trial darf
+        nicht selbst scheitern)."""
+        self._entries.pop(name, None)

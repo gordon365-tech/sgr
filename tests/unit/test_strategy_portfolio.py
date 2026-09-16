@@ -924,6 +924,127 @@ class TestPortfolioRestoreFromPersistence:
         assert restored == 0
         assert len(engine.positions) == 0
 
+    async def test_restore_debits_cash_for_a_restored_long_position(self) -> None:
+        """Regressionstest (Bug gefunden 2026-09-15, live beobachtet:
+        portfolio_value $9996 -> $14014 nach einem Neustart mit 10
+        offenen Positionen): eine wiederhergestellte LONG-Position muss
+        ihr Entry-Notional vom Cash abziehen, genau wie beim
+        urspruenglichen Open in _open_position() - sonst wird das
+        gebundene Kapital nach jedem Neustart doppelt gezaehlt (einmal
+        als "noch verfuegbares" Cash, einmal als Positionswert)."""
+        repo = _FakePositionRepo()
+        repo._open_rows = [
+            {
+                "id": str(uuid4()),
+                "symbol": "BTC/USDT",
+                "exchange": "binance",
+                "side": "long",
+                "quantity": Decimal("0.5"),
+                "entry_price": Decimal("48000"),
+                "current_price": Decimal("49000"),
+                "leverage": Decimal("1"),
+                "unrealized_pnl": Decimal("500"),
+                "realized_pnl": Decimal("0"),
+                "opened_at": datetime.now(tz=UTC),
+                "closed_at": None,
+                "strategy_name": "trend_following",
+                "trading_mode": "paper",
+                "user_id": None,
+            }
+        ]
+        engine = PortfolioEngine(
+            TradingMode.PAPER, initial_cash=Decimal("10000"), position_repository=repo
+        )
+
+        await engine.restore_from_persistence()
+
+        # 0.5 * 48000 = 24000 Notional wurde beim urspruenglichen Open
+        # bereits gezahlt - Cash muss das jetzt widerspiegeln, nicht den
+        # vollen initial_cash.
+        assert engine._state.cash == Decimal("10000") - Decimal("24000")
+
+    async def test_restore_credits_cash_for_a_restored_short_position(self) -> None:
+        """Symmetrischer Fall: SHORT erhielt beim Open den Verkaufserloes
+        gutgeschrieben - muss beim Restore ebenfalls gutgeschrieben
+        werden, nicht ignoriert."""
+        repo = _FakePositionRepo()
+        repo._open_rows = [
+            {
+                "id": str(uuid4()),
+                "symbol": "BTC/USDT",
+                "exchange": "binance",
+                "side": "short",
+                "quantity": Decimal("0.5"),
+                "entry_price": Decimal("48000"),
+                "current_price": Decimal("47000"),
+                "leverage": Decimal("1"),
+                "unrealized_pnl": Decimal("500"),
+                "realized_pnl": Decimal("0"),
+                "opened_at": datetime.now(tz=UTC),
+                "closed_at": None,
+                "strategy_name": "trend_following",
+                "trading_mode": "paper",
+                "user_id": None,
+            }
+        ]
+        engine = PortfolioEngine(
+            TradingMode.PAPER, initial_cash=Decimal("10000"), position_repository=repo
+        )
+
+        await engine.restore_from_persistence()
+
+        assert engine._state.cash == Decimal("10000") + Decimal("24000")
+
+    async def test_restore_of_multiple_positions_does_not_inflate_portfolio_value(self) -> None:
+        """End-to-end Regressionstest fuer den live beobachteten Effekt:
+        portfolio_value nach dem Restore muss cash + Positionswert sein,
+        NICHT initial_cash + Positionswert (die urspruengliche
+        Doppelzaehlung)."""
+        repo = _FakePositionRepo()
+
+        def _row(symbol: str, side: str, qty: str, price: str) -> dict:
+            return {
+                "id": str(uuid4()),
+                "symbol": symbol,
+                "exchange": "binance",
+                "side": side,
+                "quantity": Decimal(qty),
+                "entry_price": Decimal(price),
+                "current_price": Decimal(price),
+                "leverage": Decimal("1"),
+                "unrealized_pnl": Decimal("0"),
+                "realized_pnl": Decimal("0"),
+                "opened_at": datetime.now(tz=UTC),
+                "closed_at": None,
+                "strategy_name": "trend_following",
+                "trading_mode": "paper",
+                "user_id": None,
+            }
+
+        repo._open_rows = [
+            _row("BTC/USDT", "short", "0.01", "50000"),  # 500 notional
+            _row("ETH/USDT", "short", "1", "500"),  # 500 notional
+        ]
+        engine = PortfolioEngine(
+            TradingMode.PAPER, initial_cash=Decimal("10000"), position_repository=repo
+        )
+
+        await engine.restore_from_persistence()
+
+        # Beide SHORT: cash = 10000 + 500 + 500 = 11000 (Verkaufserloes
+        # gutgeschrieben). portfolio_value zieht den Positionswert fuer
+        # SHORT wieder ab (Rueckkaufverbindlichkeit, siehe
+        # PortfolioState.portfolio_value Docstring) -> 11000 - 1000 =
+        # 10000, wirtschaftlich korrekt unveraendert gegenueber
+        # initial_cash (kein Preisunterschied seit Entry). Die Bug-
+        # Symptomatik waere hier portfolio_value = initial_cash(10000) -
+        # 1000 = 9000 (Cash NICHT gutgeschrieben, Positionswert aber
+        # bereits abgezogen) oder je nach Messpunkt eine andere falsche
+        # Zahl - in jedem Fall nicht der wirtschaftlich korrekte,
+        # unveraenderte Wert.
+        assert engine._state.cash == Decimal("11000")
+        assert engine._state.portfolio_value == Decimal("10000")
+
 
 class TestPortfolioPersistenceWriteThrough:
     async def test_open_position_persists_when_repo_injected(self) -> None:

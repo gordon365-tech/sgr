@@ -727,7 +727,7 @@ class TestStartStop:
         await engine.start()
         await engine.stop()
         assert engine.is_running is False
-        assert engine._tasks == []
+        assert engine._tasks == {}
         assert store.closed is True
 
     async def test_stop_without_start_is_safe(self):

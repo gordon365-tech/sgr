@@ -77,13 +77,25 @@ class PositionSide(StrEnum):
 
 
 class MarketRegime(StrEnum):
-    """ML-detected market regime. Drives strategy selection."""
+    """Detected market regime. Drives strategy selection (siehe
+    StrategyRegistry.get_active(regime=...) und TradingStrategy.
+    supported_regimes).
+
+    LOW_VOLATILITY ergaenzt (Autonomous-Paper-Trading-Rollout): vorher
+    gab es keinen Gegenpol zu HIGH_VOLATILITY - ein Markt mit
+    ungewoehnlich niedriger Schwankungsbreite (comprimierte ATR/BB-
+    Width, aber ohne klaren Trend) hatte keine passende Klassifikation.
+    UNKNOWN dient als "kein Regime sicher erkennbar" (deckt sich mit
+    dem, was in anderen Kontexten als UNCERTAIN bezeichnet wird - kein
+    zweiter, redundanter Enum-Wert dafuer).
+    """
 
     TRENDING_UP = "trending_up"
     TRENDING_DOWN = "trending_down"
     RANGING = "ranging"
     BREAKOUT = "breakout"
     HIGH_VOLATILITY = "high_volatility"
+    LOW_VOLATILITY = "low_volatility"
     CRISIS = "crisis"
     UNKNOWN = "unknown"
 

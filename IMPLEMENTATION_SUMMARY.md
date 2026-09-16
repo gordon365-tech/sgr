@@ -358,3 +358,20 @@ For questions about this implementation:
 **Date:** September 2024  
 **Version:** 0.1.0  
 **Status:** ✅ PRODUCTION-READY
+
+---
+
+## Update 2026-09-16: Production Audit & Regime-Dominance Validation (Variante E)
+
+Ein vollständiger Ist-Zustand-Audit des laufenden Produktions-Stacks (nicht nur Code-Review) ergab:
+
+**Market Data Pipeline:** Der ursprünglich vermutete "kein DB-First-Pfad"-Befund traf auf den tatsächlichen Code **nicht mehr zu** — `BacktestDataLoader` und `SymbolFeed`/`MarketDataEngine` implementieren bereits korrekt DB-First mit Exchange-Fallback-und-Persist (`CandleRepository.upsert_batch()` mit `ON CONFLICT DO NOTHING` auf `uq_candle`, `get_latest_timestamp()` für inkrementelles Nachladen). Live verifiziert: Candle-Daten sind aktuell bis zur letzten vollständigen Stunde. Keine Änderung nötig.
+
+**Echte, verifizierte Bugs behoben:**
+- `RiskEngine.inject_redis()` wurde nie aus `main.py` aufgerufen → `/health/trading` meldete dauerhaft `kill_switch_active="unknown"`, obwohl der Kill Switch im Worker-Prozess korrekt aktiv war (Grund: "Open positions 10 exceeds max 10", legitim ausgelöst). In-Memory-Trading-Blockade war jederzeit korrekt; nur die Cross-Prozess-Sichtbarkeit fehlte. Fix: `inject_redis()`-Aufruf in `main.py` ergänzt, propagiert jetzt automatisch auch in den internen `KillSwitch`.
+- Postgres (5432) und Redis (6379) waren an `0.0.0.0` gebunden (öffentlich erreichbar), Redis zusätzlich ohne Auth. Auf `127.0.0.1` beschränkt.
+- Grafana-Admin-Passwort in der laufenden Instanz war gegenüber `.env.prod` veraltet; zurückgesetzt. Verwaister, leerer Zweit-Datasource-Eintrag entfernt.
+
+**Variante E (Preis-Regime-Dominanz-Check) implementiert und ausgeführt** (`scripts/wf_variant_e_regime_dominance.py`), auf allen 91 bereits validierten Kandidaten, mit 3-Tage- und 7-Tage-Chunk-Sensitivität. Ergebnis: 13/91 (3T) bzw. 19/91 (7T) als regime-dominant markiert. TAIKO/USDT bei beiden Chunk-Größen erkannt; TUT/USDT nur teilweise (1 von 2 Strategie-Kandidaten, nur bei 7-Tage-Chunks) — explizit gemischtes, nicht geschöntes Ergebnis. Details: `/tmp/sgr-wf-validation-decision.md`.
+
+**Nicht verändert:** Bestehende Backtest-Gates, Walk-Forward-Schwellen, Order-Safety-Mechanismen (Idempotency, Duplicate Detection, Unknown-State-Handling), Tenant-Isolation. Volle Test-Suite (1819 passed / 35 pre-existing ML-dependency failures, unverändert gegenüber Baseline) erneut verifiziert.

@@ -562,3 +562,9 @@ See [Troubleshooting](#troubleshooting) section above.
 For architecture decisions, see `docs/ADR.md`.
 
 For API reference, see `docs/API.md`.
+
+---
+
+## Update 2026-09-16: Port-Bindung von Postgres/Redis geändert
+
+`docker/docker-compose.prod.yml`: Postgres (5432) und Redis (6379) sind jetzt an `127.0.0.1` statt `0.0.0.0` gebunden (waren zuvor öffentlich ohne bzw. nur passwortgeschützt erreichbar). Admin-/Debug-Zugriff bleibt per SSH auf den Host + `psql`/`redis-cli` möglich; `sgr-api`/Worker erreichen beide Services weiterhin über die internen Docker-Netzwerk-Servicenamen (`postgres`, `redis`), nicht über den Host-Port — kein Anwendungscode betroffen. Bei einem externen DB-Client (z. B. von einem anderen Host) muss stattdessen ein SSH-Tunnel verwendet werden.

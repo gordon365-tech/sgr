@@ -421,6 +421,75 @@ class APIKeyModel(Base):
     )
 
 
+class StrategySymbolValidationModel(Base):
+    """
+    Ergebnis eines Backtest+Walk-Forward-Validierungslaufs fuer EIN
+    (symbol, timeframe, strategy)-Paar - siehe sgr/strategy/
+    symbol_validation_runner.py.
+
+    Getrennt von StrategyModel (das bleibt der globale, strategie-weite
+    Aktivierungs-Gate, siehe StrategyRegistry): eine Strategie kann fuer
+    Symbol A geeignet sein und fuer Symbol B nicht - StrategyModel hat
+    dafuer kein Konzept (nur EIN is_active/is_validated pro
+    Strategie-Name, siehe StrategyEntry). Diese Tabelle ist additiv:
+    sie ersetzt/umgeht StrategyRegistry.mark_validated() nicht, sondern
+    liefert die pro-Symbol-Verfeinerung obendrauf (siehe
+    sgr.strategy.symbol_gate fuer den Production-Read-Pfad).
+
+    status-Werte (siehe sgr.strategy.symbol_validation_runner.
+    SymbolValidationStatus): INSUFFICIENT_DATA, INVALID_DATA,
+    NO_VALID_STRATEGY, VALIDATED_BUT_NOT_ACTIVE, ACTIVE,
+    TECHNICAL_FAILURE.
+    """
+
+    __tablename__ = "strategy_symbol_validations"
+
+    id: Mapped[str] = mapped_column(PG_UUID(as_uuid=False), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(40), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(20), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(10), nullable=False)
+    strategy: Mapped[str] = mapped_column(String(100), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+    # "best" innerhalb der fuer dieses Symbol getesteten Strategien -
+    # nur eine Zeile pro Symbol traegt is_best=True (die Auswahl,
+    # siehe Phase 11 "automatische Strategy Selection").
+    is_best_for_symbol: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    parameters: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    metrics: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    data_quality: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    regime_profile: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    score: Mapped[float | None] = mapped_column(Numeric(precision=10, scale=4))
+    robustness_score: Mapped[float | None] = mapped_column(Numeric(precision=10, scale=4))
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    batch_id: Mapped[str] = mapped_column(String(40), nullable=False)
+    validated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "symbol",
+            "exchange",
+            "timeframe",
+            "strategy",
+            "batch_id",
+            name="uq_strategy_symbol_validation",
+        ),
+        Index("ix_ssv_symbol", "symbol", "exchange", "timeframe"),
+        Index("ix_ssv_status", "status"),
+        Index("ix_ssv_best", "is_best_for_symbol"),
+        Index("ix_ssv_batch", "batch_id"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Engine & Session Factory
 # ---------------------------------------------------------------------------

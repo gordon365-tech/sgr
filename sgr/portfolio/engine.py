@@ -365,10 +365,14 @@ class PortfolioEngine:
         # Fehler hier darf das Schliessen der Position niemals verhindern
         # (Fail-Safe-Prinzip wie ueberall sonst in sgr/monitoring/).
         try:
+            cumulative = sum(
+                (Decimal(t["realized_pnl"]) for t in self._trade_history), Decimal(0)
+            )
             record_trade_executed(
                 side=position.side.value,
                 pnl=realized_pnl,
                 winning=realized_pnl > 0,
+                cumulative_realized_pnl=cumulative,
             )
         except Exception as e:
             log.warning("portfolio.trade_metric_record_failed", error=str(e))
@@ -490,6 +494,31 @@ class PortfolioEngine:
             symbol_key = str(position.symbol)
             self._state._positions[symbol_key] = position
             restored += 1
+
+            # BUG (gefunden 2026-09-15, live beobachtet): diese Methode
+            # restauriert Positionen, aber NIE self._state._cash - das
+            # blieb beim vollen initial_cash, obwohl die wiederhergestellten
+            # Positionen beim urspruenglichen Open bereits Kapital
+            # gebunden (LONG) bzw. freigesetzt (SHORT) hatten. Nach jedem
+            # Worker-Neustart mit offenen Positionen wurde portfolio_value
+            # dadurch um etwa die Summe der Positions-Notionale zu hoch
+            # ausgewiesen (live: $9996 -> $14014 bei 10 offenen Positionen
+            # nach einem Neustart). Symmetrisch zur Cash-Buchung in
+            # _open_position() nachgeholt: LONG zahlte das Entry-Notional
+            # (Cash sinkt), SHORT erhielt es (Cash steigt).
+            #
+            # Bekannte Einschraenkung: die Entry-Fee wird NICHT
+            # nachgebucht - sie ist nicht Teil des positions-Tabellen-
+            # schemas (nur symbol/side/quantity/entry_price/... siehe
+            # PositionModel), es gibt keine persistierte Quelle dafuer.
+            # Der verbleibende Fehler ist dadurch auf die Groessenordnung
+            # der Fee begrenzt (~0.1% des Notionals pro Position), nicht
+            # mehr auf das volle Notional wie zuvor.
+            notional = position.quantity * position.entry_price
+            if position.side == PositionSide.LONG:
+                self._state._cash -= notional
+            else:
+                self._state._cash += notional
 
         self._state.update_peak()
 

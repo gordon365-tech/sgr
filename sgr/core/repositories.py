@@ -35,6 +35,7 @@ from sgr.core.database import (
     PositionModel,
     RiskEventModel,
     StrategyModel,
+    StrategySymbolValidationModel,
     TradeModel,
     UserModel,
     get_session,
@@ -789,6 +790,328 @@ class StrategyRepository:
 
 
 # ---------------------------------------------------------------------------
+# Strategy Symbol Validation Repository
+# ---------------------------------------------------------------------------
+
+
+class StrategySymbolValidationRepository:
+    """
+    Persistenz fuer pro-(symbol, timeframe, strategy)-Validierungsergebnisse
+    - siehe StrategySymbolValidationModel Docstring und
+    sgr/strategy/symbol_validation_runner.py.
+    """
+
+    async def upsert(
+        self,
+        *,
+        symbol: str,
+        exchange: str,
+        timeframe: str,
+        strategy: str,
+        status: str,
+        batch_id: str,
+        parameters: dict[str, Any] | None = None,
+        metrics: dict[str, Any] | None = None,
+        data_quality: dict[str, Any] | None = None,
+        regime_profile: dict[str, Any] | None = None,
+        score: float | None = None,
+        robustness_score: float | None = None,
+        failure_reason: str | None = None,
+        is_best_for_symbol: bool = False,
+    ) -> None:
+        async with get_session() as session:
+            now = datetime.utcnow()
+            values = {
+                "id": str(uuid4()),
+                "symbol": symbol,
+                "exchange": exchange,
+                "timeframe": timeframe,
+                "strategy": strategy,
+                "status": status,
+                "is_best_for_symbol": is_best_for_symbol,
+                "parameters": parameters or {},
+                "metrics": metrics or {},
+                "data_quality": data_quality or {},
+                "regime_profile": regime_profile or {},
+                "score": score,
+                "robustness_score": robustness_score,
+                "failure_reason": failure_reason,
+                "batch_id": batch_id,
+                "validated_at": now,
+            }
+            stmt = pg_insert(StrategySymbolValidationModel).values(**values)
+            update_cols = {k: v for k, v in values.items() if k not in ("id",)}
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["symbol", "exchange", "timeframe", "strategy", "batch_id"],
+                set_=update_cols,
+            )
+            await session.execute(stmt)
+
+    async def clear_best_flag(
+        self, *, symbol: str, exchange: str, timeframe: str, batch_id: str
+    ) -> None:
+        """Setzt is_best_for_symbol fuer alle Zeilen dieses Symbols in
+        diesem Batch auf False, bevor der neue Gewinner markiert wird -
+        stellt sicher, dass hoechstens eine Zeile pro Symbol+Batch
+        is_best_for_symbol=True traegt."""
+        async with get_session() as session:
+            stmt = (
+                update(StrategySymbolValidationModel)
+                .where(
+                    and_(
+                        StrategySymbolValidationModel.symbol == symbol,
+                        StrategySymbolValidationModel.exchange == exchange,
+                        StrategySymbolValidationModel.timeframe == timeframe,
+                        StrategySymbolValidationModel.batch_id == batch_id,
+                    )
+                )
+                .values(is_best_for_symbol=False)
+            )
+            await session.execute(stmt)
+
+    async def get_by_symbol(
+        self, *, symbol: str, exchange: str, timeframe: str, batch_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        async with get_session() as session:
+            conditions = [
+                StrategySymbolValidationModel.symbol == symbol,
+                StrategySymbolValidationModel.exchange == exchange,
+                StrategySymbolValidationModel.timeframe == timeframe,
+            ]
+            if batch_id:
+                conditions.append(StrategySymbolValidationModel.batch_id == batch_id)
+            stmt = (
+                select(StrategySymbolValidationModel)
+                .where(and_(*conditions))
+                .order_by(desc(StrategySymbolValidationModel.validated_at))
+            )
+            result = await session.execute(stmt)
+            return [self._to_dict(r) for r in result.scalars().all()]
+
+    async def get_processed_symbols(self, *, batch_id: str) -> set[str]:
+        """Fuer Resume/Idempotenz (Phase 17): Symbole, die in diesem
+        Batch ein VOLLSTAENDIGES finales Ergebnis haben.
+
+        BUG (gefunden 2026-09-15, live beobachtet): vorher zaehlte JEDE
+        Row mit diesem batch_id als "verarbeitet", unabhaengig von
+        is_best_for_symbol. sgr.strategy.symbol_validation_runner.
+        _validate_symbol() schreibt aber pro Kandidaten-Strategie eine
+        eigene Zwischen-Row (is_best_for_symbol=False), BEVOR am Ende
+        die eine finale "Gewinner"-Row (is_best_for_symbol=True)
+        geschrieben wird. Wird der Prozess dazwischen abgebrochen
+        (SIGTERM/SIGKILL, z.B. bei einer Speicher-bedingten Drosselung
+        der Batch-Parallelitaet), existieren fuer dieses Symbol bereits
+        Candidate-Rows, aber NIE eine finale Row - das alte Verhalten
+        stufte das Symbol trotzdem als "processed" ein und ein Resume
+        hat es dadurch STILLSCHWEIGEND fuer immer uebersprungen. Live
+        beobachtet: 4 von 718 Symbolen (AVA/USDT, QTUM/USDT, SONIC/USDT,
+        MANA/USDT) blieben nach einem absichtlichen SIGTERM ohne
+        finales Ergebnis, bis dies manuell per Row-Loeschung + Rerun
+        korrigiert wurde.
+
+        Jeder der drei Abschluss-Pfade in _validate_symbol() (Data-
+        Quality-Ablehnung, kein Regime-Match, oder die volle Strategie-
+        Schleife) UND der TECHNICAL_FAILURE-Pfad in run_batch() schreiben
+        exakt eine Row mit is_best_for_symbol=True fuer dieses Symbol -
+        das ist damit ein zuverlaessiger Marker fuer "vollstaendig
+        abgeschlossen", unabhaengig vom konkreten Ergebnis (ACTIVE,
+        NO_VALID_STRATEGY, INSUFFICIENT_DATA, INVALID_DATA,
+        TECHNICAL_FAILURE - jeder dieser Endzustaende setzt ihn).
+        Reine Candidate-Rows (Zwischenergebnisse pro Strategie waehrend
+        der Schleife) setzen ihn nie - ein Symbol mit ausschliesslich
+        solchen Rows gilt daher korrekt als NICHT abgeschlossen und wird
+        beim naechsten Resume erneut vollstaendig verarbeitet."""
+        async with get_session() as session:
+            stmt = (
+                select(StrategySymbolValidationModel.symbol)
+                .where(
+                    and_(
+                        StrategySymbolValidationModel.batch_id == batch_id,
+                        StrategySymbolValidationModel.is_best_for_symbol.is_(True),
+                    )
+                )
+                .distinct()
+            )
+            result = await session.execute(stmt)
+            return set(result.scalars().all())
+
+    async def get_best_by_symbol(
+        self, *, batch_id: str | None = None, limit: int = 1000
+    ) -> list[dict[str, Any]]:
+        async with get_session() as session:
+            conditions = [StrategySymbolValidationModel.is_best_for_symbol.is_(True)]
+            if batch_id:
+                conditions.append(StrategySymbolValidationModel.batch_id == batch_id)
+            stmt = (
+                select(StrategySymbolValidationModel)
+                .where(and_(*conditions))
+                .order_by(desc(StrategySymbolValidationModel.score))
+                .limit(limit)
+            )
+            result = await session.execute(stmt)
+            return [self._to_dict(r) for r in result.scalars().all()]
+
+    async def get_active(self, *, batch_id: str | None = None) -> list[dict[str, Any]]:
+        async with get_session() as session:
+            conditions = [StrategySymbolValidationModel.status == "active"]
+            if batch_id:
+                conditions.append(StrategySymbolValidationModel.batch_id == batch_id)
+            stmt = select(StrategySymbolValidationModel).where(and_(*conditions))
+            result = await session.execute(stmt)
+            return [self._to_dict(r) for r in result.scalars().all()]
+
+    async def get_active_for_symbol(
+        self, *, symbol: str, exchange: str, timeframe: str
+    ) -> set[str]:
+        """Namen der Strategien, die fuer dieses (symbol, exchange,
+        timeframe) aktuell als 'active' markiert sind - Production-
+        Read-Pfad, siehe sgr/strategy/symbol_gate.py. Betrachtet nur die
+        neueste validated_at Zeile pro Strategie (falls mehrere Batches
+        existieren)."""
+        async with get_session() as session:
+            stmt = (
+                select(StrategySymbolValidationModel.strategy)
+                .where(
+                    and_(
+                        StrategySymbolValidationModel.symbol == symbol,
+                        StrategySymbolValidationModel.exchange == exchange,
+                        StrategySymbolValidationModel.timeframe == timeframe,
+                        StrategySymbolValidationModel.status == "active",
+                    )
+                )
+                .distinct()
+            )
+            result = await session.execute(stmt)
+            return set(result.scalars().all())
+
+    async def has_any_result_for_symbol(
+        self, *, symbol: str, exchange: str, timeframe: str
+    ) -> bool:
+        """Ob ueberhaupt schon ein Validierungsergebnis fuer dieses
+        Symbol existiert (irgendein Batch) - fuer symbol_gate.py's
+        Fallback-Entscheidung (kein Ergebnis = bestehendes globales
+        Verhalten NICHT einschraenken, siehe dortigen Docstring)."""
+        async with get_session() as session:
+            stmt = (
+                select(func.count())
+                .select_from(StrategySymbolValidationModel)
+                .where(
+                    and_(
+                        StrategySymbolValidationModel.symbol == symbol,
+                        StrategySymbolValidationModel.exchange == exchange,
+                        StrategySymbolValidationModel.timeframe == timeframe,
+                    )
+                )
+            )
+            result = await session.execute(stmt)
+            count = result.scalar_one()
+            return bool(count and count > 0)
+
+    async def get_all_for_batch(self, *, batch_id: str) -> list[dict[str, Any]]:
+        """Alle Rows (Candidate- UND finale Rows) eines Batches - fuer
+        die aggregierte Failure-/Gate-/Strategy-Comparison-Analyse
+        (scripts/analyze_strategy_validation.py). Im Unterschied zu
+        get_best_by_symbol() bewusst OHNE is_best_for_symbol-Filter:
+        die Analyse braucht die vollstaendigen Zwischenergebnisse jeder
+        einzelnen getesteten Strategie pro Symbol, nicht nur die
+        jeweilige Gewinner-Zeile."""
+        async with get_session() as session:
+            stmt = select(StrategySymbolValidationModel).where(
+                StrategySymbolValidationModel.batch_id == batch_id
+            )
+            result = await session.execute(stmt)
+            return [self._to_dict(r) for r in result.scalars().all()]
+
+    async def get_status_counts(self, *, batch_id: str | None = None) -> dict[str, int]:
+        async with get_session() as session:
+            stmt = select(
+                StrategySymbolValidationModel.status,
+                func.count(func.distinct(StrategySymbolValidationModel.symbol)),
+            ).group_by(StrategySymbolValidationModel.status)
+            if batch_id:
+                stmt = stmt.where(StrategySymbolValidationModel.batch_id == batch_id)
+            result = await session.execute(stmt)
+            return {status: count for status, count in result.all()}
+
+    async def get_strategy_distribution(self, *, batch_id: str | None = None) -> dict[str, int]:
+        """Verteilung der Strategien unter den ACTIVE-Ergebnissen (fuer
+        den Final Report - Phase 21 'Strategy distribution')."""
+        async with get_session() as session:
+            conditions = [StrategySymbolValidationModel.is_best_for_symbol.is_(True)]
+            if batch_id:
+                conditions.append(StrategySymbolValidationModel.batch_id == batch_id)
+            stmt = (
+                select(
+                    StrategySymbolValidationModel.strategy,
+                    func.count(),
+                )
+                .where(and_(*conditions))
+                .group_by(StrategySymbolValidationModel.strategy)
+            )
+            result = await session.execute(stmt)
+            return {strategy: count for strategy, count in result.all()}
+
+    async def get_top_n(
+        self, *, order_by: str, limit: int = 20, batch_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """order_by: 'score' | 'sharpe' | 'return' | 'robustness' -
+        siehe Final Report Phase 21 ('Top 20 nach Score/Sharpe/Return/
+        Robustness')."""
+        column_map = {
+            "score": StrategySymbolValidationModel.score,
+            "robustness": StrategySymbolValidationModel.robustness_score,
+        }
+        async with get_session() as session:
+            conditions = [StrategySymbolValidationModel.is_best_for_symbol.is_(True)]
+            if batch_id:
+                conditions.append(StrategySymbolValidationModel.batch_id == batch_id)
+            if order_by in column_map:
+                stmt = (
+                    select(StrategySymbolValidationModel)
+                    .where(and_(*conditions))
+                    .order_by(desc(column_map[order_by]))
+                    .limit(limit)
+                )
+                result = await session.execute(stmt)
+                rows = list(result.scalars().all())
+            else:
+                # sharpe/return liegen in der JSONB metrics-Spalte - in
+                # Python sortieren statt einer JSONB-Pfad-Expression, um
+                # DB-Dialekt-Kopplung in diesem Read-Pfad zu vermeiden.
+                stmt = select(StrategySymbolValidationModel).where(and_(*conditions))
+                result = await session.execute(stmt)
+                metric_key = "sharpe_ratio" if order_by == "sharpe" else "total_return_pct"
+                rows = sorted(
+                    result.scalars().all(),
+                    key=lambda r: (r.metrics or {}).get(metric_key, float("-inf")) or float("-inf"),
+                    reverse=True,
+                )[:limit]
+            return [self._to_dict(r) for r in rows]
+
+    @staticmethod
+    def _to_dict(r: StrategySymbolValidationModel) -> dict[str, Any]:
+        return {
+            "symbol": r.symbol,
+            "exchange": r.exchange,
+            "timeframe": r.timeframe,
+            "strategy": r.strategy,
+            "status": r.status,
+            "is_best_for_symbol": r.is_best_for_symbol,
+            "parameters": r.parameters,
+            "metrics": r.metrics,
+            "data_quality": r.data_quality,
+            "regime_profile": r.regime_profile,
+            "score": float(r.score) if r.score is not None else None,
+            "robustness_score": (
+                float(r.robustness_score) if r.robustness_score is not None else None
+            ),
+            "failure_reason": r.failure_reason,
+            "batch_id": r.batch_id,
+            "validated_at": r.validated_at.isoformat(),
+        }
+
+
+# ---------------------------------------------------------------------------
 # User Repository (SaaS)
 # ---------------------------------------------------------------------------
 
@@ -938,6 +1261,7 @@ class Repositories:
         self.portfolio_snapshots = PortfolioSnapshotRepository()
         self.trades = TradeRepository()
         self.strategies = StrategyRepository()
+        self.strategy_symbol_validations = StrategySymbolValidationRepository()
         self.users = UserRepository()
         self.risk_events = RiskEventRepository()
         self.audit_log = AuditLogRepository()
