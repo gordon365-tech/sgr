@@ -337,11 +337,28 @@ class TestRiskEndpoints:
         response = client.post("/api/v1/risk/kill-switch/reset", headers=auth_headers)
         assert response.status_code == 403
 
-    def test_kill_switch_reset_as_admin(self, client: TestClient, admin_headers: dict) -> None:
+    def test_kill_switch_reset_as_admin_when_never_triggered_is_a_true_noop(
+        self, client: TestClient, admin_headers: dict
+    ) -> None:
+        """Root-Cause-Fix (Legacy-Position-Cleanup 2026-09-16): der Endpoint
+        meldete vorher IMMER reset=True, unabhaengig davon, ob ueberhaupt
+        ein aktiver Kill Switch existierte - eine frisch konstruierte
+        KillSwitch-Instanz startet lokal immer mit is_active=False, wodurch
+        reset() intern sofort "already_inactive" griff, OHNE jemals nach
+        Redis zu publizieren. Dieses Test-Setup hat (siehe
+        test_kill_switch_status_unknown_when_never_written) nie einen
+        State geschrieben - reset=False ist hier die ehrliche Antwort."""
         response = client.post("/api/v1/risk/kill-switch/reset", headers=admin_headers)
         assert response.status_code == 200
         data = response.json()
-        assert data["reset"] is True
+        assert data["reset"] is False
+        assert data["detail"] == "Kill switch was not active"
+        # Regressionsschutz fuer den Fall "tatsaechlich aktiv" lebt als
+        # direkter Funktionstest in tests/unit/test_risk_router_kill_switch_reset.py -
+        # dieses Test-Moduls fake_redis (siehe oben, "kein State geschrieben
+        # -> unknown/stale") ist ein AsyncMock mit hart auf None fixiertem
+        # .get() und kann einen echten get()/set()-Round-Trip prinzipiell
+        # nicht abbilden.
 
 
 # ---------------------------------------------------------------------------

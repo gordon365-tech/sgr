@@ -237,9 +237,35 @@ async def reset_kill_switch(
     Kill Switch zurücksetzen.
     Erfordert Admin-Rolle.
     Nur nach manueller Prüfung der Ursache aufrufen.
+
+    Root-Cause-Fix (Legacy-Position-Cleanup 2026-09-16): eine frisch
+    konstruierte KillSwitch-Instanz startet IMMER mit is_active=False
+    (KillSwitchState-Feld-Default) - reset() selbst prueft nur diesen
+    LOKALEN Zustand (fail-safe: "already_inactive" -> fruehzeitiger
+    Return OHNE den Redis-Publish, der andere Prozesse ueber den Reset
+    informiert). Ohne den State hier zuerst aus Redis zu uebernehmen war
+    dieser Endpoint dadurch faktisch bei JEDEM Aufruf ein No-Op - er
+    meldete {"reset": True}, hat aber nie tatsaechlich etwas nach Redis
+    geschrieben, wenn der State (wie immer bei einer frischen Instanz)
+    lokal bereits "inactive" war. Live bestaetigt: manuell nachgebauter
+    Reset-Versuch mit demselben Konstruktions-Pattern blieb wirkungslos,
+    bis der State zuerst synchron aus Redis uebernommen wurde.
     """
     ks = KillSwitch(trading_mode, tenant_id=user.user_id)
     ks.inject_redis(redis_client)
+
+    current = await read_kill_switch_state_from_redis(
+        redis_client, trading_mode, tenant_id=user.user_id
+    )
+    if current is None or not current.get("is_active"):
+        return {"reset": False, "reset_by": user.user_id, "detail": "Kill switch was not active"}
+
+    # Lokalen State auf den echten, persistierten Zustand synchronisieren
+    # (identisches Muster wie KillSwitch._apply_remote_state() fuer einen
+    # Pub/Sub-empfangenen State) - erst DANACH sieht reset() is_active=True
+    # und fuehrt den eigentlichen Reset (inkl. Redis-Publish) aus.
+    ks._state.trigger(current.get("reason") or "unknown", trading_mode)  # noqa: SLF001
+
     await ks.reset(reset_by=user.user_id)
     return {"reset": True, "reset_by": user.user_id}
 

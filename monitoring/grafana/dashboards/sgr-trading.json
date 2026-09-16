@@ -885,6 +885,54 @@
                 "value": "currencyUSD"
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Stop-Loss (USD)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Take-Profit (USD)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Margin (USD)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Holding Time"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
           }
         ]
       },
@@ -956,6 +1004,38 @@
           "refId": "F",
           "instant": true,
           "format": "table"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_position_stop_loss_price_usd{symbol=~\"$symbol\", tenant=~\"$tenant\"}",
+          "legendFormat": "",
+          "refId": "G",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_position_take_profit_price_usd{symbol=~\"$symbol\", tenant=~\"$tenant\"}",
+          "legendFormat": "",
+          "refId": "H",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_position_margin_usd{symbol=~\"$symbol\", tenant=~\"$tenant\"}",
+          "legendFormat": "",
+          "refId": "I",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_position_holding_seconds{symbol=~\"$symbol\", tenant=~\"$tenant\"}",
+          "legendFormat": "",
+          "refId": "J",
+          "instant": true,
+          "format": "table"
         }
       ],
       "title": "Position Breakdown",
@@ -979,7 +1059,11 @@
               "Value #C": true,
               "Value #D": true,
               "Value #E": true,
-              "Value #F": true
+              "Value #F": true,
+              "Value #G": true,
+              "Value #H": true,
+              "Value #I": true,
+              "Value #J": true
             },
             "indexByName": {
               "symbol": 0,
@@ -992,7 +1076,11 @@
               "Current Price (USD)": 7,
               "Exposure (USD)": 8,
               "Leverage": 9,
-              "Unrealized PnL (USD)": 10
+              "Unrealized PnL (USD)": 10,
+              "Stop-Loss (USD)": 11,
+              "Take-Profit (USD)": 12,
+              "Margin (USD)": 13,
+              "Holding Time": 14
             },
             "renameByName": {
               "symbol": "Symbol",
@@ -1005,7 +1093,11 @@
               "Value #C": "Leverage",
               "Value #D": "Unrealized PnL (USD)",
               "Value #E": "Entry Price (USD)",
-              "Value #F": "Current Price (USD)"
+              "Value #F": "Current Price (USD)",
+              "Value #G": "Stop-Loss (USD)",
+              "Value #H": "Take-Profit (USD)",
+              "Value #I": "Margin (USD)",
+              "Value #J": "Holding Time"
             }
           }
         }
@@ -2451,6 +2543,58 @@
         }
       ],
       "type": "table"
+    },
+    {
+      "datasource": "Prometheus",
+      "title": "Exit Reason Breakdown",
+      "description": "Closed trades by exit reason (stop_loss/take_profit/max_holding_time/strategy_signal/kill_switch/manual) - sgr/risk/position_protection.py + PortfolioEngine._record_trade().",
+      "type": "bargauge",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 79
+      },
+      "id": 38,
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "sum by (exit_reason) (sgr_trading_exit_reason_total{tenant=~\"$tenant\"})",
+          "legendFormat": "{{exit_reason}}",
+          "refId": "A"
+        }
+      ]
     }
   ],
   "refresh": "30s",
