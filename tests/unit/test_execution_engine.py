@@ -40,7 +40,7 @@ from sgr.core.types import (
     Symbol,
     TradingMode,
 )
-from sgr.exchanges.base import ExchangeError
+from sgr.exchanges.base import ExchangeError, ExchangeInfo
 from sgr.execution.engine import ExecutionEngine
 from sgr.execution.preflight import PreflightCheckResult, PreflightResult, PreflightValidator
 
@@ -116,6 +116,29 @@ class _DelayedActiveKillSwitch:
 def mock_pool(mocker: pytest_mock.MockerFixture) -> tuple[MagicMock, AsyncMock]:
     pool = mocker.Mock()
     adapter = mocker.AsyncMock()
+    # Explizit konfiguriert (statt dem generischen AsyncMock-Autospec zu
+    # vertrauen): PreflightValidator._check_symbol_precision_and_limits
+    # laeuft seit dem Paper/Live-Parity-Fix auch in PAPER und erwartet ein
+    # echtes ExchangeInfo-Objekt zurueck, kein automatisch generiertes
+    # Kind-Mock (das bei .symbol_limits.get(...) sonst einen unawaited
+    # Coroutine-Wert statt eines dict-Ergebnisses liefert). symbol_limits={}
+    # heisst "keine Limits-Daten fuer dieses Symbol" - der Check markiert
+    # sich dann korrekt als supported=False, ohne die hier getesteten
+    # Order-Flow-Szenarien zu beeinflussen. set_leverage() ist absichtlich
+    # NICHT weiter konfiguriert - der generische AsyncMock-Erfolg (kein
+    # Raise) ist fuer diese Tests bereits das korrekte "Leverage gesetzt"-
+    # Verhalten.
+    adapter.get_exchange_info = AsyncMock(
+        return_value=ExchangeInfo(
+            exchange_id=ExchangeID.BINANCE,
+            symbols=[],
+            timeframes=[],
+            maker_fee=Decimal("0.001"),
+            taker_fee=Decimal("0.001"),
+            fetched_at=datetime.now(tz=UTC),
+            symbol_limits={},
+        )
+    )
     pool.get = mocker.Mock(return_value=adapter)
     return pool, adapter
 
@@ -445,6 +468,12 @@ class TestOrderPersistence:
     ) -> tuple[ExecutionEngine, AsyncMock]:
         pool, _adapter = mock_pool
         order_repo = AsyncMock()
+        # Kein vorheriger Order-Record fuer diese order.id - siehe
+        # SafeOrderExecutor._lookup_persisted() (Modul-Docstring Punkt 5):
+        # ohne dies wuerde ein unkonfiguriertes AsyncMock.get_by_id()
+        # ein truthy Mock-Objekt zurueckgeben und faelschlich als
+        # bereits-persistierter Duplicate-/Unknown-State-Fund gelten.
+        order_repo.get_by_id.return_value = None
         eng = ExecutionEngine(pool, TradingMode.PAPER, order_repository=order_repo)
         fake_kill_switch = MagicMock()
         fake_kill_switch.is_active = False
@@ -477,20 +506,28 @@ class TestOrderPersistence:
 
         await eng.execute(order)
 
+        # create() legt den Record als PENDING an, BEVOR der Exchange-Call
+        # ueberhaupt stattfindet (siehe order_safety.py Modul-Docstring
+        # Punkt 5 - SafeOrderExecutor._persist_pending()) - nicht erst
+        # danach mit dem bereits bekannten Endstatus wie vor diesem Fix.
         order_repo.create.assert_called_once()
         created = order_repo.create.call_args.args[0]
         assert created["id"] == str(order.id)
         assert created["signal_id"] == str(order.signal_id)
-        # place_order() liefert hier bereits FILLED zurueck (Paper-Mode-
-        # Sofortfill-Fall) - create() persistiert den zum Zeitpunkt der
-        # Submission bekannten Status, nicht zwingend PENDING/SUBMITTED.
-        assert created["status"] == OrderStatus.FILLED.value
+        assert created["status"] == OrderStatus.PENDING.value
+        assert created["exchange_order_id"] is None
 
-        order_repo.update_status.assert_called_once()
-        update_kwargs = order_repo.update_status.call_args.kwargs
-        assert update_kwargs["order_id"] == str(order.id)
-        assert update_kwargs["status"] == OrderStatus.FILLED.value
-        assert update_kwargs["filled_quantity"] == filled.filled_quantity
+        # update_status() wird zweimal aufgerufen: einmal aus
+        # SafeOrderExecutor._persist_final() direkt nach dem Submit
+        # (traegt exchange_order_id nach, die create() noch nicht kannte),
+        # einmal aus ExecutionEngine._on_fill()->_persist_order_status()
+        # fuer den Sofortfill-Fall - beide mit demselben Endstatus.
+        assert order_repo.update_status.call_count == 2
+        first_update = order_repo.update_status.call_args_list[0].kwargs
+        assert first_update["order_id"] == str(order.id)
+        assert first_update["status"] == OrderStatus.FILLED.value
+        assert first_update["filled_quantity"] == filled.filled_quantity
+        assert first_update["exchange_order_id"] == filled.exchange_order_id
 
     async def test_create_uses_order_id_not_generated_id(
         self,
@@ -534,11 +571,17 @@ class TestOrderPersistence:
 
         await eng.execute(order)
 
-        # Ein create() beim Submit, ein update_status() beim Cancel
+        # Ein create() (PENDING, vor dem Exchange-Call) beim Submit, dann
+        # ZWEI update_status()-Aufrufe: einer aus SafeOrderExecutor.
+        # _persist_final() direkt nach dem Submit (traegt exchange_order_id
+        # nach), einer aus ExecutionEngine._persist_order_status() beim
+        # anschliessenden Cancel durch den Kill Switch.
         order_repo.create.assert_called_once()
-        order_repo.update_status.assert_called_once()
-        update_kwargs = order_repo.update_status.call_args.kwargs
-        assert update_kwargs["status"] == OrderStatus.SUBMITTED.value
+        assert order_repo.create.call_args.args[0]["status"] == OrderStatus.PENDING.value
+        assert order_repo.update_status.call_count == 2
+        first_update, second_update = order_repo.update_status.call_args_list
+        assert first_update.kwargs["exchange_order_id"] == submitted.exchange_order_id
+        assert second_update.kwargs["status"] == OrderStatus.SUBMITTED.value
 
     async def test_persist_create_failure_does_not_block_execution(
         self,

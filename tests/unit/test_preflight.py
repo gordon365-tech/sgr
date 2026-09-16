@@ -109,9 +109,15 @@ def _make_exchange_info(
     symbols: list[str] | None = None,
     symbol_limits: dict | None = None,
 ) -> ExchangeInfo:
+    # ccxt_symbol ("BTC/USDT"), NICHT str(Symbol) ("BTC/USDT:binance") -
+    # ExchangeInfo.symbols/symbol_limits sind im ccxt-Format geschluesselt
+    # (Root-Cause-Fix, E2E-Harness-Fund gegen echtes Binance Futures
+    # Testnet: PreflightValidator/ExecutionEngine verglichen vorher gegen
+    # str(order.symbol), wodurch der Vergleich IMMER fehlschlug - diese
+    # Test-Fixtures replizierten unbemerkt genau dasselbe falsche Format).
     return ExchangeInfo(
         exchange_id=ExchangeID.BINANCE,
-        symbols=symbols if symbols is not None else [str(_make_symbol())],
+        symbols=symbols if symbols is not None else [_make_symbol().ccxt_symbol],
         timeframes=["1m", "5m"],
         maker_fee=Decimal("0.001"),
         taker_fee=Decimal("0.001"),
@@ -186,12 +192,19 @@ class TestNotSupportedChecks:
         self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
     ) -> None:
         """Undokumentierte Lücken dürfen nicht verschwiegen werden - jeder
-        Report enthält sie explizit, unabhängig vom Modus."""
+        Report enthält sie explizit, unabhängig vom Modus.
+
+        symbol_precision_and_limits zaehlt hier zusaetzlich als
+        supported=False dazu (nicht Teil der globalen NOT_SUPPORTED_CHECKS-
+        Konstante, sondern PRO SYMBOL ermittelt): der Default-Mock liefert
+        symbol_limits={}, also keine Daten fuer das Test-Symbol - seit dem
+        Paper/Live-Parity-Fix wird dieser Check jetzt auch in PAPER
+        ausgefuehrt (vorher lief er dort ueberhaupt nicht)."""
         validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.PAPER)
         result = await validator.validate(_make_order())
 
         reported_names = {c.name for c in result.checks if not c.supported}
-        assert reported_names == set(NOT_SUPPORTED_CHECKS)
+        assert reported_names == set(NOT_SUPPORTED_CHECKS) | {"symbol_precision_and_limits"}
 
     async def test_not_supported_checks_do_not_block_eligibility(
         self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
@@ -218,13 +231,20 @@ class TestPaperMode:
     ) -> None:
         pool, adapter = mock_pool
         validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.PAPER)
+        order = _make_order(trading_mode=TradingMode.PAPER)
 
-        result = await validator.validate(_make_order(trading_mode=TradingMode.PAPER))
+        result = await validator.validate(order)
 
         assert result.eligible is True
         adapter.ping.assert_not_awaited()
         adapter.get_balance.assert_not_awaited()
-        pool.get.assert_not_called()
+        # Paper/Live-Parity-Fix: der Adapter WIRD in PAPER jetzt geholt,
+        # aber ausschliesslich fuer den Exchange-Precision/Min-Notional-
+        # Check (siehe get_exchange_info-Assertion unten) - alle echten
+        # LIVE-only-Account-/Balance-/Kill-Switch-Checks bleiben
+        # uebersprungen (siehe ping/get_balance oben).
+        pool.get.assert_called_once_with(order.symbol.exchange, TradingMode.PAPER)
+        adapter.get_exchange_info.assert_awaited_once()
 
     async def test_paper_mode_still_rejects_structurally_invalid_order(
         self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
@@ -584,7 +604,7 @@ class TestSymbolPrecisionAndLimits:
         adapter.get_exchange_info = AsyncMock(
             return_value=_make_exchange_info(
                 symbol_limits={
-                    str(_make_symbol()): SymbolLimits(
+                    _make_symbol().ccxt_symbol: SymbolLimits(
                         amount_precision=6,
                         min_amount=Decimal("0.0001"),
                         max_amount=Decimal("1000"),
@@ -615,7 +635,7 @@ class TestSymbolPrecisionAndLimits:
         adapter.get_exchange_info = AsyncMock(
             return_value=_make_exchange_info(
                 symbol_limits={
-                    str(_make_symbol()): SymbolLimits(min_amount=Decimal("1.0"))
+                    _make_symbol().ccxt_symbol: SymbolLimits(min_amount=Decimal("1.0"))
                 }
             )
         )
@@ -636,7 +656,7 @@ class TestSymbolPrecisionAndLimits:
         adapter.get_exchange_info = AsyncMock(
             return_value=_make_exchange_info(
                 symbol_limits={
-                    str(_make_symbol()): SymbolLimits(max_amount=Decimal("1.0"))
+                    _make_symbol().ccxt_symbol: SymbolLimits(max_amount=Decimal("1.0"))
                 }
             )
         )
@@ -657,7 +677,7 @@ class TestSymbolPrecisionAndLimits:
         adapter.get_exchange_info = AsyncMock(
             return_value=_make_exchange_info(
                 symbol_limits={
-                    str(_make_symbol()): SymbolLimits(min_notional=Decimal("100"))
+                    _make_symbol().ccxt_symbol: SymbolLimits(min_notional=Decimal("100"))
                 }
             )
         )
@@ -685,7 +705,7 @@ class TestSymbolPrecisionAndLimits:
         adapter.get_exchange_info = AsyncMock(
             return_value=_make_exchange_info(
                 symbol_limits={
-                    str(_make_symbol()): SymbolLimits(min_notional=Decimal("999999"))
+                    _make_symbol().ccxt_symbol: SymbolLimits(min_notional=Decimal("999999"))
                 }
             )
         )
@@ -720,7 +740,7 @@ class TestSymbolPrecisionAndLimits:
         _pool, adapter = mock_pool
         adapter.get_exchange_info = AsyncMock(
             return_value=_make_exchange_info(
-                symbol_limits={str(_make_symbol()): SymbolLimits()}
+                symbol_limits={_make_symbol().ccxt_symbol: SymbolLimits()}
             )
         )
         validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)

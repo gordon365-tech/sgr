@@ -452,7 +452,54 @@ services:
       # oekonomisch validiertes Signal. Leer lassen/entfernen, um zum
       # sicheren Default (0 aktive Strategien bei fehlgeschlagener
       # Validierung) zurueckzukehren.
-      STRATEGY_FORCE_ACTIVATE: "trend_following_v1,mean_reversion_v1"
+      #
+      # TEST_1X-Deployment (2026-09-16): NUR NOCH EINE Strategie aktiv
+      # (trend_following_v1) statt beider - siehe Aufgabenstellung
+      # "STRATEGIEN: nicht gleichzeitig alle Strategien aktivieren".
+      # trend_following_v1 bleibt die am wenigsten komplexe der beiden
+      # jemals TATSAECHLICH validierten Strategien (mean_reversion_v1 hat
+      # 8+ iterative Analyse-Dokumente, die auf hoehere Fragilitaet
+      # hindeuten) - dies ist weiterhin ein reiner Lifecycle-Test, KEINE
+      # oekonomische Validierung oder Live-Freigabe.
+      STRATEGY_FORCE_ACTIVATE: "trend_following_v1"
+
+      # TEST_1X Risk Profile (kontrollierter Funktionstest, Position-
+      # Protection-Deployment 2026-09-16) - NUR fuer Gordon, Sumo bleibt
+      # unveraendert (eigener .env.prod-Wert RISK_MAX_LEVERAGE=3.0 etc.
+      # bleibt fuer Sumo unberuehrt, da diese Overrides ausschliesslich
+      # hier im worker-gordon-Service stehen, nicht in .env.prod).
+      #
+      # WICHTIG (Fund waehrend dieses Deployments): der aktuelle
+      # ExchangePool.initialize()-Aufruf in sgr/api/main.py uebergibt
+      # KEIN futures_mode=True - Gordon (wie Sumo) handelt seit jeher
+      # Binance SPOT, nicht Futures, trotz der umfangreichen Futures-
+      # Architektur (Leverage/Margin-Mode/Position-Mode) im Code. Auf
+      # SPOT ist set_leverage() ein sicherer No-Op (ccxt meldet
+      # setLeverage dort als nicht unterstuetzt, siehe
+      # CCXTBaseAdapter.set_leverage() Docstring) - RISK_DEFAULT_LEVERAGE
+      # unten aendert daher nichts am tatsaechlichen Exchange-Zustand,
+      # dokumentiert aber die Absicht und greift bereits als reine
+      # In-Process-Pruefung (RISK_MAX_LEVERAGE, Gross-Leverage-Check in
+      # RiskEngine). Ein Wechsel zu echten Futures fuer Gordon ist eine
+      # eigene, groessere, hier bewusst NICHT mitgemachte Entscheidung
+      # (die 10 bestehenden Spot-Positionen wuerden fuer einen Futures-
+      # Adapter unsichtbar).
+      RISK_PROFILE_NAME: "TEST_1X"
+      RISK_MAX_OPEN_POSITIONS: "1"
+      RISK_DEFAULT_LEVERAGE: "1"
+      RISK_MAX_LEVERAGE: "1"
+      RISK_POSITION_SIZE_USD: "20"
+      RISK_STOP_LOSS_PCT: "0.01"
+      RISK_TAKE_PROFIT_PCT: "0.02"
+      RISK_MAX_HOLDING_MINUTES: "30"
+      RISK_RISK_PER_TRADE_PCT: "0.01"
+      RISK_MAX_ORDER_NOTIONAL: "50"
+      # Nur Positionen, die AB diesem Zeitpunkt eroeffnet werden, erhalten
+      # SL/TP/Max-Holding-Schutz - die 10 bereits offenen Legacy-
+      # Positionen bleiben bewusst unangetastet (siehe sgr/risk/
+      # position_protection.py Modul-Docstring und Deployment-Entscheidung:
+      # Cleanup erfolgt separat, erst nach bestaetigtem E2E-Beweis).
+      RISK_PROTECTION_CUTOVER_AT: "2026-09-16T10:40:36+00:00"
 
       SENTRY_DSN: ${SENTRY_DSN:-}
       

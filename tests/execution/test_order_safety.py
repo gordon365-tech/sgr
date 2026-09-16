@@ -259,6 +259,123 @@ class TestInflightTrackingHelpers:
         assert executor.all_inflight() == {}
 
 
+class TestDbBackedIdempotency:
+    """
+    Root-Cause-Fix (Docker-Crash-Test-Audit 2026-09-16, siehe
+    order_safety.py Modul-Docstring Punkt 5): PAPER-Order-Requests hatten
+    vor diesem Fix KEINE prozessuebergreifende Idempotenz - nur der
+    LIVE-Zweig von ccxt_base.py::place_order prueft clientOrderId gegen
+    die Exchange, PAPER nimmt ueber _simulate_order() einen fruehen
+    Sonderpfad, der diese Pruefung nie erreicht. Nach einem Prozess-
+    Neustart (frischer In-Memory-State) waere ein erneutes
+    execute_safely() mit identischer order.id ein zweiter echter Fill
+    gewesen. Diese Tests decken den DB-gestuetzten Ersatz-Check ab.
+    """
+
+    def _make_repo(self, row: dict | None) -> AsyncMock:
+        repo = AsyncMock()
+        repo.get_by_id.return_value = row
+        return repo
+
+    async def test_no_repository_behaves_exactly_like_before_the_fix(self) -> None:
+        """Ohne injiziertes OrderRepository (z.B. isolierte Unit-Tests)
+        bleibt das Verhalten unveraendert - reines In-Memory-Tracking."""
+        executor = SafeOrderExecutor()
+        order = _make_order_request()
+        submit_fn = AsyncMock(return_value=_make_order_result(order))
+
+        result = await executor.execute_safely(order, submit_fn)
+
+        assert result.status == OrderStatus.FILLED
+        submit_fn.assert_awaited_once()
+
+    async def test_no_persisted_record_proceeds_with_normal_submission(self) -> None:
+        order = _make_order_request()
+        repo = self._make_repo(row=None)
+        executor = SafeOrderExecutor(order_repository=repo)
+        submit_fn = AsyncMock(return_value=_make_order_result(order))
+
+        result = await executor.execute_safely(order, submit_fn)
+
+        assert result.status == OrderStatus.FILLED
+        submit_fn.assert_awaited_once()
+
+    async def test_terminal_status_in_db_blocks_resubmission_after_restart(self) -> None:
+        """Simuliert einen Prozess-Neustart: FRISCHER SafeOrderExecutor
+        (leerer In-Memory-State, wie nach Worker-Kill/-Restart), aber die
+        DB hat den Fill von der vorherigen Prozessinstanz bereits
+        persistiert. Muss den Fill aus der DB rekonstruieren, OHNE
+        submit_fn ein zweites Mal aufzurufen - das ist genau der Fall,
+        der vor diesem Fix eine echte Doppel-Order verursacht haette."""
+        order = _make_order_request()
+        repo = self._make_repo(
+            row={
+                "status": "filled",
+                "exchange_order_id": "PAPER-already-filled",
+                "filled_quantity": order.quantity,
+                "average_fill_price": Decimal("50000"),
+                "fees": Decimal("5"),
+                "submitted_at": datetime.now(tz=UTC),
+                "filled_at": datetime.now(tz=UTC),
+                "raw_response": {"strategy": "test_strategy"},
+            }
+        )
+        executor = SafeOrderExecutor(order_repository=repo)  # frischer Prozess
+        submit_fn = AsyncMock(return_value=_make_order_result(order))
+
+        result = await executor.execute_safely(order, submit_fn)
+
+        assert result.status == OrderStatus.FILLED
+        assert result.raw_response["duplicate"] is True
+        assert result.exchange_order_id == "PAPER-already-filled"
+        submit_fn.assert_not_awaited()  # KEIN zweiter Fill
+
+    async def test_non_terminal_status_in_db_is_treated_as_unknown_not_resubmitted(
+        self,
+    ) -> None:
+        """Die vorherige Prozessinstanz ist gestorben, WAEHREND die Order
+        noch 'submitted' war (kein Terminalstatus persistiert) - unklar,
+        ob der Fill vor dem Crash noch stattfand. Fail-safe: kein blindes
+        Neu-Submitten, sondern Unknown-State wie bei einem Submit-Fehler."""
+        order = _make_order_request()
+        repo = self._make_repo(
+            row={
+                "status": "submitted",
+                "exchange_order_id": "PAPER-in-flight-at-crash",
+                "filled_quantity": Decimal("0"),
+                "average_fill_price": None,
+                "fees": Decimal("0"),
+                "submitted_at": datetime.now(tz=UTC),
+                "filled_at": None,
+                "raw_response": {},
+            }
+        )
+        executor = SafeOrderExecutor(order_repository=repo)
+        submit_fn = AsyncMock(return_value=_make_order_result(order))
+
+        result = await executor.execute_safely(order, submit_fn)
+
+        assert result.status == OrderStatus.REJECTED
+        assert result.raw_response["unknown"] is True
+        submit_fn.assert_not_awaited()
+
+    async def test_db_check_failure_fails_open_and_proceeds_with_submission(self) -> None:
+        """DB nicht erreichbar waehrend der Idempotenz-Pruefung darf die
+        Order-Verarbeitung nicht blockieren (Fail-Safe-Prinzip: DB-
+        Fehler duerfen Trading-Ergebnisse nie beeinflussen) - der Check
+        wird einfach uebersprungen, normale Submission laeuft weiter."""
+        order = _make_order_request()
+        repo = AsyncMock()
+        repo.get_by_id.side_effect = RuntimeError("db connection lost")
+        executor = SafeOrderExecutor(order_repository=repo)
+        submit_fn = AsyncMock(return_value=_make_order_result(order))
+
+        result = await executor.execute_safely(order, submit_fn)
+
+        assert result.status == OrderStatus.FILLED
+        submit_fn.assert_awaited_once()
+
+
 class TestConcurrentSubmissionRace:
     async def test_second_concurrent_submission_is_blocked_while_first_still_in_flight(
         self, executor: SafeOrderExecutor

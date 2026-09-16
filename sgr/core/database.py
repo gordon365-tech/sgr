@@ -174,6 +174,28 @@ class PositionModel(Base):
         PG_UUID(as_uuid=False), ForeignKey("users.id"), nullable=True
     )
 
+    # Position-Protection-Felder (Migration 0006, siehe
+    # sgr/risk/position_protection.py Modul-Docstring). Alle nullable,
+    # additiv - NULL bedeutet "kein Schutz an dieser Position", was fuer
+    # bereits vor dem Feature bestehende ("Legacy"-)Positionen exakt der
+    # korrekte, unveraenderte Zustand ist (kein Backfill noetig/gewollt).
+    stop_loss_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(precision=28, scale=8), nullable=True
+    )
+    take_profit_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(precision=28, scale=8), nullable=True
+    )
+    max_holding_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    sl_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    tp_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Grund fuer das Schliessen (siehe ExitReason in sgr/core/types.py) -
+    # nur bei is_open=False aussagekraeftig. String statt Enum-Spalte:
+    # gleiche Wahl wie side/trading_mode oben, keine DB-seitige Enum-
+    # Migration bei zukuenftigen neuen Gruenden noetig.
+    close_reason: Mapped[str | None] = mapped_column(String(30), nullable=True)
+
     __table_args__ = (
         Index("ix_positions_open", "is_open", "trading_mode"),
         Index("ix_positions_user", "user_id", "is_open"),

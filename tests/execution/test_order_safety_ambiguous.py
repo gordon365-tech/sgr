@@ -28,7 +28,32 @@ from sgr.core.types import (
     Symbol,
     TradingMode,
 )
+from sgr.exchanges.base import ExchangeInfo
 from sgr.execution.engine import ExecutionEngine
+
+
+def _make_default_adapter() -> AsyncMock:
+    """
+    AsyncMock mit explizit konfiguriertem get_exchange_info() (siehe
+    tests/unit/test_execution_engine.py::mock_pool fuer die identische
+    Begruendung): PreflightValidator._check_symbol_precision_and_limits
+    laeuft seit dem Paper/Live-Parity-Fix auch in PAPER und braucht ein
+    echtes ExchangeInfo-Objekt statt eines automatisch generierten
+    Kind-Mocks.
+    """
+    adapter = AsyncMock()
+    adapter.get_exchange_info = AsyncMock(
+        return_value=ExchangeInfo(
+            exchange_id=ExchangeID.PIONEX,
+            symbols=[],
+            timeframes=[],
+            maker_fee=Decimal("0.001"),
+            taker_fee=Decimal("0.001"),
+            fetched_at=datetime.now(tz=UTC),
+            symbol_limits={},
+        )
+    )
+    return adapter
 
 
 @pytest.fixture
@@ -58,7 +83,7 @@ class TestAmbiguousOrderSubmission:
     ) -> None:
         """Exchange timeout nach Submission wird nicht blind resubmittet."""
         pool = MagicMock()
-        adapter = AsyncMock()
+        adapter = _make_default_adapter()
         adapter.place_order = AsyncMock(side_effect=TimeoutError("Exchange timeout"))
         pool.get = MagicMock(return_value=adapter)
 
@@ -77,7 +102,7 @@ class TestAmbiguousOrderSubmission:
     ) -> None:
         """Connection reset wird nicht blind resubmittet."""
         pool = MagicMock()
-        adapter = AsyncMock()
+        adapter = _make_default_adapter()
         adapter.place_order = AsyncMock(
             side_effect=ConnectionResetError("Connection reset by peer")
         )
@@ -95,7 +120,7 @@ class TestAmbiguousOrderSubmission:
     ) -> None:
         """Normal Rejection von der Exchange wird korrekt reportet."""
         pool = MagicMock()
-        adapter = AsyncMock()
+        adapter = _make_default_adapter()
 
         rejected_result = OrderResult(
             request_id=order_request.id,
@@ -123,7 +148,7 @@ class TestAmbiguousOrderSubmission:
     ) -> None:
         """Normale Success-Submission wird sofort gefüllt (Paper Mode)."""
         pool = MagicMock()
-        adapter = AsyncMock()
+        adapter = _make_default_adapter()
 
         filled_result = OrderResult(
             request_id=order_request.id,

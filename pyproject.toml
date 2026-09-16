@@ -91,6 +91,12 @@ dev = [
     "factory-boy>=3.3.0",
     "freezegun>=1.5.0",
     "respx>=0.21.0",
+    # Docker SDK: fuer tests/docker_crash_tests - echte Container-
+    # Steuerung (stop/start/kill/restart/network disconnect) gegen den
+    # laufenden Compose-Stack. Nur fuer den docker_crash-Marker benoetigt
+    # (siehe pyproject.toml [tool.pytest.ini_options] markers), nicht Teil
+    # des Produktions-Laufzeitimages.
+    "docker>=7.1.0",
 ]
 
 [tool.pytest.ini_options]

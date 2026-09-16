@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import UTC, datetime
 from typing import Any
 
 from prometheus_client import make_asgi_app
@@ -244,6 +245,9 @@ class MonitoringEngine:
             exchange = position.symbol.exchange.value
             side = position.side.value
             current_keys.add((symbol, side, exchange))
+            leverage = float(position.leverage)
+            margin_usd = float(position.notional_value) / leverage if leverage > 0 else 0.0
+            holding_seconds = (datetime.now(tz=UTC) - position.opened_at).total_seconds()
             record_position_snapshot(
                 symbol=symbol,
                 side=side,
@@ -251,10 +255,18 @@ class MonitoringEngine:
                 exchange=exchange,
                 size=float(position.quantity),
                 exposure_usd=float(position.notional_value),
-                leverage=float(position.leverage),
+                leverage=leverage,
                 unrealized_pnl_usd=float(position.unrealized_pnl),
                 entry_price_usd=float(position.entry_price),
                 current_price_usd=float(position.current_price),
+                stop_loss_price_usd=(
+                    float(position.stop_loss_price) if position.stop_loss_price else 0.0
+                ),
+                take_profit_price_usd=(
+                    float(position.take_profit_price) if position.take_profit_price else 0.0
+                ),
+                margin_usd=margin_usd,
+                holding_seconds=holding_seconds,
             )
 
         closed_keys = self._last_position_keys - current_keys

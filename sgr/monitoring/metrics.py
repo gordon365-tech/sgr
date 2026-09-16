@@ -131,6 +131,24 @@ class SGRMetrics:
             "sgr.position.current_price_usd", "Position current mark price"
         )
 
+        # Position-Protection-Metriken (siehe sgr/risk/position_protection.py):
+        # vorher nicht existent, da SL/TP/Max-Holding-Time vor diesem
+        # Feature ueberhaupt nicht existierten. margin_usd = notional /
+        # leverage (siehe PositionSizer-Docstring "Position Sizing"-
+        # Trennung Account-Kapital/Notional/Margin/Leverage).
+        self.position_stop_loss_price = gauge(
+            "sgr.position.stop_loss_price_usd", "Attached stop-loss trigger price"
+        )
+        self.position_take_profit_price = gauge(
+            "sgr.position.take_profit_price_usd", "Attached take-profit trigger price"
+        )
+        self.position_margin_usd = gauge(
+            "sgr.position.margin_usd", "Margin required for this position (notional / leverage)"
+        )
+        self.position_holding_seconds = gauge(
+            "sgr.position.holding_seconds", "Seconds since this position was opened"
+        )
+
         # Asset Universe (Market Discovery, siehe sgr/market_data/
         # asset_universe.py): eine Zeitreihe pro entdecktem Markt ueber
         # alle unterstuetzten Exchanges hinweg, unabhaengig davon, ob
@@ -168,6 +186,18 @@ class SGRMetrics:
         # fuer offene Positionen.
         self.realized_pnl = gauge(
             "sgr.trading.realized_pnl_usd", "Cumulative realized profit/loss"
+        )
+
+        # Exit-Grund pro geschlossenem Trade (siehe ExitReason,
+        # sgr/core/types.py) - vorher nicht sichtbar, ob ein Trade durch
+        # Stop-Loss, Take-Profit, Max-Holding-Time, ein gegenlaeufiges
+        # Strategie-Signal oder den Kill Switch geschlossen wurde.
+        # Long/Short-Aufschluesselung bewusst NICHT als eigener Counter -
+        # sgr.trades.executed/_winning/_losing tragen bereits ein
+        # "side"-Label (siehe record_trade_executed), ein zusaetzlicher
+        # Counter waere eine redundante Metrik-Definition.
+        self.trade_exit_reason = counter(
+            "sgr.trading.exit_reason", "Closed trades broken down by exit reason"
         )
 
         # Strategy Metrics
@@ -298,6 +328,7 @@ def record_trade_executed(
     pnl: Decimal,
     winning: bool,
     cumulative_realized_pnl: Decimal | None = None,
+    exit_reason: str | None = None,
 ) -> None:
     """Records trade execution.
 
@@ -306,6 +337,10 @@ def record_trade_executed(
     self._trade_history). Optional (Default None = Gauge wird nicht
     angefasst), damit bestehende Aufrufer/Tests ohne diesen Wert
     unveraendert funktionieren.
+
+    exit_reason: siehe ExitReason (sgr/core/types.py) - optional aus
+    demselben Grund (bestehende Aufrufer/Tests ohne dieses Feld bleiben
+    unveraendert funktionsfaehig).
     """
     m = get_metrics()
     m.trades_total.add(1, {"side": side})
@@ -315,6 +350,8 @@ def record_trade_executed(
         m.trades_losing.add(1, {"side": side})
     if cumulative_realized_pnl is not None:
         m.realized_pnl.set(float(cumulative_realized_pnl))
+    if exit_reason:
+        m.trade_exit_reason.add(1, {"exit_reason": exit_reason, "side": side})
 
 
 def record_signal_generated(strategy_name: str, direction: str, confidence: float) -> None:
@@ -362,6 +399,10 @@ def record_position_snapshot(
     unrealized_pnl_usd: float,
     entry_price_usd: float = 0.0,
     current_price_usd: float = 0.0,
+    stop_loss_price_usd: float = 0.0,
+    take_profit_price_usd: float = 0.0,
+    margin_usd: float = 0.0,
+    holding_seconds: float = 0.0,
 ) -> None:
     """Records the current state of a single open position.
 
@@ -370,11 +411,12 @@ def record_position_snapshot(
     Grafana-Dashboard (symbol/side/trading_mode/exchange als Labels,
     tenant automatisch via _TenantScopedInstrument).
 
-    entry_price_usd/current_price_usd sind optional (Default 0.0) statt
-    Pflichtfelder, damit der bestehende Aufruf-/Zero-Reset-Pfad (siehe
-    MonitoringEngine._collect_position_metrics - eine geschlossene
-    Position wird explizit auf 0 gesetzt) unveraendert funktioniert, ohne
-    an jeder Stelle beide neuen Werte mitschleppen zu muessen.
+    entry_price_usd/current_price_usd/stop_loss_price_usd/
+    take_profit_price_usd/margin_usd/holding_seconds sind optional
+    (Default 0.0) statt Pflichtfelder, damit der bestehende Aufruf-/
+    Zero-Reset-Pfad (siehe MonitoringEngine._collect_position_metrics -
+    eine geschlossene Position wird explizit auf 0 gesetzt) unveraendert
+    funktioniert, ohne an jeder Stelle alle Werte mitschleppen zu muessen.
     """
     m = get_metrics()
     labels = {
@@ -389,6 +431,10 @@ def record_position_snapshot(
     m.position_unrealized_pnl.set(unrealized_pnl_usd, labels)
     m.position_entry_price.set(entry_price_usd, labels)
     m.position_current_price.set(current_price_usd, labels)
+    m.position_stop_loss_price.set(stop_loss_price_usd, labels)
+    m.position_take_profit_price.set(take_profit_price_usd, labels)
+    m.position_margin_usd.set(margin_usd, labels)
+    m.position_holding_seconds.set(holding_seconds, labels)
 
 
 def record_asset_universe_snapshot(entries: list[Any]) -> None:

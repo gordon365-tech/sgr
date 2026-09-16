@@ -55,9 +55,29 @@ class PositionSizer:
         profit_factor: float | None = None,
         min_order_size: Decimal = Decimal("0.001"),
         max_order_notional: Decimal | None = None,
+        position_size_usd: Decimal | None = None,
+        leverage: Decimal = Decimal("1"),
+        stop_loss_pct: float | None = None,
+        risk_per_trade_pct: float | None = None,
     ) -> tuple[Decimal, str | None]:
         """
         Berechnet optimale Qty unter allen Constraints.
+
+        position_size_usd (opt-in, TEST_1X / kontrollierte Risk-Profile,
+        siehe RiskLimitsConfig): wenn gesetzt, ersetzt dies den
+        adaptiven ATR/Kelly/Heat-Blend unten durch einen FESTEN
+        Notional-Zielwert (z.B. 20 USD) - deterministisch und
+        auditierbar statt adaptiv. Bleibt weiterhin durch
+        available_capital/max_order_notional gedeckelt (Fat-Finger-
+        Schutz bleibt aktiv). Wird zusaetzlich gegen risk_per_trade_pct
+        geprueft: wuerde ein Stop bei stop_loss_pct Abstand mehr als
+        risk_per_trade_pct des Kapitals verlieren, wird die Order
+        ABGELEHNT (nicht automatisch verkleinert oder vergroessert) -
+        siehe Aufgabenstellung "keine automatische Erhoehung der
+        Positionsgroesse aufgrund eines einzelnen technischen Signals".
+        margin_required = notional / leverage wird nur geloggt (Audit),
+        aendert die Positionsgroesse selbst nicht - Leverage wird von
+        ExecutionEngine.set_leverage() unabhaengig davon durchgesetzt.
 
         Returns:
             (approved_quantity, reduction_reason)
@@ -68,6 +88,17 @@ class PositionSizer:
 
         if available_capital <= 0:
             return Decimal("0"), "No available capital"
+
+        if position_size_usd is not None:
+            return self._compute_fixed_notional(
+                position_size_usd=position_size_usd,
+                available_capital=available_capital,
+                max_order_notional=max_order_notional,
+                current_price=current_price,
+                leverage=leverage,
+                stop_loss_pct=stop_loss_pct,
+                risk_per_trade_pct=risk_per_trade_pct,
+            )
 
         # 1. Basis-Größe: signal.size_hint × max_position
         max_notional = portfolio_value * Decimal(str(max_position_pct))
@@ -158,6 +189,87 @@ class PositionSizer:
         )
 
         return qty, reduction_reason
+
+    def _compute_fixed_notional(
+        self,
+        position_size_usd: Decimal,
+        available_capital: Decimal,
+        max_order_notional: Decimal | None,
+        current_price: Decimal,
+        leverage: Decimal,
+        stop_loss_pct: float | None,
+        risk_per_trade_pct: float | None,
+    ) -> tuple[Decimal, str | None]:
+        """Fixed-Notional-Zweig fuer TEST_1X / kontrollierte Risk-Profile.
+
+        Trennt explizit: Account-Kapital, Risk-per-Trade, Position-
+        Notional, Margin, Leverage, Stop-Loss-Distanz (siehe
+        Aufgabenstellung "POSITION SIZING" - diese Groessen duerfen
+        nicht vermischt werden).
+
+        Root-Cause-Fix (E2E-Harness-Fund gegen echtes Binance Futures
+        Testnet): frueher wurde hier gegen den generischen, fuer die
+        ADAPTIVE Groessenberechnung gedachten min_order_size-Parameter
+        geprueft (Default 0.001) - ein Wert, der implizit von "billigen"
+        Altcoins ausgeht. Bei einem teuren Asset wie BTC (~75000 USDT)
+        ergibt ein fixer $20-Notional aber legitim nur ~0.00026 BTC,
+        weit unter diesem generischen Default - die Order wurde
+        faelschlich als "zu klein" abgelehnt, OBWOHL sie exchange-seitig
+        vollkommen gueltig sein kann. Die tatsaechliche, symbol-
+        spezifische Exchange-Mindestgroesse wird bereits von
+        ExecutionEngine ueber echte SymbolLimits durchgesetzt (siehe
+        sgr/execution/quantization.py) - hier bleibt nur noch eine reine
+        Rundungsartefakt-Pruefung (qty <= 0), keine geratene, symbol-
+        unabhaengige Schwelle mehr.
+        """
+        notional = position_size_usd
+        capped_reason: str | None = None
+
+        if notional > available_capital:
+            notional = available_capital
+            capped_reason = "Fixed position size capped by available capital"
+
+        if max_order_notional is not None and notional > max_order_notional:
+            notional = max_order_notional
+            capped_reason = (
+                f"Fixed position size capped by max_order_notional ({max_order_notional})"
+            )
+
+        margin_required = notional / leverage if leverage > 0 else notional
+
+        if stop_loss_pct is not None and risk_per_trade_pct is not None:
+            implied_risk_amount = notional * Decimal(str(stop_loss_pct))
+            risk_budget = available_capital * Decimal(str(risk_per_trade_pct))
+            if implied_risk_amount > risk_budget:
+                log.warning(
+                    "position_sizer.fixed_notional_rejected_risk_budget",
+                    notional=str(notional),
+                    stop_loss_pct=stop_loss_pct,
+                    implied_risk_amount=str(implied_risk_amount),
+                    risk_budget=str(risk_budget),
+                )
+                return Decimal("0"), (
+                    f"Implied risk {implied_risk_amount:.2f} at {stop_loss_pct:.1%} stop "
+                    f"exceeds risk-per-trade budget {risk_budget:.2f} "
+                    f"({risk_per_trade_pct:.1%} of capital) - rejecting rather than resizing"
+                )
+
+        qty = (notional / current_price).quantize(Decimal("0.00000001"))
+        if qty <= 0:
+            return Decimal("0"), (
+                f"Quantity rounds to 0 at notional {notional}/price {current_price}"
+            )
+
+        log.info(
+            "position_sizer.fixed_notional_computed",
+            account_capital=str(available_capital),
+            position_notional=str(notional),
+            margin_required=str(margin_required),
+            leverage=str(leverage),
+            qty=str(qty),
+            reduction_reason=capped_reason,
+        )
+        return qty, capped_reason
 
     def _fractional_kelly(
         self,

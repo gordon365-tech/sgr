@@ -422,6 +422,7 @@ async def lifespan(app: FastAPI, role: LifespanRole = "worker") -> AsyncIterator
             initial_cash=config.paper_initial_capital,
             position_repository=repos.positions,
             tenant_id=config.tenant_id,
+            trade_repository=repos.trades,
         )
         app.state.portfolio_engine = portfolio_engine
 
@@ -534,6 +535,29 @@ async def lifespan(app: FastAPI, role: LifespanRole = "worker") -> AsyncIterator
             consumer_group=f"position_liquidator:{liquidator_tenant_suffix}",
             consumer_name=f"position_liquidator-{liquidator_tenant_suffix}-1",
         )
+
+        # 8b-iii. Position Protection (SL/TP/Max-Holding-Time), siehe
+        # sgr/risk/position_protection.py Modul-Docstring. Hooks werden
+        # per set_protection_hooks() NACH der Konstruktion injiziert
+        # (siehe dortiger Docstring: PortfolioEngine existiert bereits vor
+        # ExecutionEngine, gleiches Nachtraeglich-Injizieren-Muster wie
+        # risk_engine.inject_redis() oben).
+        from sgr.risk.position_protection import (
+            PositionProtectionManager,
+            PositionProtectionWatchdog,
+        )
+
+        protection_manager = PositionProtectionManager()
+        portfolio_engine.set_protection_hooks(
+            on_position_opened=protection_manager.on_position_opened,
+            on_position_closed=protection_manager.on_position_closed,
+        )
+        protection_watchdog = PositionProtectionWatchdog(
+            portfolio_engine=portfolio_engine,
+            execution_engine=execution_engine,
+        )
+        await protection_watchdog.start()
+        app.state.position_protection_watchdog = protection_watchdog
 
         # 8c. Reconciliation Engine (Phase 7B)
         # Nur in LIVE aussagekräftig (siehe sgr/reconciliation/engine.py
@@ -749,6 +773,7 @@ async def lifespan(app: FastAPI, role: LifespanRole = "worker") -> AsyncIterator
     log.info("sgr.api.shutting_down", role=role)
 
     if role == "worker":
+        await protection_watchdog.stop()
         await asset_universe_engine.stop()
         await worker_metrics_publisher.stop()
         await monitoring_engine.stop()

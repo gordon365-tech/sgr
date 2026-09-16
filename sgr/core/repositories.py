@@ -187,6 +187,48 @@ class OrderRepository:
             await session.flush()
             return str(order.id)
 
+    async def get_by_id(self, order_id: str) -> dict[str, Any] | None:
+        """
+        Laedt einen einzelnen Order-Record per Primary Key.
+
+        Grundlage fuer die DB-gestuetzte Idempotenzpruefung in
+        SafeOrderExecutor (siehe sgr/execution/order_safety.py Punkt 5):
+        die In-Process-Duplicate-Detection ist bei einem Prozess-Neustart
+        wirkungslos (frischer, leerer In-Memory-State) und die Exchange-
+        seitige clientOrderId-Pruefung (ccxt_base.py::place_order) laeuft
+        nur im LIVE-Zweig - im PAPER-Modus (_simulate_order()) existiert
+        vor diesem Fix keine prozessuebergreifende Absicherung. Diese
+        Methode macht die DB zur zusaetzlichen, fuer PAPER einzigen
+        durablen Quelle der Wahrheit.
+        """
+        async with get_session() as session:
+            stmt = select(OrderModel).where(OrderModel.id == order_id)
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            if row is None:
+                return None
+            return {
+                "id": str(row.id),
+                "signal_id": str(row.signal_id),
+                "exchange_order_id": row.exchange_order_id,
+                "symbol": row.symbol,
+                "exchange": row.exchange,
+                "side": row.side,
+                "order_type": row.order_type,
+                "quantity": row.quantity,
+                "limit_price": row.limit_price,
+                "filled_quantity": row.filled_quantity,
+                "average_fill_price": row.average_fill_price,
+                "fees": row.fees,
+                "status": row.status,
+                "trading_mode": row.trading_mode,
+                "strategy_name": row.strategy_name,
+                "submitted_at": row.submitted_at,
+                "filled_at": row.filled_at,
+                "raw_response": row.raw_response,
+                "user_id": row.user_id,
+            }
+
     async def update_status(
         self,
         order_id: str,
@@ -195,8 +237,17 @@ class OrderRepository:
         average_fill_price: Decimal | None = None,
         fees: Decimal | None = None,
         filled_at: datetime | None = None,
+        exchange_order_id: str | None = None,
     ) -> None:
-        """Aktualisiert Order-Status nach Fill."""
+        """
+        Aktualisiert Order-Status nach Fill.
+
+        exchange_order_id: optional, wird gesetzt wenn die Order beim
+        initialen create() (siehe SafeOrderExecutor._persist_pending(),
+        Baustein 7 Punkt 5) noch als PENDING ohne bekannte
+        exchange_order_id angelegt wurde - der Exchange-Call liefert sie
+        erst danach.
+        """
         updates: dict[str, Any] = {"status": status}
         if filled_quantity is not None:
             updates["filled_quantity"] = filled_quantity
@@ -206,6 +257,8 @@ class OrderRepository:
             updates["fees"] = fees
         if filled_at is not None:
             updates["filled_at"] = filled_at
+        if exchange_order_id is not None:
+            updates["exchange_order_id"] = exchange_order_id
 
         async with get_session() as session:
             stmt = update(OrderModel).where(OrderModel.id == order_id).values(**updates)
@@ -377,11 +430,19 @@ class PositionRepository:
         position_id: str,
         closed_at: datetime,
         realized_pnl: Decimal | None = None,
+        close_reason: str | None = None,
     ) -> None:
-        """Markiert eine Position als geschlossen. Idempotent (kein Fehler bei doppeltem Close)."""
+        """Markiert eine Position als geschlossen. Idempotent (kein Fehler bei doppeltem Close).
+
+        close_reason: siehe ExitReason (sgr/core/types.py) - None laesst
+        die Spalte unveraendert (z.B. bei einem best-effort Retry desselben
+        Close, der reason bereits beim ersten Aufruf gesetzt hat).
+        """
         updates: dict[str, Any] = {"is_open": False, "closed_at": closed_at}
         if realized_pnl is not None:
             updates["realized_pnl"] = realized_pnl
+        if close_reason is not None:
+            updates["close_reason"] = close_reason
 
         async with get_session() as session:
             stmt = update(PositionModel).where(PositionModel.id == position_id).values(**updates)
@@ -452,6 +513,12 @@ class PositionRepository:
             "strategy_name": r.strategy_name,
             "trading_mode": r.trading_mode,
             "user_id": str(r.user_id) if r.user_id else None,
+            "stop_loss_price": r.stop_loss_price,
+            "take_profit_price": r.take_profit_price,
+            "max_holding_until": r.max_holding_until,
+            "sl_order_id": r.sl_order_id,
+            "tp_order_id": r.tp_order_id,
+            "close_reason": r.close_reason,
         }
 
 
@@ -534,8 +601,27 @@ class TradeRepository:
     """Immutable Trade Records – einmal geschrieben, nie verändert."""
 
     async def create(self, trade_data: dict[str, Any]) -> str:
+        """
+        Erwartete Keys: position_id, symbol, exchange, side, entry_price,
+        exit_price, quantity, realized_pnl, fees_total, net_pnl,
+        holding_seconds, strategy_name, regime, trading_mode, opened_at,
+        closed_at, trade_metadata (optional dict), user_id (optional).
+
+        id wird bei Bedarf automatisch erzeugt und trade_metadata defaultet
+        auf {} (analog zu PositionRepository.upsert_open()/
+        PortfolioSnapshotRepository.create() - der Aufrufer muss beides
+        nicht selbst setzen). Root-Cause-Fix (Position-Protection-Audit
+        2026-09-16): dieses create() wurde bisher an KEINER Stelle im
+        Code aufgerufen - PortfolioEngine._record_trade() hielt
+        geschlossene Trades ausschliesslich in einer In-Memory-Liste
+        (self._trade_history), verloren bei jedem Worker-Neustart. Siehe
+        PortfolioEngine._persist_trade() fuer den neuen Aufrufer.
+        """
         async with get_session() as session:
-            trade = TradeModel(**trade_data)
+            trade_id = trade_data.get("id") or str(uuid4())
+            row = {**trade_data, "id": trade_id}
+            row.setdefault("trade_metadata", {})
+            trade = TradeModel(**row)
             session.add(trade)
             await session.flush()
             return str(trade.id)

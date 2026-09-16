@@ -334,8 +334,29 @@ class CCXTBaseAdapter:
         SymbolLimits-Domain-Objekte. Best-effort pro Symbol: ein
         fehlerhafter/unvollstaendiger Eintrag fuer EIN Symbol darf nicht
         die Extraktion fuer alle anderen Symbole verhindern.
+
+        Root-Cause-Fix (E2E-Harness-Fund gegen echtes Binance Futures
+        Testnet, Position-Protection-Deployment 2026-09-16): ccxt
+        schluesselt Futures/Contract-Maerkte MIT Settle-Suffix (z.B.
+        "BTC/USDT:USDT"), waehrend Symbol.ccxt_symbol (verwendet an JEDER
+        Lookup-Stelle: PreflightValidator._check_symbol_precision_and_limits,
+        ExecutionEngine._quantize_order) NIEMALS diesen Suffix traegt -
+        ein Lookup fuer ein Futures-Symbol traf dadurch bisher IMMER ins
+        Leere (None), wodurch Precision-/Min-Notional-Durchsetzung fuer
+        genau die Marktart (gehebelte Futures), wo sie am wichtigsten
+        ist, sich selbst automatisch deaktivierte, ohne dass irgendein
+        Preflight-Check das als Fehlschlag gemeldet haette (supported=False
+        statt eines echten Fehlers). Zusaetzlich unter dem Suffix-freien
+        Schluessel indexieren - aber NUR wenn dieser Adapter selbst fuer
+        Futures konfiguriert ist (self.futures_mode, siehe BinanceAdapter):
+        ccxt laedt IMMER alle Maerkte (auch Spot), unabhaengig vom
+        konfigurierten defaultType - ohne dieses Gate wuerde ein
+        Spot-Adapter faelschlich Futures-Limits fuer sein eigenes
+        Suffix-freies Spot-Symbol uebernehmen (oder umgekehrt fuer einen
+        Futures-Adapter, falls Spot zuerst iteriert wird).
         """
         result: dict[str, SymbolLimits] = {}
+        is_futures_adapter = getattr(self, "futures_mode", False)
         for symbol, market in markets.items():
             if "/" not in symbol:
                 continue
@@ -345,13 +366,18 @@ class CCXTBaseAdapter:
                 amount_limits = limits.get("amount") or {}
                 cost_limits = limits.get("cost") or {}
 
-                result[symbol] = SymbolLimits(
+                symbol_limits = SymbolLimits(
                     amount_precision=self._safe_int(precision.get("amount")),
                     price_precision=self._safe_int(precision.get("price")),
                     min_amount=self._safe_decimal(amount_limits.get("min")),
                     max_amount=self._safe_decimal(amount_limits.get("max")),
                     min_notional=self._safe_decimal(cost_limits.get("min")),
                 )
+                result[symbol] = symbol_limits
+
+                base_quote = symbol.split(":")[0]
+                if base_quote != symbol and is_futures_adapter:
+                    result[base_quote] = symbol_limits
             except (TypeError, AttributeError):
                 # Unerwartete Struktur fuer dieses eine Symbol (z.B. ccxt
                 # liefert manchmal verschachtelte Dicts statt Skalaren
@@ -581,6 +607,37 @@ class CCXTBaseAdapter:
         except Exception as e:
             raise self._map_error(e) from e
 
+    async def set_leverage(self, symbol: str, leverage: Decimal) -> None:
+        """
+        Setzt die Account-Leverage fuer ein Symbol via ccxt's
+        vereinheitlichtem set_leverage() (z.B. Binance UM Futures POST
+        /fapi/v1/leverage). Laeuft identisch in PAPER (gegen das
+        Testnet-Konto, dank set_sandbox_mode(True) in connect()) und
+        LIVE - derselbe Call, nur ein anderes Konto dahinter, siehe
+        Modul-Docstring "Paper Mode: identischer Code-Pfad wie Live".
+
+        Spot-only Exchanges (z.B. Pionex) kennen kein Leverage-Konzept -
+        analog zu get_positions()/get_position_mode() wird das ueber
+        ccxt's has-Dict erkannt und als NotSupportedFeatureError
+        geworfen statt eines stillschweigenden No-Ops (ein No-Op wuerde
+        dem Aufrufer faelschlich "Leverage gesetzt" vortaeuschen).
+        """
+        self._require_connected()
+        self._require_feature("setLeverage")
+        try:
+            await self._ccxt.set_leverage(int(leverage), symbol)
+            log.info(
+                "exchange.leverage_set",
+                exchange=self.exchange_id.value,
+                symbol=symbol,
+                leverage=str(leverage),
+                trading_mode=self.trading_mode.value,
+            )
+        except ExchangeError:
+            raise
+        except Exception as e:
+            raise self._map_error(e) from e
+
     async def get_market_status(self) -> MarketStatus:
         """
         Fragt ccxt's fetch_status() ab (kein Cache - anders als
@@ -734,12 +791,20 @@ class CCXTBaseAdapter:
             # Fallback if ticker fails in simulation
             ticker = None
 
+        # Zentral konfigurierbare Slippage (RiskLimitsConfig.paper_slippage_pct)
+        # statt zuvor hartkodierter 0.05% - siehe Modul-Docstring dort fuer
+        # die Begruendung der Defaults. Slippage verschlechtert den Fill
+        # immer aus Sicht des Traders (Buy teurer, Sell billiger).
+        from sgr.core.config import get_config
+
+        slippage_pct = Decimal(str(get_config().risk_limits.paper_slippage_pct))
+
         # Simulate fill price: market order = ask (buy) or bid (sell) + slippage
         if ticker:
             if order.side == Side.BUY:
-                fill_price = ticker.ask * Decimal("1.0005")  # 0.05% slippage
+                fill_price = ticker.ask * (Decimal("1") + slippage_pct)
             else:
-                fill_price = ticker.bid * Decimal("0.9995")  # 0.05% slippage
+                fill_price = ticker.bid * (Decimal("1") - slippage_pct)
         elif order.limit_price:
             fill_price = order.limit_price
         else:
@@ -756,8 +821,12 @@ class CCXTBaseAdapter:
                 detail=f"paper fill simulation: no ticker and no limit_price for {order.symbol}",
             )
 
-        # Simulate fees (0.1% taker)
-        fee_rate = Decimal("0.001")
+        # Zentral konfigurierbare Taker-Fee (RiskLimitsConfig.paper_taker_fee_pct)
+        # statt zuvor hartkodierter 0.1% (Spot-Default) - Market Orders sind
+        # strukturell immer Taker (Paper platziert aktuell keine Limit-
+        # Orders, die als Maker fuellen koennten - siehe TODO in
+        # Modul-Docstring der RiskLimitsConfig-Felder).
+        fee_rate = Decimal(str(get_config().risk_limits.paper_taker_fee_pct))
         fees = order.quantity * fill_price * fee_rate
 
         now = datetime.now(tz=UTC)

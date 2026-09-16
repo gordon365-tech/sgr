@@ -349,6 +349,7 @@ class TestLifespanStartupShutdownPaperMode:
             initial_cash=mocks["config"].paper_initial_capital,
             position_repository=mocks["repos"].positions,
             tenant_id=mocks["config"].tenant_id,
+            trade_repository=mocks["repos"].trades,
         )
         assert mocks["PortfolioEngine"].call_args.kwargs["initial_cash"] == Decimal("12345")
 

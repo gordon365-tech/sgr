@@ -35,6 +35,7 @@ from uuid import uuid4
 
 from sgr.core.logging import get_logger
 from sgr.core.types import (
+    ExitReason,
     OrderResult,
     OrderStatus,
     Position,
@@ -124,6 +125,9 @@ class PortfolioEngine:
         initial_cash: Decimal = Decimal("10000"),
         position_repository: Any = None,
         tenant_id: str | None = None,
+        trade_repository: Any = None,
+        on_position_opened: Any = None,
+        on_position_closed: Any = None,
     ) -> None:
         self._trading_mode = trading_mode
         self._state = PortfolioState(trading_mode, initial_cash)
@@ -131,6 +135,43 @@ class PortfolioEngine:
         # Optional: PositionRepository fuer Crash-Recovery und Phase 7B
         # Reconciliation. None = rein in-memory (Tests, Backtesting).
         self._position_repo: Any = position_repository
+        # Optional: TradeRepository fuer persistente Trade-Historie (siehe
+        # sgr/core/repositories.py::TradeRepository Modul-Docstring - vorher
+        # nur In-Memory self._trade_history, verloren bei jedem Neustart).
+        # None = unveraendertes Verhalten (Tests, Backtesting).
+        self._trade_repo: Any = trade_repository
+        # Position-Protection-Hooks (additiv, siehe sgr/risk/
+        # position_protection.py::PositionProtectionManager - das ist der
+        # einzige vorgesehene Aufrufer). None = unveraendertes Verhalten.
+        #
+        # on_position_opened(position: Position) -> Position | None:
+        #   wird direkt (kein Event Bus - siehe Docstring-Hinweis unten)
+        #   aufgerufen, NACHDEM eine neue Position gespeichert/persistiert
+        #   wurde. Ein Rueckgabewert != None ERSETZT die gespeicherte
+        #   Position (z.B. mit gesetzten stop_loss_price/take_profit_price/
+        #   max_holding_until/sl_order_id/tp_order_id) und wird erneut
+        #   persistiert - PortfolioEngine bleibt dadurch alleiniger
+        #   Schreibpunkt fuer _state._positions/DB, statt dass der Hook
+        #   selbst mutiert.
+        #
+        # on_position_closed(position: Position, close_reason: str) -> None:
+        #   wird aufgerufen, NACHDEM eine Position VOLLSTAENDIG geschlossen
+        #   (nicht teilweise reduziert) und persistiert wurde - fuer OCO-
+        #   Cleanup (verwaisten SL- oder TP-Order stornieren).
+        self._on_position_opened = on_position_opened
+        self._on_position_closed = on_position_closed
+        # Phantom-Fill-Guard (Design-Review-Befund, siehe Modul-Docstring
+        # von position_protection.py): wenn SL und TP nahezu gleichzeitig
+        # triggern, schliesst der erste Fill die Position bereits
+        # vollstaendig; faengt der zweite (Sibling-)Fill danach noch ein,
+        # waere er ohne diesen Guard faelschlich eine NEUE Position (da
+        # _state._positions fuer dieses Symbol bereits leer ist). IDs
+        # werden beim vollstaendigen Schliessen einer geschuetzten Position
+        # hier eingetragen und beim ersten passenden Fill wieder entfernt -
+        # bewusst kein TTL/Ablauf, da hoechstens 2 Eintraege pro Position-
+        # Close entstehen und sie beim erwarteten Sibling-Fill sofort
+        # wieder verschwinden.
+        self._recently_closed_protective_order_ids: set[str] = set()
         # Multi-Tenant-Isolation (Audit nach Commit 5/6): OHNE tenant_id
         # schrieb _persist_position_upsert() jede Position mit
         # user_id=NULL in die DB, UND restore_from_persistence() las beim
@@ -160,6 +201,23 @@ class PortfolioEngine:
         # entfernt.
         self._entry_fees: dict[str, Decimal] = {}
 
+    def set_protection_hooks(
+        self,
+        on_position_opened: Any = None,
+        on_position_closed: Any = None,
+    ) -> None:
+        """
+        Post-Construction-Injection fuer die Position-Protection-Hooks
+        (siehe __init__ Docstring) - analog zum bestehenden
+        RiskEngine.inject_redis()-Muster in sgr/api/main.py. Notwendig,
+        weil PositionProtectionManager/-Watchdog eine bereits
+        konstruierte ExecutionEngine brauchen, PortfolioEngine in
+        lifespan() aber VOR der ExecutionEngine konstruiert wird
+        (zirkulaere Konstruktions-Reihenfolge ohne diesen Setter).
+        """
+        self._on_position_opened = on_position_opened
+        self._on_position_closed = on_position_closed
+
     # ------------------------------------------------------------------
     # Event Handlers
     # ------------------------------------------------------------------
@@ -184,6 +242,18 @@ class PortfolioEngine:
         existing = self._state._positions.get(symbol_key)
 
         if existing is None:
+            # Phantom-Fill-Guard (siehe __init__ Docstring): dieser Fill
+            # koennte der verspaetete Sibling (SL oder TP) einer bereits
+            # ueber den anderen Order geschlossenen Position sein - dann
+            # KEINE neue Position eroeffnen, sondern verwerfen.
+            if result.exchange_order_id in self._recently_closed_protective_order_ids:
+                self._recently_closed_protective_order_ids.discard(result.exchange_order_id)
+                log.warning(
+                    "portfolio.phantom_sibling_fill_dropped",
+                    symbol=symbol_key,
+                    exchange_order_id=result.exchange_order_id,
+                )
+                return
             # Neue Position öffnen
             await self._open_position(result, symbol_key)
         else:
@@ -242,6 +312,26 @@ class PortfolioEngine:
             fees=str(result.fees),
         )
 
+        # Position-Protection-Hook (siehe __init__ Docstring): darf die
+        # gespeicherte Position um SL/TP/Max-Holding-Felder ergaenzen.
+        # Fail-safe wie jeder andere optionale Hook in dieser Klasse - ein
+        # Fehler hier darf die bereits erfolgreich eroeffnete/persistierte
+        # Position nicht rueckgaengig machen, nur die Protection-Anreicherung
+        # entfaellt fuer diese eine Position.
+        if self._on_position_opened is not None:
+            try:
+                updated = await self._on_position_opened(position)
+                if updated is not None:
+                    self._state._positions[symbol_key] = updated
+                    await self._persist_position_upsert(updated)
+            except Exception as e:
+                log.error(
+                    "portfolio.on_position_opened_hook_failed",
+                    symbol=symbol_key,
+                    error=str(e),
+                    exc_info=True,
+                )
+
     async def _update_position(
         self,
         existing: Position,
@@ -276,8 +366,20 @@ class PortfolioEngine:
             )
             total_fees = result.fees + entry_fee_share
 
+            # Exit-Grund (siehe ExitReason, sgr/core/types.py): von
+            # ExecutionEngine aus order.metadata["exit_reason"] in
+            # result.raw_response uebertragen (analog zum bestehenden
+            # "strategy"-Muster dort). Fehlt der Key (normaler Exit durch
+            # ein gegenlaeufiges Strategie-Signal via Orchestrator), ist
+            # STRATEGY_SIGNAL der korrekte Default.
+            close_reason = str(
+                result.raw_response.get("exit_reason", ExitReason.STRATEGY_SIGNAL.value)
+            )
+
             # Trade Record speichern
-            self._record_trade(existing, result, close_qty, realized, total_fees)
+            await self._record_trade(
+                existing, result, close_qty, realized, total_fees, close_reason
+            )
 
             if close_qty >= existing.quantity:
                 # Vollständig geschlossen
@@ -293,14 +395,40 @@ class PortfolioEngine:
                 else:
                     self._state._cash -= exit_price * close_qty + result.fees
 
-                await self._persist_position_close(existing.id, existing.realized_pnl + realized)
+                await self._persist_position_close(
+                    existing.id, existing.realized_pnl + realized, close_reason
+                )
 
                 log.info(
                     "portfolio.position_closed",
                     symbol=symbol_key,
                     realized_pnl=str(realized),
                     fees=str(result.fees),
+                    close_reason=close_reason,
                 )
+
+                # Phantom-Fill-Guard (siehe __init__ Docstring): der
+                # Sibling-Order (falls vorhanden) koennte server-seitig
+                # bereits/gleichzeitig gefuellt worden sein, bevor der
+                # OCO-Cancel unten greift.
+                for protective_id in (existing.sl_order_id, existing.tp_order_id):
+                    if protective_id:
+                        self._recently_closed_protective_order_ids.add(protective_id)
+
+                # Position-Protection-Hook: OCO-Cleanup (verwaisten
+                # Sibling-Order stornieren). Fail-safe wie jeder andere
+                # optionale Hook - ein Fehler hier darf den bereits
+                # abgeschlossenen Close nicht rueckgaengig machen.
+                if self._on_position_closed is not None:
+                    try:
+                        await self._on_position_closed(existing, close_reason)
+                    except Exception as e:
+                        log.error(
+                            "portfolio.on_position_closed_hook_failed",
+                            symbol=symbol_key,
+                            error=str(e),
+                            exc_info=True,
+                        )
             else:
                 # Teilweise geschlossen
                 remaining_qty = existing.quantity - close_qty
@@ -316,6 +444,17 @@ class PortfolioEngine:
                     strategy_name=existing.strategy_name,
                     trading_mode=existing.trading_mode,
                     realized_pnl=existing.realized_pnl + realized,
+                    # Protection-Felder unveraendert weiterfuehren (siehe
+                    # Position-Docstring in sgr/core/types.py) - sonst
+                    # gingen SL/TP/Max-Holding-Schutz bei einer TEIL-
+                    # Schliessung verloren, obwohl die Position weiter
+                    # offen bleibt.
+                    leverage=existing.leverage,
+                    stop_loss_price=existing.stop_loss_price,
+                    take_profit_price=existing.take_profit_price,
+                    max_holding_until=existing.max_holding_until,
+                    sl_order_id=existing.sl_order_id,
+                    tp_order_id=existing.tp_order_id,
                 )
                 self._state._positions[symbol_key] = updated
                 if existing.side == PositionSide.LONG:
@@ -325,19 +464,21 @@ class PortfolioEngine:
 
                 await self._persist_position_upsert(updated)
 
-    def _record_trade(
+    async def _record_trade(
         self,
         position: Position,
         close_result: OrderResult,
         qty: Decimal,
         realized_pnl: Decimal,
         total_fees: Decimal,
+        close_reason: str = "",
     ) -> None:
         """Speichert geschlossenen Trade als immutable Record.
 
         total_fees = Entry-Fee-Anteil + Exit-Fee (siehe _entry_fees
         Docstring in __init__) - realized_pnl hat beide bereits abgezogen.
         """
+        closed_at = datetime.now(tz=UTC)
         self._trade_history.append(
             {
                 "id": str(uuid4()),
@@ -351,10 +492,31 @@ class PortfolioEngine:
                 "net_pnl": str(realized_pnl),
                 "strategy": position.strategy_name,
                 "opened_at": position.opened_at.isoformat(),
-                "closed_at": datetime.now(tz=UTC).isoformat(),
+                "closed_at": closed_at.isoformat(),
                 "trading_mode": self._trading_mode.value,
+                "close_reason": close_reason,
             }
         )
+
+        # Persistenz in die `trades`-Tabelle (Root-Cause-Fix, siehe
+        # sgr/core/repositories.py::TradeRepository Modul-Docstring -
+        # vorher landeten geschlossene Trades ausschliesslich in
+        # self._trade_history oben, verloren bei jedem Neustart).
+        # Best-effort/fail-safe: ein DB-Fehler hier darf das bereits
+        # erfolgte Schliessen der Position nicht rueckgaengig machen,
+        # gleiches Muster wie _persist_position_upsert()/_persist_position_close().
+        if self._trade_repo is not None:
+            holding_seconds = int((closed_at - position.opened_at).total_seconds())
+            await self._persist_trade(
+                position=position,
+                close_result=close_result,
+                qty=qty,
+                realized_pnl=realized_pnl,
+                total_fees=total_fees,
+                close_reason=close_reason,
+                holding_seconds=holding_seconds,
+                closed_at=closed_at,
+            )
 
         # Grafana-Observability-Audit: sgr_trades_executed_total/
         # sgr_trades_winning_total/sgr_trades_losing_total (metrics.py)
@@ -373,9 +535,56 @@ class PortfolioEngine:
                 pnl=realized_pnl,
                 winning=realized_pnl > 0,
                 cumulative_realized_pnl=cumulative,
+                exit_reason=close_reason or None,
             )
         except Exception as e:
             log.warning("portfolio.trade_metric_record_failed", error=str(e))
+
+    async def _persist_trade(
+        self,
+        position: Position,
+        close_result: OrderResult,
+        qty: Decimal,
+        realized_pnl: Decimal,
+        total_fees: Decimal,
+        close_reason: str,
+        holding_seconds: int,
+        closed_at: datetime,
+    ) -> None:
+        """Best-effort Persistenz eines geschlossenen Trades. Fail-safe wie
+        _persist_position_upsert()/_persist_position_close(): ein DB-Fehler
+        wird geloggt, aber niemals propagiert - das bereits erfolgte
+        Schliessen der Position darf davon nicht rueckgaengig gemacht
+        werden."""
+        try:
+            await self._trade_repo.create(
+                {
+                    "position_id": str(position.id),
+                    "symbol": position.symbol.ccxt_symbol,
+                    "exchange": position.symbol.exchange.value,
+                    "side": position.side.value,
+                    "entry_price": position.entry_price,
+                    "exit_price": close_result.average_fill_price,
+                    "quantity": qty,
+                    "realized_pnl": realized_pnl,
+                    "fees_total": total_fees,
+                    "net_pnl": realized_pnl,
+                    "holding_seconds": holding_seconds,
+                    "strategy_name": position.strategy_name,
+                    "regime": "unknown",
+                    "trading_mode": position.trading_mode.value,
+                    "opened_at": position.opened_at,
+                    "closed_at": closed_at,
+                    "trade_metadata": {"exit_reason": close_reason},
+                    "user_id": self._tenant_id,
+                }
+            )
+        except Exception as e:
+            log.error(
+                "portfolio.persist_trade_failed",
+                symbol=str(position.symbol),
+                error=str(e),
+            )
 
     # ------------------------------------------------------------------
     # Price Updates
@@ -422,6 +631,16 @@ class PortfolioEngine:
                 opened_at=position.opened_at,
                 strategy_name=position.strategy_name,
                 trading_mode=position.trading_mode,
+                # Protection-Felder unveraendert weiterfuehren (siehe
+                # Position-Docstring in sgr/core/types.py) - Position wird
+                # hier bei JEDEM Preis-Tick neu konstruiert; ohne diese
+                # Zeilen wuerden SL/TP/Max-Holding-Schutz beim naechsten
+                # Candle stillschweigend verloren gehen.
+                stop_loss_price=position.stop_loss_price,
+                take_profit_price=position.take_profit_price,
+                max_holding_until=position.max_holding_until,
+                sl_order_id=position.sl_order_id,
+                tp_order_id=position.tp_order_id,
             )
             self._state._positions[symbol_key] = updated
             updated_positions.append(updated)
@@ -569,6 +788,11 @@ class PortfolioEngine:
             opened_at=row["opened_at"],
             strategy_name=row["strategy_name"],
             trading_mode=TradingMode(row["trading_mode"]),
+            stop_loss_price=row.get("stop_loss_price"),
+            take_profit_price=row.get("take_profit_price"),
+            max_holding_until=row.get("max_holding_until"),
+            sl_order_id=row.get("sl_order_id"),
+            tp_order_id=row.get("tp_order_id"),
         )
 
     async def _persist_position_upsert(self, position: Position) -> None:
@@ -597,6 +821,11 @@ class PortfolioEngine:
                     "strategy_name": position.strategy_name,
                     "trading_mode": position.trading_mode.value,
                     "user_id": self._tenant_id,
+                    "stop_loss_price": position.stop_loss_price,
+                    "take_profit_price": position.take_profit_price,
+                    "max_holding_until": position.max_holding_until,
+                    "sl_order_id": position.sl_order_id,
+                    "tp_order_id": position.tp_order_id,
                 }
             )
         except Exception as e:
@@ -606,7 +835,9 @@ class PortfolioEngine:
                 error=str(e),
             )
 
-    async def _persist_position_close(self, position_id: Any, realized_pnl: Decimal) -> None:
+    async def _persist_position_close(
+        self, position_id: Any, realized_pnl: Decimal, close_reason: str | None = None
+    ) -> None:
         """Markiert eine Position in der DB als geschlossen. Best-effort."""
         if self._position_repo is None:
             return
@@ -615,6 +846,7 @@ class PortfolioEngine:
                 position_id=str(position_id),
                 closed_at=datetime.now(tz=UTC),
                 realized_pnl=realized_pnl,
+                close_reason=close_reason,
             )
         except Exception as e:
             log.error(

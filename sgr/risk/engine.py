@@ -334,6 +334,10 @@ class RiskEngine:
             win_rate=strategy_win_rate,
             profit_factor=strategy_profit_factor,
             max_order_notional=self._limits.max_order_notional,
+            position_size_usd=self._limits.position_size_usd,
+            leverage=self._limits.default_leverage,
+            stop_loss_pct=self._limits.stop_loss_pct,
+            risk_per_trade_pct=self._limits.risk_per_trade_pct,
         )
 
         # 7. Reduction Factor anwenden (Soft Limits)

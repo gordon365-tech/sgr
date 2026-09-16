@@ -13,6 +13,7 @@ Design decisions:
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from functools import lru_cache
 from typing import Any
@@ -110,6 +111,73 @@ class RiskLimitsConfig(BaseSettings):
     # relativ zum Portfolio-Wert begrenzt - dieser Cap ist absolut und
     # greift zusätzlich, unabhängig davon wie groß das Portfolio ist.
     max_order_notional: Decimal | None = Field(default=Decimal("10000"))
+
+    # ------------------------------------------------------------------
+    # TEST_1X / kontrollierter Funktionstest-Risk-Profile (Baustein:
+    # Paper-Trading-Lifecycle-Parity). Rein additiv - alle Felder haben
+    # konservative Defaults, die das bestehende Verhalten NICHT
+    # veraendern, solange sie nicht ueber RISK_-env-vars gesetzt werden
+    # (Ausnahme: default_leverage/stop_loss_pct/take_profit_pct/
+    # max_holding_minutes/risk_per_trade_pct/paper_taker_fee_pct/
+    # paper_slippage_pct sind neue, bisher nicht existierende Controls -
+    # ihre Defaults spiegeln das TEST_1X-Profil, sind aber inaktiv fuer
+    # bestehende Deployments, solange position_size_usd None bleibt,
+    # siehe PositionSizer.compute() Fixed-Notional-Zweig).
+    #
+    # risk_profile_name ist reines Audit-/Log-Label - KEINE
+    # dynamische Profil-Umschalt-Logik. Ein spaeteres automatisches
+    # Risk-Level-Scaling (siehe Aufgabenstellung "RISK SCALING FUER
+    # SPAETER") ist bewusst NICHT Teil dieses Feldes und darf erst
+    # aktiviert werden, wenn das TEST_1X-Baseline-Profil nachweislich
+    # funktioniert.
+    risk_profile_name: str = Field(default="TEST_1X")
+
+    # Fixer Notional-Zielwert pro Position in Quote-Currency (z.B. USD),
+    # z.B. 20 fuer den ersten Funktionstest. None = bestehendes,
+    # adaptives Sizing (ATR/Kelly/Heat, siehe PositionSizer) bleibt
+    # unveraendert aktiv - dieses Feld ist ein OPT-IN pro Profil, kein
+    # Ersatz des bestehenden Verhaltens.
+    position_size_usd: Decimal | None = Field(default=None, gt=0)
+
+    # Default-Leverage, die ExecutionEngine vor jeder eroeffnenden Order
+    # explizit auf der Exchange setzt (siehe CCXTBaseAdapter.set_leverage).
+    # 1 = kein Hebel (TEST_1X-Baseline).
+    default_leverage: Decimal = Field(default=Decimal("1"), ge=Decimal("1"))
+
+    # Stop-Loss/Take-Profit als Prozent-Abstand vom Entry-Preis
+    # (richtungsabhaengig in PositionProtectionManager angewendet).
+    stop_loss_pct: float = Field(default=0.01, gt=0.0, le=0.5)
+    take_profit_pct: float = Field(default=0.02, gt=0.0, le=1.0)
+
+    # Max Holding Time in Minuten, danach zwingender Exit ueber den
+    # normalen Order-Lifecycle (siehe PositionProtectionWatchdog).
+    max_holding_minutes: int = Field(default=30, ge=1, le=10_080)
+
+    # Maximal zulaessiges Risiko pro Trade als Anteil des Account-
+    # Kapitals (nicht des Notional-Werts!) - siehe PositionSizer
+    # Fixed-Notional-Zweig: wird die bei stop_loss_pct implizierte
+    # Verlusthoehe bei position_size_usd groesser als dieser Anteil des
+    # verfuegbaren Kapitals, wird die Order abgelehnt statt automatisch
+    # verkleinert oder vergroessert.
+    risk_per_trade_pct: float = Field(default=0.01, gt=0.0, le=0.20)
+
+    # Ab diesem Zeitpunkt (UTC) geoeffnete Positionen erhalten SL/TP/
+    # Max-Holding-Time-Schutz. None = Feature global inaktiv. Bereits
+    # VOR diesem Zeitpunkt offene ("Legacy"-)Positionen werden davon
+    # bewusst NICHT erfasst - sie sollen nicht durch einen Deploy
+    # unbeaufsichtigt und gleichzeitig geschlossen werden, siehe
+    # Modul-Docstring in sgr/risk/position_protection.py.
+    protection_cutover_at: datetime | None = Field(default=None)
+
+    # Zentrale, konfigurierbare Paper-Simulationswerte (ersetzen die
+    # zuvor in CCXTBaseAdapter._simulate_order() hartkodierten
+    # Konstanten 0.001/0.0005). Realistische Binance-USDT-M-Futures-
+    # Taker-Fee liegt bei ca. 0.04-0.05% (VIP0), nicht bei den zuvor
+    # verwendeten 0.1% (das ist der Spot-Default). Slippage bewusst
+    # klein aber nicht Null gehalten (siehe Aufgabenstellung: weder
+    # unrealistisch niedrig noch kuenstlich extrem).
+    paper_taker_fee_pct: float = Field(default=0.0005, ge=0.0, le=0.01)
+    paper_slippage_pct: float = Field(default=0.0005, ge=0.0, le=0.01)
 
 
 class ExchangeCredentials(BaseSettings):

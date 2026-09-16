@@ -851,11 +851,16 @@ class _FakePositionRepo:
         self.upserted.append(position_data)
         return position_data.get("id", "generated-id")
 
-    async def close(self, position_id, closed_at, realized_pnl=None) -> None:
+    async def close(self, position_id, closed_at, realized_pnl=None, close_reason=None) -> None:
         if self.raise_on_close is not None:
             raise self.raise_on_close
         self.closed.append(
-            {"position_id": position_id, "closed_at": closed_at, "realized_pnl": realized_pnl}
+            {
+                "position_id": position_id,
+                "closed_at": closed_at,
+                "realized_pnl": realized_pnl,
+                "close_reason": close_reason,
+            }
         )
 
 

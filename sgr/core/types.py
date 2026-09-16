@@ -57,7 +57,24 @@ class OrderType(StrEnum):
     LIMIT = "limit"
     STOP_MARKET = "stop_market"
     STOP_LIMIT = "stop_limit"
+    TAKE_PROFIT_MARKET = "take_profit_market"
     TWAP = "twap"
+
+
+class ExitReason(StrEnum):
+    """
+    Grund, aus dem eine Position geschlossen wurde (siehe
+    sgr/risk/position_protection.py). Wird sowohl in PositionModel.
+    close_reason als auch in trade_metadata (TradeRepository) persistiert
+    und als Prometheus-Label exportiert (sgr/monitoring/metrics.py).
+    """
+
+    STOP_LOSS = "stop_loss"
+    TAKE_PROFIT = "take_profit"
+    MAX_HOLDING_TIME = "max_holding_time"
+    STRATEGY_SIGNAL = "strategy_signal"  # normales, gegenlaeufiges Signal
+    KILL_SWITCH = "kill_switch"
+    MANUAL = "manual"
 
 
 class OrderStatus(StrEnum):
@@ -316,6 +333,24 @@ class Position(BaseModel):
     opened_at: datetime
     strategy_name: str
     trading_mode: TradingMode
+
+    # Position-Protection-Felder (siehe sgr/risk/position_protection.py
+    # Modul-Docstring). Alle optional/None = "kein Schutz an dieser
+    # Position" - das ist der korrekte Zustand fuer Positionen, die vor
+    # RiskLimitsConfig.protection_cutover_at eroeffnet wurden (Legacy-
+    # Positionen) sowie fuer jede Position, solange das Feature nicht
+    # konfiguriert ist. WICHTIG fuer jeden Aufrufer, der ein Position-
+    # Objekt neu konstruiert (PortfolioEngine.update_prices(),
+    # _update_position() Teil-Close-Zweig, _position_from_row()): diese
+    # Felder MUESSEN vom vorherigen Position-Objekt uebernommen werden,
+    # sonst werden sie beim naechsten Preis-Tick stillschweigend auf
+    # None zurueckgesetzt (siehe PortfolioEngine-Kommentare an den
+    # jeweiligen Stellen).
+    stop_loss_price: Decimal | None = None
+    take_profit_price: Decimal | None = None
+    max_holding_until: datetime | None = None
+    sl_order_id: str | None = None
+    tp_order_id: str | None = None
 
     @property
     def notional_value(self) -> Decimal:

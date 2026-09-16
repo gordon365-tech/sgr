@@ -181,37 +181,55 @@ class PreflightValidator:
                 )
             )
 
+        # Exchange-Precision/Min-Notional (Punkt "Minimum Order Size"):
+        # laeuft seit dem Paper/Live-Parity-Fix in BEIDEN Modi. Vorher nur
+        # LIVE - ein zu kleiner Trade wurde in PAPER nie abgelehnt, obwohl
+        # dieselbe Exchange (Binance Testnet fuer PAPER) dieselben
+        # LOT_SIZE/MIN_NOTIONAL-Filter durchsetzt wie im LIVE-Betrieb. Der
+        # Adapter-Zugriff selbst bleibt fail-closed: ohne Adapter kein
+        # Symbol-Precision-Check moeglich, aber das darf PAPER nicht
+        # komplett blockieren, falls der Pool aus anderen Gruenden (noch)
+        # keinen Adapter fuer dieses Symbol/Modus hat (z.B. Symbol nicht
+        # im konfigurierten Universe) - siehe try/except unten.
+        adapter: ExchangeAdapter | None
+        try:
+            adapter = self._pool.get(order.symbol.exchange, self._trading_mode)
+        except Exception as e:  # noqa: BLE001 - fail-closed fuer LIVE, siehe unten
+            adapter = None
+            if self._trading_mode == TradingMode.LIVE:
+                result.checks.append(
+                    PreflightCheckResult(
+                        name="exchange_credentials_and_connection",
+                        passed=False,
+                        detail=(
+                            f"No usable adapter for {order.symbol.exchange}/"
+                            f"{self._trading_mode.value}: {e}"
+                        ),
+                    )
+                )
+                # Ohne Adapter sind alle weiteren Live-Checks nicht
+                # möglich - fail-closed bedeutet hier: sofort abbrechen
+                # statt False positives für nachgelagerte Checks zu
+                # erzeugen.
+                return result
+
+        if adapter is not None:
+            result.checks.append(await self._check_symbol_precision_and_limits(adapter, order))
+
         if self._trading_mode != TradingMode.LIVE:
-            # PAPER: keine echten Exchange-/Balance-/Positions-Checks.
-            # Paper Mode ist laut Projektgrundsatz risikofrei und
-            # benötigt keine echten Trading-Permissions.
+            # PAPER: keine echten Exchange-Balance-/Positions-/Permission-
+            # Checks (siehe Modul-Docstring) - Precision/Min-Notional oben
+            # ist die eine bewusste Ausnahme (echte Order-Korrektheit,
+            # unabhaengig vom Modus).
             return result
 
         # Ab hier ausschließlich LIVE - fail-closed.
         result.checks.append(self._check_kill_switch_inactive())
-
-        try:
-            adapter = self._pool.get(order.symbol.exchange, self._trading_mode)
-        except Exception as e:  # noqa: BLE001 - fail-closed, jede Ursache zählt
-            result.checks.append(
-                PreflightCheckResult(
-                    name="exchange_credentials_and_connection",
-                    passed=False,
-                    detail=(
-                        f"No usable adapter for {order.symbol.exchange}/"
-                        f"{self._trading_mode.value}: {e}"
-                    ),
-                )
-            )
-            # Ohne Adapter sind alle weiteren Live-Checks nicht möglich -
-            # fail-closed bedeutet hier: sofort abbrechen statt False
-            # positives für nachgelagerte Checks zu erzeugen.
-            return result
+        assert adapter is not None  # oben bereits fail-closed behandelt
 
         result.checks.append(await self._check_connection_and_clock(adapter))
         result.checks.append(await self._check_market_status(adapter))
         result.checks.append(await self._check_symbol_availability(adapter, order))
-        result.checks.append(await self._check_symbol_precision_and_limits(adapter, order))
         result.checks.append(await self._check_balance_and_capital(adapter, order))
         result.checks.append(await self._check_leverage(adapter, order))
         result.checks.append(await self._check_position_mode_consistency(adapter, order))
@@ -360,7 +378,16 @@ class PreflightValidator:
     async def _check_symbol_availability(
         self, adapter: ExchangeAdapter, order: OrderRequest
     ) -> PreflightCheckResult:
-        symbol_str = str(order.symbol)
+        # Root-Cause-Fix (E2E-Harness-Fund gegen echtes Binance Futures
+        # Testnet, Position-Protection-Deployment 2026-09-16): vorher
+        # str(order.symbol) (liefert "BTC/USDT:binance", Symbol.__str__
+        # inkl. Exchange-Namen) statt order.symbol.ccxt_symbol ("BTC/USDT",
+        # das ccxt-Format, in dem info.symbols tatsaechlich vorliegt) - der
+        # Vergleich unten schlug dadurch IMMER fehl, fuer jedes Symbol,
+        # unabhaengig von der echten Verfuegbarkeit. Da dieser Check nur
+        # in LIVE lief und LIVE in dieser Produktion nie aktiv war, blieb
+        # der Defekt bisher unbemerkt.
+        symbol_str = order.symbol.ccxt_symbol
         try:
             info = await adapter.get_exchange_info()
         except ExchangeError as e:
@@ -407,7 +434,7 @@ class PreflightValidator:
         Grenzwertverstoss (z.B. quantity < min_amount) zaehlt dagegen als
         echter, blockierender Fehlschlag.
         """
-        symbol_str = str(order.symbol)
+        symbol_str = order.symbol.ccxt_symbol
         try:
             info = await adapter.get_exchange_info()
         except ExchangeError as e:

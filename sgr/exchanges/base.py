@@ -601,6 +601,24 @@ class ExchangeAdapter(Protocol):
         """
         ...
 
+    @abstractmethod
+    async def set_leverage(self, symbol: str, leverage: Decimal) -> None:
+        """
+        Setzt die Account-Leverage fuer ein Symbol explizit auf der
+        Exchange (z.B. Binance Futures POST /fapi/v1/leverage via ccxt's
+        vereinheitlichtem set_leverage()). Muss vor jeder eroeffnenden
+        Order aufgerufen werden (siehe ExecutionEngine) - ohne diesen
+        Aufruf bleibt die Account-Leverage auf dem zuletzt manuell/
+        extern gesetzten Wert, unabhaengig von RiskLimitsConfig.
+
+        Raises:
+            NotSupportedFeatureError: Spot-only Exchange ohne
+                Leverage-Konzept (z.B. Pionex).
+            ExchangeError: Exchange lehnt den Leverage-Wert ab (z.B.
+                ausserhalb des fuer dieses Symbol zulaessigen Bereichs).
+        """
+        ...
+
     # ------------------------------------------------------------------
     # Order Management
     # ------------------------------------------------------------------

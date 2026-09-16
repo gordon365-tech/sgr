@@ -44,12 +44,14 @@ from sgr.core.types import (
     OrderResult,
     OrderStatus,
     OrderType,
+    Side,
     TradingMode,
 )
 from sgr.exchanges.base import ExchangeError
 from sgr.exchanges.factory import ExchangePool
 from sgr.execution.order_safety import SafeOrderExecutor
 from sgr.execution.preflight import PreflightValidator
+from sgr.execution.quantization import quantize_and_validate
 from sgr.monitoring.trading_metrics import (
     record_duplicate_blocked,
     record_order_filled,
@@ -107,8 +109,22 @@ class ExecutionEngine:
         # Safety Middleware. Siehe sgr/execution/order_safety.py
         # Modul-Docstring fuer die vollstaendige Architekturbegruendung
         # (Idempotency-Key = order.id, Unknown-State-Handling bei
-        # Submit-Fehlern, Abgrenzung zur Exchange-seitigen clientOrderId).
-        self._safety = SafeOrderExecutor()
+        # Submit-Fehlern, Abgrenzung zur Exchange-seitigen clientOrderId,
+        # sowie Punkt 5 fuer den DB-gestuetzten Idempotenz-Fix, der
+        # PAPER-Order-Requests ueber einen Prozess-Neustart hinweg
+        # absichert - dieselbe order_repository-Injektion wie fuer
+        # _persist_order_create()/_persist_order_status() oben).
+        self._safety = SafeOrderExecutor(
+            order_repository=order_repository, tenant_id=self._tenant_id
+        )
+        # Leverage-Cache (Symbol -> zuletzt erfolgreich gesetzte Leverage
+        # DIESES Prozesses). Vermeidet einen redundanten set_leverage()-
+        # Exchange-Call vor jeder einzelnen Order, wenn der Zielwert sich
+        # nicht geaendert hat. Bewusst kein Redis/DB-Backing - im
+        # schlimmsten Fall (Prozess-Neustart) wird einmal mehr gesetzt,
+        # niemals seltener als noetig; ein leerer Cache nach Neustart ist
+        # also fail-safe in die sichere Richtung.
+        self._leverage_cache: dict[str, Decimal] = {}
 
     async def execute(
         self, order: OrderRequest, bypass_kill_switch: bool = False
@@ -118,12 +134,16 @@ class ExecutionEngine:
 
         Fail-Safe: jede Exception → REJECTED Result (kein uncontrolled State).
 
-        bypass_kill_switch: NUR fuer den PositionLiquidator gedacht (siehe
-            sgr/risk/position_liquidator.py) - eine de-risking Order, die
-            der Kill Switch selbst kommissioniert hat (Positionen
-            schliessen), darf nicht an seiner eigenen is_active-Sperre
-            scheitern. Default False haelt jeden bestehenden Aufrufer
-            (Orchestrator, Tests) unveraendert streng: neues Risiko bleibt
+        bypass_kill_switch: fuer PositionLiquidator (siehe
+            sgr/risk/position_liquidator.py) UND PositionProtectionWatchdog
+            (siehe sgr/risk/position_protection.py) gedacht - eine
+            de-risking/reduce_only Order (Kill-Switch-Flatten, Stop-Loss,
+            Take-Profit, Max-Holding-Time-Exit) darf nicht an der
+            is_active-Sperre scheitern, die genau diese Order eigentlich
+            ausloesen soll ("bestehende Positionen bleiben verwaltbar,
+            nur neue Entries werden blockiert"). Default False haelt
+            jeden bestehenden Aufrufer (Orchestrator, Tests) unveraendert
+            streng: neues Risiko bleibt
             bei aktivem Kill Switch blockiert.
         """
         # Sanity check: trading_mode muss übereinstimmen
@@ -198,6 +218,54 @@ class ExecutionEngine:
                 order, f"Preflight validation failed: {preflight_result.rejection_summary}"
             )
 
+        # Leverage (TEST_1X / zentrales Risk-Profile, siehe RiskLimitsConfig.
+        # default_leverage): nur fuer eroeffnende/vergroessernde Orders -
+        # eine reduce_only-Order (Close, SL, TP, Kill-Switch-Flatten) darf
+        # niemals die Account-Leverage veraendern. Faengt bewusst VOR
+        # _execute_internal() ab (nicht danach), damit bei einem Fehler
+        # gar keine Order gesendet wird - fail-closed, siehe
+        # CCXTBaseAdapter.set_leverage() Docstring: niemals stillschweigend
+        # von einer bereits korrekten Leverage ausgehen.
+        if not order.reduce_only:
+            leverage_error = await self._ensure_leverage(order)
+            if leverage_error is not None:
+                log.error(
+                    "execution_engine.blocked_by_leverage_setting",
+                    order_id=str(order.id),
+                    error=leverage_error,
+                )
+                record_order_rejected(
+                    exchange=order.symbol.exchange.value,
+                    symbol=str(order.symbol),
+                    reason="leverage_set_failed",
+                )
+                return self._rejected_result(order, f"Could not set leverage: {leverage_error}")
+
+        # Exchange-Precision/Minimum-Order-Groesse (Paper/Live-Parity-Fix):
+        # rundet quantity auf die von der Exchange gemeldete Precision ab
+        # und lehnt ab, wenn das Ergebnis unter min_amount/min_notional
+        # faellt - niemals aufrunden (siehe quantization.py Docstring).
+        # Nur fuer eroeffnende Orders: eine reduce_only-Order muss die
+        # Menge der bestehenden Position treffen, nicht neu bemessen
+        # werden. Laeuft in BEIDEN Modi identisch (PAPER nutzt Binance
+        # Testnet-Marktdaten, dieselben LOT_SIZE/MIN_NOTIONAL-Filter wie
+        # LIVE) - vorher wurde diese Pruefung in PAPER komplett
+        # uebersprungen.
+        if not order.reduce_only:
+            order, quantization_error = await self._quantize_order(order)
+            if quantization_error is not None:
+                log.warning(
+                    "execution_engine.blocked_by_min_order_size",
+                    order_id=str(order.id),
+                    error=quantization_error,
+                )
+                record_order_rejected(
+                    exchange=order.symbol.exchange.value,
+                    symbol=str(order.symbol),
+                    reason="min_order_size",
+                )
+                return self._rejected_result(order, quantization_error)
+
         try:
             return await self._execute_internal(order)
         except Exception as e:
@@ -213,6 +281,100 @@ class ExecutionEngine:
             # Duplicate-Guard-Tracking freigeben (Baustein 7). Symmetrisch
             # zum Placeholder-Eintrag, den execute_safely() setzt.
             self._safety.release(order)
+
+    async def _ensure_leverage(self, order: OrderRequest) -> str | None:
+        """
+        Stellt sicher, dass die Account-Leverage fuer order.symbol auf
+        config.risk_limits.default_leverage steht, BEVOR eine
+        eroeffnende Order gesendet wird (siehe execute() Aufrufstelle).
+
+        Returns:
+            None bei Erfolg (oder wenn die Exchange kein Leverage-Konzept
+            kennt, z.B. Spot-only wie Pionex - dort ist "keine Aenderung
+            noetig" das korrekte, nicht-blockierende Ergebnis).
+            Ein Fehlertext bei einem echten Exchange-Fehler - der
+            Aufrufer (execute()) lehnt die Order dann ab, statt
+            stillschweigend mit unbekannter Leverage fortzufahren.
+        """
+        from sgr.core.config import get_config
+        from sgr.exchanges.base import NotSupportedFeatureError
+
+        target = get_config().risk_limits.default_leverage
+        symbol_key = str(order.symbol)
+
+        if self._leverage_cache.get(symbol_key) == target:
+            return None
+
+        adapter = self._pool.get(order.symbol.exchange, self._trading_mode)
+        try:
+            await adapter.set_leverage(order.symbol.ccxt_symbol, target)
+        except NotSupportedFeatureError:
+            # Spot-only Exchange (z.B. Pionex) - kein Leverage-Konzept,
+            # kein Fehler. Cache trotzdem setzen, um den wiederholten
+            # (wirkungslosen) Call bei jeder Order zu vermeiden.
+            self._leverage_cache[symbol_key] = target
+            return None
+        except Exception as e:
+            return str(e)
+
+        self._leverage_cache[symbol_key] = target
+        return None
+
+    async def _quantize_order(self, order: OrderRequest) -> tuple[OrderRequest, str | None]:
+        """
+        Siehe sgr/execution/quantization.py Modul-Docstring. Holt
+        SymbolLimits ueber das bereits gecachte get_exchange_info() (kein
+        zusaetzlicher Netzwerk-Call) und - fuer Market Orders ohne
+        limit_price - einen frischen Ticker als Preis-Schaetzung fuer den
+        Notional-Check (analoge, bereits akzeptierte Einschraenkung wie
+        PreflightValidator._check_balance_and_capital: der exakte
+        Fill-Preis ist vor Ausfuehrung nicht bekannt).
+
+        Returns:
+            (order, None) bei Erfolg - order.quantity ggf. abgerundet.
+            (order, reason) wenn die Order unter die Exchange-Minimalgroesse
+            faellt - der Aufrufer lehnt dann ab, ohne die Order zu senden.
+        """
+        adapter = self._pool.get(order.symbol.exchange, self._trading_mode)
+        try:
+            info = await adapter.get_exchange_info()
+            # order.symbol.ccxt_symbol ("BTC/USDT"), NICHT str(order.symbol)
+            # ("BTC/USDT:binance", Symbol.__str__ inkl. Exchange-Namen) -
+            # symbol_limits ist im ccxt-Format geschluesselt (siehe
+            # CCXTBaseAdapter._extract_symbol_limits). Identischer Fund/Fix
+            # wie in PreflightValidator._check_symbol_availability/
+            # _check_symbol_precision_and_limits, siehe dortiger Kommentar.
+            limits = info.symbol_limits.get(order.symbol.ccxt_symbol)
+            if limits is None:
+                # Keine Limits-Daten fuer dieses Symbol - nichts zu
+                # quantisieren/validieren, kein Grund fuer den
+                # zusaetzlichen Ticker-Call unten.
+                return order, None
+            price = order.limit_price
+            if price is None:
+                ticker = await adapter.get_ticker(order.symbol.ccxt_symbol)
+                price = ticker.ask if order.side == Side.BUY else ticker.bid
+        except Exception as e:
+            # Fail-safe wie an allen anderen Best-effort-Marktdaten-
+            # Stellen dieser Engine: ohne Limits/Preis kann nicht
+            # quantisiert werden, aber ein Marktdaten-Ausfall darf eine
+            # ansonsten gueltige, bereits von Risk Engine/Preflight
+            # genehmigte Order nicht blockieren - unveraendert
+            # durchlassen, nicht ablehnen.
+            log.warning(
+                "execution_engine.quantization_skipped",
+                order_id=str(order.id),
+                error=str(e),
+            )
+            return order, None
+
+        quantized_qty, reason = quantize_and_validate(order.quantity, price, limits)
+        if reason is not None:
+            return order, reason
+
+        if quantized_qty != order.quantity:
+            order = order.model_copy(update={"quantity": quantized_qty})
+        return order, None
 
     async def _execute_internal(self, order: OrderRequest) -> OrderResult:
         adapter = self._pool.get(order.symbol.exchange, self._trading_mode)
@@ -265,13 +427,19 @@ class ExecutionEngine:
         # raw_response.get("strategy", "unknown") fuer positions.strategy_name -
         # ohne diese Zeile war das IMMER "unknown", auch produktiv (siehe
         # tests/integration/test_orchestrator_pipeline.py Happy-Path-Test).
+        #
+        # exit_reason (siehe ExitReason, sgr/core/types.py) - analoges
+        # Muster: PositionProtectionManager/Watchdog (sgr/risk/
+        # position_protection.py) setzen order.metadata["exit_reason"] auf
+        # eine schliessende Order, PortfolioEngine._update_position() liest
+        # es aus raw_response fuer close_reason. Bewusst OHNE Default -
+        # fehlt der Key (normaler Entry oder ein gegenlaeufiges Strategie-
+        # Signal), faellt PortfolioEngine selbst auf STRATEGY_SIGNAL zurueck.
+        extra_attribution: dict[str, Any] = {"strategy": order.metadata.get("strategy", "unknown")}
+        if "exit_reason" in order.metadata:
+            extra_attribution["exit_reason"] = order.metadata["exit_reason"]
         result = result.model_copy(
-            update={
-                "raw_response": {
-                    **result.raw_response,
-                    "strategy": order.metadata.get("strategy", "unknown"),
-                }
-            }
+            update={"raw_response": {**result.raw_response, **extra_attribution}}
         )
 
         log.info(
@@ -292,7 +460,12 @@ class ExecutionEngine:
             trading_mode=self._trading_mode.value,
         )
 
-        await self._persist_order_create(order, result)
+        # Persistenz (create als PENDING + finales update_status) laeuft
+        # jetzt VOLLSTAENDIG innerhalb von SafeOrderExecutor.execute_safely()
+        # oben ab, nicht mehr hier (siehe order_safety.py Modul-Docstring
+        # Punkt 5) - der PENDING-Record MUSS vor dem Exchange-Call
+        # existieren, nicht erst danach, sonst hinterlaesst ein Crash
+        # zwischen Exchange-Call und diesem Punkt gar keinen DB-Record.
 
         # Falls sofort filled (Market Order, Paper Mode)
         if result.status == OrderStatus.FILLED:
@@ -310,48 +483,6 @@ class ExecutionEngine:
         )
 
         return final_result
-
-    async def _persist_order_create(self, order: OrderRequest, result: OrderResult) -> None:
-        """
-        Legt den initialen Order-Record in der DB an (best-effort).
-        Bisher schrieb ExecutionEngine Orders NIE in die DB - nur Events
-        und Audit-Log-Zeilen, die keinen abfragbaren State darstellen.
-        OrderRepository.create()/update_status() existierten, wurden aber
-        nirgends aufgerufen. Ohne diesen Schritt ist Order-Recovery nach
-        einem Crash unmoeglich, da keine Datenquelle existiert.
-
-        id wird explizit auf order.id gesetzt (nicht die von create()
-        zurueckgegebene generierte ID), damit spaetere update_status()-
-        Aufrufe via order.id dieselbe Row treffen.
-        """
-        if self._order_repo is None:
-            return
-        try:
-            await self._order_repo.create(
-                {
-                    "id": str(order.id),
-                    "signal_id": str(order.signal_id),
-                    "exchange_order_id": result.exchange_order_id,
-                    "symbol": str(order.symbol),
-                    "exchange": order.symbol.exchange.value,
-                    "side": order.side.value,
-                    "order_type": order.order_type.value,
-                    "quantity": order.quantity,
-                    "limit_price": order.limit_price,
-                    "filled_quantity": result.filled_quantity,
-                    "status": result.status.value,
-                    "trading_mode": self._trading_mode.value,
-                    "strategy_name": str(order.metadata.get("strategy", "unknown")),
-                    "submitted_at": result.submitted_at,
-                    "user_id": self._tenant_id,
-                }
-            )
-        except Exception as e:
-            log.error(
-                "execution_engine.persist_order_create_failed",
-                order_id=str(order.id),
-                error=str(e),
-            )
 
     async def _persist_order_status(self, order_id: str, result: OrderResult) -> None:
         """Aktualisiert Order-Status in der DB (best-effort, fail-safe)."""
@@ -409,13 +540,13 @@ class ExecutionEngine:
                 # Exchange (die kein "strategy"-Feld kennt) - der Tag aus
                 # execute()/_execute_internal() ginge sonst bei jedem Poll
                 # wieder verloren (siehe dortiger Kommentar).
+                poll_attribution: dict[str, Any] = {
+                    "strategy": order.metadata.get("strategy", "unknown")
+                }
+                if "exit_reason" in order.metadata:
+                    poll_attribution["exit_reason"] = order.metadata["exit_reason"]
                 current = current.model_copy(
-                    update={
-                        "raw_response": {
-                            **current.raw_response,
-                            "strategy": order.metadata.get("strategy", "unknown"),
-                        }
-                    }
+                    update={"raw_response": {**current.raw_response, **poll_attribution}}
                 )
             except ExchangeError as e:
                 log.warning(
