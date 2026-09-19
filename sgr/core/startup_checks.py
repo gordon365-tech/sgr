@@ -147,6 +147,18 @@ class StartupSafetyChecker:
         ein stiller, unbemerkter "getriggerter" Zustand beim Start wäre
         verwirrend und würde jeden Trade sofort ablehnen, ohne dass der
         Betreiber merkt warum.
+
+        WICHTIG - deckt NICHT den ueber einen echten Prozess-Neustart
+        hinweg in Redis PERSISTIERTEN Kill-Switch-Zustand ab: dieser
+        Check laeuft laut Klassen-/Modul-Docstring bewusst VOR jeder
+        Redis-Verbindung und sieht daher zwangslaeufig immer den
+        Default-Zustand einer frisch konstruierten KillSwitch-Instanz
+        (is_active=False). Das Synchronisieren mit dem echten,
+        persistierten Redis-Zustand passiert NACH Redis-Verbindungsaufbau
+        in RecoveryManager._restore_kill_switch() (sgr/core/resilience.py,
+        siehe dortigen Docstring fuer den vollen Root-Cause-Befund) - kein
+        Duplikat, andere Zustaendigkeit (Fail-Safe-Sync statt Fail-Fast-
+        Gate).
         """
         kill_switch = get_kill_switch(
             self._config.trading_mode, tenant_id=self._config.tenant_id

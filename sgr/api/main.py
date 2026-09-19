@@ -342,6 +342,29 @@ async def lifespan(app: FastAPI, role: LifespanRole = "worker") -> AsyncIterator
         pool = ExchangePool()
         primary_exchange = config.primary_exchange
 
+        # UM-Futures statt Spot fuer Binance (BinanceAdapter.futures_mode,
+        # Default False): ccxt laedt zwar immer ALLE Maerkte unabhaengig
+        # von diesem Flag, loest aber die suffixfreie Symbol-Form
+        # (Symbol.ccxt_symbol, siehe core/types.py - "HFT/USDT" statt
+        # "HFT/USDT:USDT") nur dann korrekt gegen den Futures-Markt auf,
+        # wenn defaultType tatsaechlich futures ist. Root-Cause-Fix (live
+        # am Server reproduziert, 2026-09-17): dieses Kwarg wurde beim
+        # Pool-Setup hier nie durchgereicht, obwohl jede Order/Position im
+        # System durchgaengig asset_class=FUTURES traegt und
+        # ExecutionEngine bereits adapter.set_leverage() (ein reiner
+        # Futures-Call) nutzt - Futures war immer die beabsichtigte
+        # Marktart. Folge: fetch_ticker() scheiterte mit
+        # SymbolNotFoundError fuer jedes futures-only gelistete Symbol
+        # ohne parallele Spot-Notierung (die meisten des dynamisch
+        # entdeckten Universums) - nur die Handvoll Symbole MIT
+        # zusaetzlicher Spot-Notierung (z.B. QUICK, AI) funktionierten je
+        # zufaellig. Gilt NICHT fuer Pionex (kein Futures-Konzept,
+        # PionexAdapter.from_config() kennt dieses Kwarg nicht - siehe
+        # eigener Zweig unten).
+        binance_pool_kwargs: dict[str, Any] = (
+            {"futures_mode": True} if primary_exchange == ExchangeID.BINANCE else {}
+        )
+
         try:
             if config.tenant_id is not None:
                 # Multi-Tenant-Worker (Commit 5, Option A): Credentials
@@ -361,7 +384,10 @@ async def lifespan(app: FastAPI, role: LifespanRole = "worker") -> AsyncIterator
                         config.tenant_id, primary_exchange, config.trading_mode
                     )
                     await pool.initialize(
-                        [primary_exchange], config.trading_mode, credentials=tenant_credentials
+                        [primary_exchange],
+                        config.trading_mode,
+                        credentials=tenant_credentials,
+                        **binance_pool_kwargs,
                     )
                 except ValueError:
                     log.warning(
@@ -384,7 +410,9 @@ async def lifespan(app: FastAPI, role: LifespanRole = "worker") -> AsyncIterator
                 # wenn die entsprechenden Env-Vars nicht gesetzt sind.
                 try:
                     config.credentials.get_credentials(primary_exchange.value, config.trading_mode)
-                    await pool.initialize([primary_exchange], config.trading_mode)
+                    await pool.initialize(
+                        [primary_exchange], config.trading_mode, **binance_pool_kwargs
+                    )
                 except ValueError:
                     log.warning(
                         "sgr.api.exchange_credentials_missing",
@@ -590,6 +618,8 @@ async def lifespan(app: FastAPI, role: LifespanRole = "worker") -> AsyncIterator
             order_repository=repos.orders,
             strategy_registry=registry,
             trading_mode=config.trading_mode,
+            redis_client=feature_store.redis_client,
+            tenant_id=config.tenant_id,
         )
         await recovery_manager.recover_after_crash()
 

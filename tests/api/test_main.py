@@ -476,8 +476,16 @@ class TestLifespanPrimaryExchangeConfigurable:
                 mocks["config"].credentials.get_credentials.assert_called_once_with(
                     "binance", TradingMode.PAPER
                 )
+                # Root-Cause-Fix (live am Server reproduziert, 2026-09-17):
+                # futures_mode=True muss fuer Binance immer mitgegeben
+                # werden - ohne dieses Flag laeuft der Adapter im
+                # Spot-Modus, obwohl jede Order/Position durchgaengig
+                # asset_class=FUTURES traegt. fetch_ticker() scheiterte
+                # dadurch mit SymbolNotFoundError fuer jedes futures-only
+                # gelistete Symbol ohne parallele Spot-Notierung (siehe
+                # sgr/api/main.py binance_pool_kwargs).
                 mocks["pool"].initialize.assert_awaited_once_with(
-                    [ExchangeID.BINANCE], TradingMode.PAPER
+                    [ExchangeID.BINANCE], TradingMode.PAPER, futures_mode=True
                 )
         finally:
             for p in patchers:
@@ -746,6 +754,81 @@ class TestLifespanTenantId:
                     # .env-Pfad (config.credentials.get_credentials) darf im
                     # Multi-Tenant-Zweig nicht aufgerufen werden.
                     mocks["config"].credentials.get_credentials.assert_not_called()
+        finally:
+            for p in patchers:
+                p.stop()
+
+    async def test_tenant_id_set_with_binance_passes_futures_mode(self) -> None:
+        """Regressionstest fuer den Root-Cause-Fix (live am Server
+        reproduziert, 2026-09-17): Gordon/Sumo sind genau diese
+        Kombination (tenant_id gesetzt UND primary_exchange=BINANCE) -
+        vorher fehlte futures_mode=True hier komplett, der Adapter lief
+        dadurch faktisch im Spot-Modus. fetch_ticker() scheiterte in der
+        Folge mit SymbolNotFoundError fuer jedes futures-only gelistete
+        Symbol ohne parallele Spot-Notierung (z.B. HFT/USDT, SWELL/USDT,
+        ATA/USDT) - nur die Handvoll Symbole MIT zusaetzlicher
+        Spot-Notierung (z.B. QUICK, AI) funktionierten je zufaellig.
+        Siehe sgr/api/main.py binance_pool_kwargs."""
+        patchers, mocks = _patch_lifespan_dependencies(
+            paper_mode=True,
+            has_adapters=True,
+            primary_exchange=ExchangeID.BINANCE,
+            tenant_id="gordon",
+        )
+
+        app = FastAPI()
+        app.state = AppState()  # type: ignore[assignment]
+
+        tenant_creds = {"apiKey": "gordon-key", "secret": "gordon-secret"}
+
+        for p in patchers:
+            p.start()
+        try:
+            with patch(
+                "sgr.core.tenant_credentials.load_tenant_credentials",
+                new=AsyncMock(return_value=tenant_creds),
+            ):
+                async with lifespan(app):
+                    mocks["pool"].initialize.assert_awaited_once_with(
+                        [ExchangeID.BINANCE],
+                        TradingMode.PAPER,
+                        credentials=tenant_creds,
+                        futures_mode=True,
+                    )
+        finally:
+            for p in patchers:
+                p.stop()
+
+    async def test_tenant_id_set_with_pionex_does_not_pass_futures_mode(self) -> None:
+        """Gegenprobe zum futures_mode-Fix: Pionex kennt kein Futures-
+        Konzept (PionexAdapter.from_config() hat kein futures_mode-Kwarg)
+        - der Multi-Tenant-Zweig darf es fuer Pionex daher niemals
+        mitgeben, sonst wuerde from_config() mit TypeError scheitern."""
+        patchers, mocks = _patch_lifespan_dependencies(
+            paper_mode=True,
+            has_adapters=True,
+            primary_exchange=ExchangeID.PIONEX,
+            tenant_id="sumo",
+        )
+
+        app = FastAPI()
+        app.state = AppState()  # type: ignore[assignment]
+
+        tenant_creds = {"apiKey": "sumo-key", "secret": "sumo-secret"}
+
+        for p in patchers:
+            p.start()
+        try:
+            with patch(
+                "sgr.core.tenant_credentials.load_tenant_credentials",
+                new=AsyncMock(return_value=tenant_creds),
+            ):
+                async with lifespan(app):
+                    mocks["pool"].initialize.assert_awaited_once_with(
+                        [ExchangeID.PIONEX],
+                        TradingMode.PAPER,
+                        credentials=tenant_creds,
+                    )
         finally:
             for p in patchers:
                 p.stop()

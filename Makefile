@@ -88,6 +88,9 @@ test-integration:
 test-crash:
 	pytest tests/docker_crash_tests/ -v -m docker_crash
 
+test-e2e-scenarios:
+	pytest tests/e2e_scenarios/ -v -m e2e_scenario -o addopts=""
+
 test-cov:
 	pytest tests/ --cov=sgr --cov-report=html --cov-report=term-missing
 

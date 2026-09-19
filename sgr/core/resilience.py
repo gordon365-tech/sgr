@@ -228,11 +228,18 @@ class RecoveryManager:
         order_repository: Any,
         strategy_registry: Any,
         trading_mode: TradingMode,
+        redis_client: Any = None,
+        tenant_id: str | None = None,
     ) -> None:
         self._portfolio_engine = portfolio_engine
         self._order_repo = order_repository
         self._registry = strategy_registry
         self._trading_mode = trading_mode
+        # Fuer _restore_kill_switch() (siehe dortigen Docstring) - optional
+        # wie die drei anderen Injektionen: None = dieser Schritt wird
+        # uebersprungen (z.B. isolierte Tests ohne Redis), kein Pflichtfeld.
+        self._redis_client = redis_client
+        self._tenant_id = tenant_id
 
     async def recover_after_crash(self) -> bool:
         """
@@ -242,15 +249,16 @@ class RecoveryManager:
         vollstaendig ab, wird aber im Rueckgabewert reflektiert.
 
         Returns:
-            True nur wenn ALLE drei Schritte erfolgreich waren.
+            True nur wenn ALLE vier Schritte erfolgreich waren.
         """
         log.info("recovery.started")
 
         positions_ok = await self._restore_positions()
         orders_ok = await self._restore_orders()
         strategies_ok = await self._restore_strategies()
+        kill_switch_ok = await self._restore_kill_switch()
 
-        success = positions_ok and orders_ok and strategies_ok
+        success = positions_ok and orders_ok and strategies_ok and kill_switch_ok
         if success:
             log.info("recovery.complete")
         else:
@@ -259,6 +267,7 @@ class RecoveryManager:
                 positions_ok=positions_ok,
                 orders_ok=orders_ok,
                 strategies_ok=strategies_ok,
+                kill_switch_ok=kill_switch_ok,
             )
         return success
 
@@ -345,4 +354,86 @@ class RecoveryManager:
             return True
         except Exception as e:
             log.error("recovery.restore_strategies_failed", error=str(e))
+            return False
+
+    async def _restore_kill_switch(self) -> bool:
+        """
+        Synchronisiert den lokalen Kill-Switch-State mit dem in Redis
+        persistierten Zustand.
+
+        Root-Cause-Fix (live am Server reproduziert, 2026-09-17): eine
+        frisch konstruierte KillSwitch-Instanz (get_kill_switch(), siehe
+        sgr/risk/kill_switch.py) startet nach jedem Prozessneustart IMMER
+        lokal mit is_active=False - unabhaengig davon, ob zuvor ein
+        Trigger nach Redis persistiert wurde. Der bestehende Startup-
+        Check _check_kill_switch_not_preactivated() (sgr/core/
+        startup_checks.py) deckt das NICHT ab: er laeuft laut eigenem
+        Modul-Docstring bewusst VOR jeder Redis-Verbindung und prueft
+        deshalb ausschliesslich denselben frisch-lokalen State (per
+        Docstring dort: "nur bei In-Memory-State aus demselben
+        Prozesslauf relevant", z.B. Test-Leck) - er kann einen ueber
+        einen echten Neustart hinweg persistierten Kill Switch
+        strukturell nicht erkennen.
+
+        Live-Konsequenz (Gordon, 2026-09-17 17:42-17:43 Uhr): Kill Switch
+        war seit 2026-09-16 in Redis als aktiv persistiert. Nach einem
+        Worker-Neustart lief `execution_engine.blocked_by_kill_switch`
+        nicht - eine neue Order wurde faelschlich durchgelassen, bevor
+        RiskEngines eigener Hard-Limit-Check (max_open_positions) den
+        Switch 8 Sekunden spaeter zufaellig erneut ausloeste. Ohne diesen
+        Fix wiederholt sich das bei JEDEM Neustart waehrend ein Kill
+        Switch bewusst aktiv gehalten werden soll.
+
+        Fix-Ort bewusst hier (RecoveryManager), nicht in
+        startup_checks.py: dieser Schritt laeuft im Lifespan NACH Redis-
+        Verbindungsaufbau (siehe sgr/api/main.py Schritt 8d, vor
+        Market-Data-Start) - identisches zeitliches Muster wie
+        _restore_strategies() oben. Bewusst fail-safe wie die anderen
+        drei _restore_*()-Schritte (nicht fail-fast wie startup_checks.py):
+        ein Redis-Fehler hier darf den Server-Start nicht verhindern,
+        siehe Klassendocstring - im Fehlerfall bleibt lediglich der
+        bisherige, bereits bestehende Luecken-Zustand erhalten, kein
+        NEUES Risiko wird dadurch eingefuehrt.
+
+        Setzt den lokalen State nur, wenn Redis tatsaechlich einen
+        aktiven Trigger zeigt - ein inaktiver oder fehlender Redis-
+        Eintrag aendert nichts (die lokale Instanz startet ohnehin
+        inaktiv, siehe oben).
+        """
+        if self._redis_client is None:
+            log.info(
+                "recovery.kill_switch_sync_skipped",
+                reason="no redis client injected",
+            )
+            return True
+
+        from sgr.risk.kill_switch import get_kill_switch, read_kill_switch_state_from_redis
+
+        try:
+            current = await read_kill_switch_state_from_redis(
+                self._redis_client, self._trading_mode, tenant_id=self._tenant_id
+            )
+            if current is None or not current.get("is_active"):
+                log.info("recovery.kill_switch_synced", was_active=False)
+                return True
+
+            kill_switch = get_kill_switch(self._trading_mode, tenant_id=self._tenant_id)
+            kill_switch.inject_redis(self._redis_client)
+            # Identisches Muster wie der gefixte POST /risk/kill-switch/
+            # reset-Endpoint (sgr/api/routers/risk.py): den lokalen State
+            # direkt auf den echten, persistierten Zustand setzen (kein
+            # erneuter trigger()-Aufruf noetig/gewuenscht - der Trigger
+            # ist bereits in Redis persistiert, hier geht es nur um den
+            # lokalen In-Memory-Spiegel dieses Prozesses).
+            kill_switch._state.trigger(  # noqa: SLF001
+                current.get("reason") or "unknown", self._trading_mode
+            )
+            log.warning(
+                "recovery.kill_switch_restored_active",
+                reason=current.get("reason"),
+                triggered_at=current.get("triggered_at"),
+            )
+            return True
+        except Exception as e:
+            log.error("recovery.restore_kill_switch_failed", error=str(e))
             return False

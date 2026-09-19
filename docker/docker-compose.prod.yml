@@ -568,7 +568,49 @@ services:
 
       # Siehe ausfuehrlichen Kommentar bei worker-gordon oben: manueller
       # Override auf explizite operative Anweisung, kein Go-Live-Signal.
+      # UNVERAENDERT gelassen (2026-09-17 Risk-Profile-Angleichung, siehe
+      # RISK_*-Block unten): Sumo faehrt weiterhin zwei force-aktivierte
+      # Strategien statt Gordons einer - das ist eine Strategie-Auswahl-
+      # Entscheidung, keine Risk-Limit-Frage, und war nicht Teil dieses
+      # Auftrags (Angleichung ausdruecklich nur auf RISK_*). Bewusst
+      # unangetastet, siehe Bericht.
       STRATEGY_FORCE_ACTIVATE: "trend_following_v1,mean_reversion_v1"
+
+      # TEST_1X Risk Profile (Angleichung an Gordon, 2026-09-17) - siehe
+      # ausfuehrlichen Kommentar beim identischen Block bei worker-gordon
+      # oben fuer die vollstaendige Begruendung jedes einzelnen Feldes.
+      # Identischer Mechanismus (Service-level environment:-Override,
+      # hat Vorrang vor .env.prod), identische Werte - Gordon und Sumo
+      # sollen ab diesem Deploy unter demselben kontrollierten Profil
+      # laufen.
+      #
+      # WICHTIG (Befund, siehe Bericht Punkt 3): RISK_PROTECTION_CUTOVER_AT
+      # wirkt NICHT rueckwirkend - PositionProtectionManager.
+      # on_position_opened() laeuft genau EINMAL, beim Oeffnen einer
+      # Position. Sumos 10 bereits offene Positionen wurden VOR diesem
+      # Deploy ohne SL/TP/Max-Holding eroeffnet und bleiben es auch nach
+      # diesem Fix dauerhaft - der Cutover-Wert unten schuetzt nur
+      # Positionen, die AB dem tatsaechlichen Deploy-Zeitpunkt neu
+      # eroeffnet werden. Cleanup der 10 Legacy-Positionen ist eine
+      # separate, hier bewusst NICHT mitgemachte Entscheidung (siehe
+      # identisches Vorgehen bei Gordons eigenen Legacy-Positionen).
+      #
+      # Wert unten = Zeitpunkt dieser Aenderung (2026-09-17). Falls der
+      # tatsaechliche Deploy spaeter erfolgt, VOR dem Deploy auf die
+      # echte Deploy-Zeit aktualisieren, sonst waeren zwischenzeitlich
+      # (zwischen dieser Aenderung und dem eigentlichen Rollout) neu
+      # eroeffnete Positionen faelschlich ungeschuetzt.
+      RISK_PROFILE_NAME: "TEST_1X"
+      RISK_MAX_OPEN_POSITIONS: "1"
+      RISK_DEFAULT_LEVERAGE: "1"
+      RISK_MAX_LEVERAGE: "1"
+      RISK_POSITION_SIZE_USD: "20"
+      RISK_STOP_LOSS_PCT: "0.01"
+      RISK_TAKE_PROFIT_PCT: "0.02"
+      RISK_MAX_HOLDING_MINUTES: "30"
+      RISK_RISK_PER_TRADE_PCT: "0.01"
+      RISK_MAX_ORDER_NOTIONAL: "50"
+      RISK_PROTECTION_CUTOVER_AT: "2026-09-17T22:40:46+00:00"
 
       SENTRY_DSN: ${SENTRY_DSN:-}
       

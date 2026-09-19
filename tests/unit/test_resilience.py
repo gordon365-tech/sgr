@@ -466,4 +466,150 @@ class TestRecoveryManager:
         assert result is False
         # Die anderen Schritte laufen trotzdem (kein Abbruch bei erstem Fehler)
         order_repo.get_open_orders.assert_called_once()
+
+
+class TestRecoveryManagerRestoreKillSwitch:
+    """
+    Root-Cause-Fix (live am Server reproduziert, 2026-09-17): der
+    bestehende Startup-Check _check_kill_switch_not_preactivated()
+    (sgr/core/startup_checks.py) laeuft bewusst VOR jeder Redis-
+    Verbindung und sieht daher immer nur den lokalen Default-Zustand
+    einer frisch konstruierten KillSwitch-Instanz (is_active=False) -
+    ein ueber einen echten Prozess-Neustart hinweg in Redis
+    persistierter, aktiver Kill Switch wurde dadurch nicht erkannt und
+    liess nach einem Neustart kurzzeitig neue Orders durch, bis
+    RiskEngines eigener Hard-Limit-Check ihn zufaellig erneut ausloeste.
+    _restore_kill_switch() schliesst diese Luecke NACH Redis-
+    Verbindungsaufbau (siehe resilience.py Docstring dort).
+    """
+
+    def _make_manager(self, redis_client=None, tenant_id="test-tenant") -> RecoveryManager:
+        return RecoveryManager(
+            portfolio_engine=AsyncMock(),
+            order_repository=AsyncMock(),
+            strategy_registry=AsyncMock(),
+            trading_mode=TradingMode.PAPER,
+            redis_client=redis_client,
+            tenant_id=tenant_id,
+        )
+
+    async def test_skipped_without_redis_client(self) -> None:
+        """Kein Redis-Client injiziert (z.B. isolierte Tests ohne Redis,
+        analog zu den drei anderen optionalen Injektionen) - No-Op,
+        kein Fehler."""
+        mgr = self._make_manager(redis_client=None)
+
+        result = await mgr._restore_kill_switch()
+
+        assert result is True
+
+    async def test_noop_when_no_persisted_state(self, mocker) -> None:
+        """Noch nie ein Trigger persistiert (z.B. frisches Deployment) -
+        lokaler Default-Zustand (inaktiv) ist bereits korrekt."""
+        mocker.patch(
+            "sgr.risk.kill_switch.read_kill_switch_state_from_redis",
+            new=AsyncMock(return_value=None),
+        )
+        mock_get_ks = mocker.patch("sgr.risk.kill_switch.get_kill_switch")
+        mgr = self._make_manager(redis_client=AsyncMock())
+
+        result = await mgr._restore_kill_switch()
+
+        assert result is True
+        mock_get_ks.assert_not_called()
+
+    async def test_noop_when_persisted_state_inactive(self, mocker) -> None:
+        mocker.patch(
+            "sgr.risk.kill_switch.read_kill_switch_state_from_redis",
+            new=AsyncMock(return_value={"is_active": False, "reason": None}),
+        )
+        mock_get_ks = mocker.patch("sgr.risk.kill_switch.get_kill_switch")
+        mgr = self._make_manager(redis_client=AsyncMock())
+
+        result = await mgr._restore_kill_switch()
+
+        assert result is True
+        mock_get_ks.assert_not_called()
+
+    async def test_syncs_local_state_when_persisted_active(self, mocker) -> None:
+        """Kernpunkt des Fixes: ein in Redis aktiver Kill Switch wird auf
+        die lokale KillSwitch-Instanz uebertragen, BEVOR irgendein Trade
+        stattfinden kann (siehe Aufrufreihenfolge in main.py: Schritt 8d,
+        vor Market-Data-Start)."""
+        redis_client = AsyncMock()
+        mocker.patch(
+            "sgr.risk.kill_switch.read_kill_switch_state_from_redis",
+            new=AsyncMock(
+                return_value={
+                    "is_active": True,
+                    "reason": "Open positions 1 exceeds max 1",
+                    "triggered_at": "2026-09-16T19:56:28.470965",
+                }
+            ),
+        )
+        fake_kill_switch = MagicMock()
+        mock_get_ks = mocker.patch(
+            "sgr.risk.kill_switch.get_kill_switch", return_value=fake_kill_switch
+        )
+        mgr = self._make_manager(redis_client=redis_client, tenant_id="gordon-uuid")
+
+        result = await mgr._restore_kill_switch()
+
+        assert result is True
+        mock_get_ks.assert_called_once_with(TradingMode.PAPER, tenant_id="gordon-uuid")
+        fake_kill_switch.inject_redis.assert_called_once_with(redis_client)
+        fake_kill_switch._state.trigger.assert_called_once_with(
+            "Open positions 1 exceeds max 1", TradingMode.PAPER
+        )
+
+    async def test_missing_reason_falls_back_to_unknown(self, mocker) -> None:
+        mocker.patch(
+            "sgr.risk.kill_switch.read_kill_switch_state_from_redis",
+            new=AsyncMock(return_value={"is_active": True, "reason": None}),
+        )
+        fake_kill_switch = MagicMock()
+        mocker.patch("sgr.risk.kill_switch.get_kill_switch", return_value=fake_kill_switch)
+        mgr = self._make_manager(redis_client=AsyncMock())
+
+        await mgr._restore_kill_switch()
+
+        fake_kill_switch._state.trigger.assert_called_once_with("unknown", TradingMode.PAPER)
+
+    async def test_failure_returns_false_not_raises(self, mocker) -> None:
+        mocker.patch(
+            "sgr.risk.kill_switch.read_kill_switch_state_from_redis",
+            new=AsyncMock(side_effect=RuntimeError("redis down")),
+        )
+        mgr = self._make_manager(redis_client=AsyncMock())
+
+        result = await mgr._restore_kill_switch()
+
+        assert result is False
+
+    async def test_recover_after_crash_includes_kill_switch_step(self, mocker) -> None:
+        """recover_after_crash() muss den neuen vierten Schritt tatsaechlich
+        aufrufen und in die Gesamt-Erfolgsbewertung einbeziehen."""
+        mocker.patch(
+            "sgr.risk.kill_switch.read_kill_switch_state_from_redis",
+            new=AsyncMock(side_effect=RuntimeError("redis down")),
+        )
+        portfolio = AsyncMock()
+        order_repo = AsyncMock()
+        order_repo.get_open_orders.return_value = []
+        registry = AsyncMock()
+        registry.get_active_names_from_db.return_value = []
+
+        mgr = RecoveryManager(
+            portfolio_engine=portfolio,
+            order_repository=order_repo,
+            strategy_registry=registry,
+            trading_mode=TradingMode.PAPER,
+            redis_client=AsyncMock(),
+            tenant_id="test-tenant",
+        )
+        result = await mgr.recover_after_crash()
+
+        # kill_switch-Schritt schlug fehl -> Gesamtergebnis muss das
+        # widerspiegeln, obwohl die anderen drei Schritte erfolgreich waren.
+        assert result is False
         registry.get_active_names_from_db.assert_called_once()
