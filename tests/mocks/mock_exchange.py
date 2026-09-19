@@ -76,6 +76,7 @@ class MockExchangeAdapter(CCXTBaseAdapter):
             "place_order": [],
             "cancel_order": [],
             "cancel_all_orders": [],
+            "set_leverage": [],
         }
 
         # Configurable responses
@@ -283,6 +284,15 @@ class MockExchangeAdapter(CCXTBaseAdapter):
         self.calls["get_positions"].append({})
         await self._maybe_raise()
         return self.positions
+
+    async def set_leverage(self, symbol: str, leverage: Decimal) -> None:
+        """No-op success, wie CCXTBaseAdapter.set_leverage() bei einer
+        echten Exchange die kein Leverage-Konzept ablehnt - Aufrufer
+        (ExecutionEngine) erwartet lediglich, dass kein Fehler geworfen
+        wird. Nicht ueberschrieben (statt geerbt von CCXTBaseAdapter),
+        weil diese Klasse bewusst kein self._ccxt hat - siehe __init__."""
+        self.calls["set_leverage"].append({"symbol": symbol, "leverage": leverage})
+        await self._maybe_raise()
 
     # ------------------------------------------------------------------
     # Orders
