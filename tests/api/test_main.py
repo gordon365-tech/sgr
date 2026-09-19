@@ -182,6 +182,8 @@ def _patch_lifespan_dependencies(
 
     risk_engine = MagicMock()
     risk_engine.initialize = AsyncMock()
+    risk_engine.start_kill_switch_remote_sync = AsyncMock()
+    risk_engine.stop_kill_switch_remote_sync = AsyncMock()
 
     portfolio_engine = MagicMock()
     # MagicMock(return_value=...) statt patch(..., return_value=...), damit
@@ -291,6 +293,7 @@ class TestLifespanStartupShutdownPaperMode:
                 mocks["feature_store"].connect.assert_awaited_once()
                 mocks["pool"].initialize.assert_awaited_once()
                 mocks["risk_engine"].initialize.assert_awaited_once()
+                mocks["risk_engine"].start_kill_switch_remote_sync.assert_awaited_once()
                 mocks["registry"].inject_repository.assert_called_once_with(
                     mocks["repos"].strategies
                 )
@@ -314,6 +317,7 @@ class TestLifespanStartupShutdownPaperMode:
                 assert app.state.asset_universe_engine is mocks["asset_universe_engine"]
 
             # --------- Shutdown-Assertions ---------
+            mocks["risk_engine"].stop_kill_switch_remote_sync.assert_awaited_once()
             mocks["strategy_engine"].stop.assert_awaited_once()
             mocks["md_engine"].stop.assert_awaited_once()
             mocks["asset_universe_engine"].stop.assert_awaited_once()

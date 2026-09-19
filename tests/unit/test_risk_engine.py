@@ -1029,6 +1029,41 @@ class TestRiskEngineRedisMetricsPublish:
 # ---------------------------------------------------------------------------
 
 
+class TestRiskEngineKillSwitchRemoteSync:
+    """
+    Root-Cause-Fix: KillSwitch.start_remote_sync() (Pub/Sub-Listener, der
+    einen bereits laufenden Prozess live mit einem in einem ANDEREN
+    Prozess ausgeloesten trigger()/reset() synchron haelt) existierte
+    bereits inkl. eigenem Unit-Test, wurde aber nie aus main.py heraus
+    gestartet - identische Fehlerklasse wie der inject_redis()-Fund vom
+    2026-09-16 (siehe RiskEngine.inject_redis Docstring). Live reproduziert:
+    ein per Skript ausgefuehrter KillSwitch.reset() traegt sein Ergebnis
+    korrekt nach Redis, ein bereits laufender Worker liest das nie zurueck
+    und lehnt Signale weiterhin mit "Kill switch is active" ab.
+    """
+
+    async def test_start_delegates_to_kill_switch(self, risk_engine: RiskEngine) -> None:
+        from unittest.mock import AsyncMock
+
+        risk_engine._kill_switch.start_remote_sync = AsyncMock()  # noqa: SLF001
+        await risk_engine.start_kill_switch_remote_sync()
+        risk_engine._kill_switch.start_remote_sync.assert_awaited_once()  # noqa: SLF001
+
+    async def test_stop_delegates_to_kill_switch(self, risk_engine: RiskEngine) -> None:
+        from unittest.mock import AsyncMock
+
+        risk_engine._kill_switch.stop_remote_sync = AsyncMock()  # noqa: SLF001
+        await risk_engine.stop_kill_switch_remote_sync()
+        risk_engine._kill_switch.stop_remote_sync.assert_awaited_once()  # noqa: SLF001
+
+    async def test_start_is_noop_without_injected_redis(self, risk_engine: RiskEngine) -> None:
+        """Regressionsschutz: ohne inject_redis() (Default) bleibt dies ein
+        no-op, identisch zu KillSwitch.start_remote_sync() selbst - siehe
+        dortigen Test test_start_remote_sync_without_redis_is_noop."""
+        await risk_engine.start_kill_switch_remote_sync()
+        assert risk_engine._kill_switch._subscriber_task is None  # noqa: SLF001
+
+
 class TestLeverageGuard:
     """
     max_leverage war konfiguriert (RiskLimitsConfig.max_leverage) aber wurde

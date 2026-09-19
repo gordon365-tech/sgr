@@ -440,6 +440,11 @@ async def lifespan(app: FastAPI, role: LifespanRole = "worker") -> AsyncIterator
         # an dieser Stelle bereits initialisiert (siehe oben, Schritt 3).
         if feature_store.redis_client is not None:
             risk_engine.inject_redis(feature_store.redis_client)
+            # BUG-FIX (siehe RiskEngine.start_kill_switch_remote_sync()
+            # Docstring): ohne diesen Call wirkt ein externer kill-switch/
+            # reset oder /trigger auf diesen bereits laufenden Worker nie,
+            # bis zum naechsten Neustart.
+            await risk_engine.start_kill_switch_remote_sync()
         app.state.risk_engine = risk_engine
 
         # 7. Portfolio Engine
@@ -803,6 +808,7 @@ async def lifespan(app: FastAPI, role: LifespanRole = "worker") -> AsyncIterator
     log.info("sgr.api.shutting_down", role=role)
 
     if role == "worker":
+        await risk_engine.stop_kill_switch_remote_sync()
         await protection_watchdog.stop()
         await asset_universe_engine.stop()
         await worker_metrics_publisher.stop()

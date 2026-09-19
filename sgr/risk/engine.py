@@ -150,6 +150,37 @@ class RiskEngine:
         self._redis = redis_client
         self._kill_switch.inject_redis(redis_client)
 
+    async def start_kill_switch_remote_sync(self) -> None:
+        """
+        Startet den Hintergrund-Task, der den internen KillSwitch live per
+        Redis Pub/Sub mit trigger()/reset()-Aufrufen AUS ANDEREN PROZESSEN
+        synchron haelt (sgr-api-Router, ein anderes Skript, ...) - siehe
+        KillSwitch.start_remote_sync() Docstring.
+
+        Root-Cause-Fix: KillSwitch.start_remote_sync() existierte bereits
+        inkl. eigenem Unit-Test, wurde aber - wie inject_redis() vor dem
+        Fix vom 2026-09-16 (siehe dortigen Docstring) - von main.py aus
+        nie aufgerufen. Konsequenz, live am Server reproduziert: ein
+        POST /risk/kill-switch/reset (oder /trigger) traegt sein Ergebnis
+        zwar korrekt nach Redis (SET + PUBLISH, siehe KillSwitch._publish_to_redis),
+        aber ein BEREITS LAUFENDER Worker-Prozess liest das nie zurueck -
+        sein In-Memory-KillSwitch-State bleibt exakt der Stand von seinem
+        letzten Neustart (RecoveryManager._restore_kill_switch(), siehe
+        sgr/core/resilience.py), unabhaengig von jedem externen reset()/
+        trigger() danach. Betrifft BEIDE Richtungen: ein Reset wirkt nicht
+        (Trades bleiben faelschlich blockiert), ein manueller Notaus-
+        Trigger ueber die API wirkt ebenso wenig (Trades laufen faelschlich
+        weiter) - bis zum naechsten Prozessneustart. Muss NACH inject_redis()
+        aufgerufen werden (start_remote_sync() ist sonst ein no-op ohne
+        Redis-Client, siehe dortigen Docstring).
+        """
+        await self._kill_switch.start_remote_sync()
+
+    async def stop_kill_switch_remote_sync(self) -> None:
+        """Gegenstueck zu start_kill_switch_remote_sync() fuer den
+        Shutdown-Pfad (sauberes Beenden des Pub/Sub-Listener-Tasks)."""
+        await self._kill_switch.stop_remote_sync()
+
     # ------------------------------------------------------------------
     # Main Entry Point
     # ------------------------------------------------------------------
