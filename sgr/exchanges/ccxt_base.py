@@ -317,8 +317,8 @@ class CCXTBaseAdapter:
                     contract=bool(market.get("contract")),
                     linear=market.get("linear"),
                     settle=market.get("settle"),
-                    amount_precision=self._safe_int(precision.get("amount")),
-                    price_precision=self._safe_int(precision.get("price")),
+                    amount_precision=self._safe_precision_places(precision.get("amount")),
+                    price_precision=self._safe_precision_places(precision.get("price")),
                     min_amount=self._safe_decimal(amount_limits.get("min")),
                     min_notional=self._safe_decimal(cost_limits.get("min")),
                     listed_at=listed_at,
@@ -367,8 +367,8 @@ class CCXTBaseAdapter:
                 cost_limits = limits.get("cost") or {}
 
                 symbol_limits = SymbolLimits(
-                    amount_precision=self._safe_int(precision.get("amount")),
-                    price_precision=self._safe_int(precision.get("price")),
+                    amount_precision=self._safe_precision_places(precision.get("amount")),
+                    price_precision=self._safe_precision_places(precision.get("price")),
                     min_amount=self._safe_decimal(amount_limits.get("min")),
                     max_amount=self._safe_decimal(amount_limits.get("max")),
                     min_notional=self._safe_decimal(cost_limits.get("min")),
@@ -386,13 +386,42 @@ class CCXTBaseAdapter:
                 continue
         return result
 
-    @staticmethod
-    def _safe_int(value: Any) -> int | None:
+    def _safe_precision_places(self, value: Any) -> int | None:
+        """
+        Wandelt ccxt's market['precision']['amount'/'price'] in eine
+        Dezimalstellen-Anzahl um - quantize_and_validate() (sgr/execution/
+        quantization.py) interpretiert amount_precision AUSSCHLIESSLICH
+        als Dezimalstellen-Anzahl (Decimal("1").scaleb(-amount_precision)).
+
+        Root-Cause-Fix (live gegen Binance Futures Testnet reproduziert,
+        siehe Bericht): unter ccxt.TICK_SIZE (precisionMode=4 - Binance's
+        Modus fuer Futures UND Spot) ist precision['amount']/['price']
+        KEINE Dezimalstellen-Anzahl, sondern die eigentliche Tick-Groesse
+        als Float (z.B. 0.0001 fuer BTC/USDT). Der bisherige naive
+        int(value) las das als "0 Dezimalstellen" fuer JEDES Symbol mit
+        einem Tick < 1 - also praktisch die gesamte Universe ausser ein
+        paar Symbolen mit Tick >= 1 (z.B. HFT/USDT: 1.0). Jede Order fuer
+        so ein Symbol rundete deshalb in quantize_and_validate() immer auf
+        0 ab und wurde mit "rounds down to 0 at exchange precision 0"
+        abgelehnt - execution_engine.blocked_by_min_order_size, live
+        reproduziert fuer BTC/USDT (Tick 0.0001 -> faelschlich
+        amount_precision=0). Betraf nur diese eine Umrechnung, nicht die
+        min_amount/max_amount/min_notional-Werte selbst (die bereits
+        korrekt als Decimal uebernommen werden, siehe _safe_decimal) -
+        und nicht Exchanges/ccxt-Konfigurationen unter dem klassischen
+        DECIMAL_PLACES-Modus, wo int(value) weiterhin korrekt ist.
+        """
         if value is None:
             return None
         try:
+            import ccxt.async_support as ccxt
+
+            precision_mode = getattr(self._ccxt, "precisionMode", ccxt.DECIMAL_PLACES)
+            if precision_mode == ccxt.TICK_SIZE:
+                exponent = Decimal(str(value)).normalize().as_tuple().exponent
+                return -exponent if isinstance(exponent, int) and exponent < 0 else 0
             return int(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, InvalidOperation):
             return None
 
     @staticmethod

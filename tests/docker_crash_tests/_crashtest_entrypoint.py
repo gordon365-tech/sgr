@@ -57,7 +57,15 @@ async def main() -> int:
     from sgr.core.database import close_db, init_db
     from sgr.core.event_bus import get_event_bus
     from sgr.core.repositories import OrderRepository
-    from sgr.core.types import ExchangeID, OrderRequest, OrderType, Side, Symbol, TradingMode
+    from sgr.core.types import (
+        AssetClass,
+        ExchangeID,
+        OrderRequest,
+        OrderType,
+        Side,
+        Symbol,
+        TradingMode,
+    )
     from sgr.exchanges.base import ExchangeConnectionError
     from sgr.exchanges.binance import BinanceAdapter
     from sgr.execution.engine import ExecutionEngine
@@ -85,7 +93,15 @@ async def main() -> int:
         print(f"crashtest: event bus connect failed (continuing): {e}", file=sys.stderr)
 
     base, quote = os.environ["CRASHTEST_SYMBOL"].split("/")
-    symbol = Symbol(base=base, quote=quote, exchange=ExchangeID.BINANCE)
+    # asset_class=FUTURES (Root-Cause-Fix vom 2026-09-17, siehe
+    # sgr/api/main.py binance_pool_kwargs): Symbol() defaultet auf SPOT,
+    # aber SGR handelt in Produktion ausschliesslich Futures (Positionen,
+    # Leverage, TEST_1X-Risk-Profil - siehe sgr/core/config.py). Ohne
+    # dieses Flag + futures_mode=True unten wuerde dieser Crashtest einen
+    # Codepfad pruefen (Spot), der in Produktion nie durchlaufen wird.
+    symbol = Symbol(
+        base=base, quote=quote, exchange=ExchangeID.BINANCE, asset_class=AssetClass.FUTURES
+    )
 
     order = OrderRequest(
         id=UUID(os.environ["CRASHTEST_ORDER_ID"]),
@@ -99,7 +115,10 @@ async def main() -> int:
     )
 
     adapter = BinanceAdapter(
-        api_key="crashtest", secret="crashtest", trading_mode=TradingMode.PAPER
+        api_key="crashtest",
+        secret="crashtest",
+        trading_mode=TradingMode.PAPER,
+        futures_mode=True,
     )
     await adapter.connect()
 

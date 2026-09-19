@@ -322,6 +322,50 @@ class TestMarketData:
         assert limits.max_amount == Decimal("1000")
         assert limits.min_notional == Decimal("10")
 
+    async def test_get_exchange_info_symbol_limits_tick_size_mode_converts_to_decimal_places(
+        self, adapter, monkeypatch
+    ):
+        """
+        Root-Cause-Fix (live gegen Binance Futures Testnet reproduziert):
+        unter ccxt.TICK_SIZE (Binance's precisionMode, sowohl Spot als
+        auch Futures) ist precision['amount']/['price'] die Tick-Groesse
+        selbst (z.B. 0.0001 fuer BTC/USDT), keine Dezimalstellen-Anzahl -
+        der vorherige naive int(0.0001) ergab 0 und liess
+        quantize_and_validate() JEDE Menge fuer dieses Symbol auf 0
+        abrunden (execution_engine.blocked_by_min_order_size fuer jede
+        Order). 1.0 (z.B. HFT/USDT: nur ganzzahlige Mengen erlaubt) muss
+        weiterhin korrekt 0 Dezimalstellen ergeben.
+        """
+        import ccxt.async_support as ccxt_async
+
+        fake = FakeCCXTExchange()
+        fake.precisionMode = ccxt_async.TICK_SIZE
+        fake.markets = {
+            "BTC/USDT": {
+                "maker": 0.0008,
+                "taker": 0.001,
+                "precision": {"amount": 0.0001, "price": 0.1},
+                "limits": {"amount": {"min": "0.0001", "max": "1000"}, "cost": {"min": "10"}},
+            },
+            "HFT/USDT": {
+                "maker": 0.0008,
+                "taker": 0.001,
+                "precision": {"amount": 1.0, "price": 0.00001},
+                "limits": {"amount": {"min": "1"}, "cost": {"min": "5"}},
+            },
+        }
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+        info = await adapter.get_exchange_info()
+
+        btc = info.symbol_limits["BTC/USDT"]
+        assert btc.amount_precision == 4
+        assert btc.price_precision == 1
+
+        hft = info.symbol_limits["HFT/USDT"]
+        assert hft.amount_precision == 0
+        assert hft.price_precision == 5
+
     async def test_get_exchange_info_symbol_limits_empty_dict_for_no_markets(
         self, adapter, monkeypatch
     ):
