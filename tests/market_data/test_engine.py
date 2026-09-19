@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from sgr.core.types import Candle, ExchangeID, Symbol, TradingMode
 from sgr.exchanges.base import (
@@ -361,6 +361,37 @@ class TestSymbolFeedInitializeDbCache:
         assert len(repo.upsert_calls) == 1
         assert len(repo.upsert_calls[0]) == 5
 
+    async def test_successful_initialize_records_candle_received_metric(self):
+        """Root-Cause-Fix: record_candle_received() (sgr/monitoring) wurde
+        nie aus dem Live-Feed-Pfad aufgerufen - der Counter
+        sgr.market_data.candles_received blieb dadurch dauerhaft bei 0,
+        obwohl TimescaleDB korrekt befuellt wurde (reine Monitoring-Luecke,
+        siehe _persist_candles Docstring). Muss einmal pro tatsaechlich
+        NEU eingefuegter Candle feuern (repo._upsert_raises=None ->
+        FakeCandleRepository.upsert_batch gibt len(candles) zurueck)."""
+        candles = make_candles(5)
+        repo = FakeCandleRepository(existing=[])
+        feed, pool = make_feed(adapter_responses=[candles], candle_repository=repo)
+
+        with patch("sgr.market_data.engine.record_candle_received") as mock_record:
+            await feed.initialize(pool)
+
+        assert mock_record.call_count == 5
+        mock_record.assert_called_with(symbol=SYMBOL_STR, timeframe="1h")
+
+    async def test_persist_failure_does_not_record_candle_received_metric(self):
+        """Fail-safe-Pfad: wenn upsert_batch() wirft, wurde nichts
+        tatsaechlich persistiert - der Metrik-Call darf dann nicht
+        trotzdem "empfangen" melden."""
+        candles = make_candles(3)
+        repo = FakeCandleRepository(upsert_raises=RuntimeError("db down"))
+        feed, pool = make_feed(adapter_responses=[candles], candle_repository=repo)
+
+        with patch("sgr.market_data.engine.record_candle_received") as mock_record:
+            await feed.initialize(pool)
+
+        mock_record.assert_not_called()
+
 
 # ---------------------------------------------------------------------
 # SymbolFeed persistence: update() write path
@@ -383,6 +414,21 @@ class TestSymbolFeedUpdateDbPersistence:
         assert result is True
         assert len(repo.upsert_calls) == 1
         assert repo.upsert_calls[0] == new
+
+    async def test_update_records_candle_received_metric_for_new_candles_only(self):
+        initial = make_candles(3)
+        new = make_candles(2, start=initial[-1].timestamp + timedelta(hours=1))
+        repo = FakeCandleRepository(existing=[])
+        feed, pool = make_feed(
+            adapter_responses=[initial, new], candle_repository=repo
+        )
+        await feed.initialize(pool)
+
+        with patch("sgr.market_data.engine.record_candle_received") as mock_record:
+            await feed.update(pool)
+
+        assert mock_record.call_count == 2
+        mock_record.assert_called_with(symbol=SYMBOL_STR, timeframe="1h")
 
     async def test_update_persist_failure_does_not_break_update(self):
         """upsert_batch() wirft -> update() muss trotzdem normal

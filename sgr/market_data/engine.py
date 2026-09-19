@@ -53,6 +53,7 @@ from sgr.market_data.feature_store import FeatureStore
 from sgr.market_data.gap_detector import GapDetector
 from sgr.market_data.ticker_cache import publish_ticker
 from sgr.market_data.types import DataGap
+from sgr.monitoring import record_candle_received
 
 log = get_logger(__name__)
 
@@ -484,6 +485,18 @@ class SymbolFeed:
         oder eine Exception nach oben werfen - er wird geloggt und
         ignoriert. upsert_batch() ist idempotent (ON CONFLICT DO NOTHING
         über uq_candle), Retries/Doppel-Polling sind daher unkritisch.
+
+        Root-Cause-Fix: record_candle_received() (sgr/monitoring/metrics.py)
+        existierte bereits inkl. Unit-Test, wurde aber nie aus dem
+        tatsaechlichen Live-Feed-Pfad aufgerufen - der zugehoerige
+        OTel-Counter (sgr.market_data.candles_received) blieb dadurch fuer
+        IMMER bei 0, unabhaengig davon ob TimescaleDB tatsaechlich Candles
+        erhielt (bestaetigt: candles-Tabelle war durchgehend korrekt befuellt,
+        das war ein reines Monitoring-Luecke, kein Persistenz-Bug). Zaehlt
+        pro Chunk die tatsaechlich NEU eingefuegten Rows (upsert_batch()
+        Rueckgabewert), nicht len(candles) - ein wiederholtes Polling
+        bereits bekannter Candles (idempotent, siehe oben) soll den
+        "empfangen"-Zaehler nicht kuenstlich aufblaehen.
         """
         if not candles:
             return
@@ -496,6 +509,8 @@ class SymbolFeed:
                 inserted=inserted,
                 total=len(candles),
             )
+            for _ in range(inserted):
+                record_candle_received(symbol=self.symbol, timeframe=self.timeframe)
         except Exception as e:
             log.warning(
                 "market_data.feed.persist_failed",
