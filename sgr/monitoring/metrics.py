@@ -252,6 +252,42 @@ class SGRMetrics:
             "Number of trades in the most recent validation backtest",
         )
 
+        # Futures Grid Metrics (siehe sgr/execution/grid_controller.py,
+        # sgr/risk/grid_risk.py). Eine Zeitreihe pro (exchange, symbol,
+        # strategy, direction, trading_mode)-Kombination - tenant kommt
+        # wie bei allen SGRMetrics-Instrumenten automatisch dazu
+        # (_TenantScopedInstrument), damit das Grafana-Dashboard nach
+        # Exchange/Produkt/Strategie/Tenant filtern kann (siehe
+        # Aufgabenstellung: "Pionex / Futures Grid / Gordon" etc.).
+        self.futures_grid_active = gauge(
+            "sgr.futures_grid.active", "1 wenn dieses Grid aktuell aktiv ist, sonst 0"
+        )
+        self.futures_grid_exposure = gauge(
+            "sgr.futures_grid.exposure_usd", "Aktuelle Netto-Notional-Exposure des Grids"
+        )
+        self.futures_grid_pnl = gauge(
+            "sgr.futures_grid.pnl_usd", "Realisierter PnL des Grids (Grid Capture - Fees - Funding)"
+        )
+        self.futures_grid_funding_cost = gauge(
+            "sgr.futures_grid.funding_cost_usd", "Kumulierte Funding-Kosten des Grids"
+        )
+        self.futures_grid_orders = gauge(
+            "sgr.futures_grid.orders", "Anzahl aktuell offener Grid-Level-Orders"
+        )
+        self.futures_grid_fills = counter(
+            "sgr.futures_grid.fills", "Anzahl ausgefuehrter Grid-Level-Fills"
+        )
+        self.futures_grid_liquidation_distance = gauge(
+            "sgr.futures_grid.liquidation_distance_pct",
+            "Geschaetzte relative Distanz zum Liquidationspreis (0-1)",
+        )
+        self.futures_grid_edge = gauge(
+            "sgr.futures_grid.edge", "Zusammengesetzter Edge-Score der Grid-Strategie (0-1)"
+        )
+        self.futures_grid_regime_score = gauge(
+            "sgr.futures_grid.regime_score", "GridSuitabilityScore.composite fuer aktuelles Regime"
+        )
+
         # Market Data Metrics
         self.candles_received = counter(
             "sgr.market_data.candles_received", "OHLCV candles received"
@@ -435,6 +471,56 @@ def record_position_snapshot(
     m.position_take_profit_price.set(take_profit_price_usd, labels)
     m.position_margin_usd.set(margin_usd, labels)
     m.position_holding_seconds.set(holding_seconds, labels)
+
+
+def record_futures_grid_snapshot(
+    exchange: str,
+    symbol: str,
+    strategy: str,
+    direction: str,
+    trading_mode: str,
+    is_active: bool,
+    exposure_usd: float,
+    pnl_usd: float,
+    funding_cost_usd: float,
+    open_orders: int,
+    liquidation_distance_pct: float | None = None,
+    edge_score: float | None = None,
+    regime_score: float | None = None,
+) -> None:
+    """
+    Records the current state of one Futures Grid instance. Aufrufer:
+    ein periodischer Monitoring-Zyklus (analog zu
+    MonitoringEngine._collect_position_metrics()) ueber
+    sgr.execution.grid_controller.GridController.active_grids().
+    """
+    m = get_metrics()
+    labels = {
+        "exchange": exchange,
+        "symbol": symbol,
+        "strategy": strategy,
+        "direction": direction,
+        "trading_mode": trading_mode,
+    }
+    m.futures_grid_active.set(1.0 if is_active else 0.0, labels)
+    m.futures_grid_exposure.set(exposure_usd, labels)
+    m.futures_grid_pnl.set(pnl_usd, labels)
+    m.futures_grid_funding_cost.set(funding_cost_usd, labels)
+    m.futures_grid_orders.set(float(open_orders), labels)
+    if liquidation_distance_pct is not None:
+        m.futures_grid_liquidation_distance.set(liquidation_distance_pct, labels)
+    if edge_score is not None:
+        m.futures_grid_edge.set(edge_score, labels)
+    if regime_score is not None:
+        m.futures_grid_regime_score.set(regime_score, labels)
+
+
+def record_futures_grid_fill(exchange: str, symbol: str, strategy: str, direction: str) -> None:
+    """Records one executed grid-level fill (siehe GridController._fill_level())."""
+    m = get_metrics()
+    m.futures_grid_fills.add(
+        1, {"exchange": exchange, "symbol": symbol, "strategy": strategy, "direction": direction}
+    )
 
 
 def record_asset_universe_snapshot(entries: list[Any]) -> None:

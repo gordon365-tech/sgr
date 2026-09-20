@@ -128,8 +128,20 @@ class StrategyValidationRunner:
         registry = StrategyRegistry.get()
         summary = ValidationRunSummary(validated=[], skipped=[], failed={})
 
+        # Grid-Strategien (siehe sgr.strategy.futures_grid) erzeugen ueber
+        # generate_signal() bewusst IMMER None (siehe dortiger Modul-
+        # Docstring) - ein Backtest ueber diesen Pfad wuerde deterministisch
+        # 0 Trades liefern und die Strategie faelschlich als "durchgefallen"
+        # statt "mit der falschen Methode geprueft" markieren. Grid-
+        # Strategien haben eine eigene Validierungspipeline (siehe
+        # sgr.strategy.grid_validation_runner.GridValidationRunner) und
+        # werden hier deshalb uebersprungen, nicht validiert.
+        from sgr.strategy.futures_grid import GridTradingStrategy
+
         pending = [
-            name for name, entry in registry.get_all().items() if not entry.is_validated
+            name
+            for name, entry in registry.get_all().items()
+            if not entry.is_validated and not isinstance(entry.strategy, GridTradingStrategy)
         ]
 
         if not pending:

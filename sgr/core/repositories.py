@@ -30,6 +30,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sgr.core.database import (
     AuditLogModel,
     CandleModel,
+    GridModel,
+    GridOrderModel,
     OrderModel,
     PortfolioSnapshotModel,
     PositionModel,
@@ -1337,6 +1339,137 @@ class AuditLogRepository:
 # ---------------------------------------------------------------------------
 
 
+class GridRepository:
+    """
+    Persistenz fuer Futures-Grid-Instanzen (siehe GridModel/GridOrderModel
+    in sgr/core/database.py und GridController._persist()). Best-effort
+    aus Aufrufer-Sicht (Controller-Aufrufer faengt Exceptions bereits ab,
+    analog zu PortfolioEngine._persist_position_upsert()) - dieses
+    Repository selbst wirft normale Exceptions weiter, wie alle anderen
+    Repositories hier auch.
+    """
+
+    async def upsert(self, grid: Any) -> str:
+        """
+        grid: sgr.core.grid_types.GridState. Nimmt das Pydantic-Objekt
+        direkt entgegen (statt eines rohen dict wie die aelteren
+        Repositories) - GridState ist bereits die kanonische, validierte
+        Repraesentation, ein zusaetzliches dict-Mapping an jeder
+        Aufrufstelle waere reine Verdopplung.
+        """
+        async with get_session() as session:
+            stmt = select(GridModel).where(GridModel.id == str(grid.id)).limit(1)
+            result = await session.execute(stmt)
+            existing = result.scalar_one_or_none()
+
+            values = {
+                "user_id": grid.tenant_id,
+                "exchange": grid.exchange.value,
+                "symbol": grid.symbol.ccxt_symbol,
+                "product_type": "futures_grid",
+                "strategy_name": grid.strategy_name,
+                "trading_mode": grid.trading_mode.value,
+                "direction": grid.direction.value,
+                "status": grid.status.value,
+                "parameters": grid.parameters,
+                "net_position_qty": grid.net_position_qty,
+                "realized_pnl": grid.realized_pnl,
+                "fees_paid": grid.fees_paid,
+                "funding_paid": grid.funding_paid,
+                "fills_count": grid.fills_count,
+                "closed_at": grid.closed_at,
+                "close_reason": grid.close_reason,
+            }
+
+            if existing is not None:
+                await session.execute(
+                    update(GridModel).where(GridModel.id == str(grid.id)).values(**values)
+                )
+                return str(grid.id)
+
+            row = GridModel(id=str(grid.id), opened_at=grid.opened_at, **values)
+            session.add(row)
+            await session.flush()
+            return str(grid.id)
+
+    async def record_level_fill(
+        self,
+        grid_id: str,
+        level_index: int,
+        price: Decimal,
+        side: str,
+        quantity: Decimal,
+        is_opening: bool,
+        filled_at: datetime,
+        order_id: str | None = None,
+        cycle_pnl: Decimal | None = None,
+    ) -> str:
+        fill_id = str(uuid4())
+        async with get_session() as session:
+            session.add(
+                GridOrderModel(
+                    id=fill_id,
+                    grid_id=grid_id,
+                    order_id=order_id,
+                    level_index=level_index,
+                    price=price,
+                    side=side,
+                    quantity=quantity,
+                    is_opening=is_opening,
+                    cycle_pnl=cycle_pnl,
+                    filled_at=filled_at,
+                )
+            )
+            await session.flush()
+        return fill_id
+
+    async def get_open_grids(
+        self, trading_mode: TradingMode, user_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        conditions = [
+            GridModel.trading_mode == trading_mode.value,
+            GridModel.status.in_(["pending", "active", "paused", "closing"]),
+        ]
+        if user_id is not None:
+            conditions.append(GridModel.user_id == user_id)
+
+        async with get_session() as session:
+            stmt = select(GridModel).where(and_(*conditions))
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+            return [self._to_dict(row) for row in rows]
+
+    async def get_by_id(self, grid_id: str) -> dict[str, Any] | None:
+        async with get_session() as session:
+            stmt = select(GridModel).where(GridModel.id == grid_id).limit(1)
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            return self._to_dict(row) if row else None
+
+    @staticmethod
+    def _to_dict(row: GridModel) -> dict[str, Any]:
+        return {
+            "id": row.id,
+            "user_id": row.user_id,
+            "exchange": row.exchange,
+            "symbol": row.symbol,
+            "product_type": row.product_type,
+            "strategy_name": row.strategy_name,
+            "trading_mode": row.trading_mode,
+            "direction": row.direction,
+            "status": row.status,
+            "parameters": row.parameters,
+            "net_position_qty": row.net_position_qty,
+            "realized_pnl": row.realized_pnl,
+            "fees_paid": row.fees_paid,
+            "funding_paid": row.funding_paid,
+            "fills_count": row.fills_count,
+            "opened_at": row.opened_at,
+            "closed_at": row.closed_at,
+            "close_reason": row.close_reason,
+        }
+
+
 class Repositories:
     """Bündelt alle Repositories für einfachen Zugriff."""
 
@@ -1351,6 +1484,7 @@ class Repositories:
         self.users = UserRepository()
         self.risk_events = RiskEventRepository()
         self.audit_log = AuditLogRepository()
+        self.grids = GridRepository()
 
 
 # Singleton

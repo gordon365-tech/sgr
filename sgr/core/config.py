@@ -321,6 +321,28 @@ class SGRConfig(BaseSettings):
     # umschaltbar, z.B. solange Pionex nicht via ccxt unterstuetzt wird.
     primary_exchange: ExchangeID = ExchangeID.PIONEX
 
+    # Welche Exchange fuer FUTURES/FUTURES_GRID bevorzugt verwendet wird
+    # (siehe Aufgabenstellung: Pionex als strategisch bevorzugte Exchange
+    # fuer Futures Grid, waehrend primary_exchange weiterhin die
+    # allgemeine/Spot-Standardboerse bleibt). Reine Konfigurations-
+    # Praeferenz fuer Capital-Allocation/Strategy-Routing (siehe
+    # sgr.strategy.capital_allocation) - KEINE Kill-Switch/Risk-Umgehung:
+    # ein Wechsel dieser Einstellung aendert an keiner Stelle Risk-Limits.
+    primary_futures_exchange: ExchangeID = Field(default=ExchangeID.PIONEX)
+
+    # Feature-Flags fuer die drei in der Aufgabenstellung genannten
+    # Tenant-Schalter. Default: Binance bleibt aktiv (kein Verhaltens-
+    # wechsel fuer bestehende Deployments); Pionex Futures Grid ist
+    # bewusst OPT-IN (False), da LIVE-Order-Submission fuer Pionex noch
+    # nicht implementiert ist (siehe sgr/exchanges/pionex.py) und
+    # Futures/Leverage-Produkte zusaetzlich eine Compliance-Freigabe
+    # benoetigen (siehe sgr.compliance) - diese Flags schalten NUR die
+    # jeweilige Exchange/das Produkt fuer die Strategy-Zuteilung frei,
+    # sie umgehen niemals Risk Engine, Compliance Engine oder
+    # Exchange-Capability-Pruefungen.
+    enable_binance: bool = Field(default=True)
+    enable_pionex_futures_grid: bool = Field(default=False)
+
     # Multi-Tenant-Worker (Commit 5, Option A): wenn gesetzt, laedt
     # lifespan() Exchange-Credentials fuer diesen Worker-Prozess aus der
     # DB (APIKeyModel, verschluesselt mit get_cipher(), siehe
@@ -340,6 +362,15 @@ class SGRConfig(BaseSettings):
     api: APIConfig = Field(default_factory=APIConfig)
     encryption: EncryptionConfig = Field(default_factory=EncryptionConfig)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
+    # Any statt GridRiskLimitsConfig als Typ-Annotation: sgr.risk.grid_risk
+    # kann hier NICHT auf Modulebene importiert werden - `import sgr.risk.
+    # grid_risk` initialisiert zuerst das sgr.risk-Paket
+    # (sgr/risk/__init__.py), das seinerseits sgr.risk.engine importiert,
+    # welches wiederum `from sgr.core.config import get_config` auf
+    # Modulebene aufruft - ein klassischer Package-__init__-Zyklus.
+    # default_factory importiert deshalb lazy (erst wenn eine SGRConfig-
+    # Instanz tatsaechlich gebaut wird, nach Abschluss des Modul-Imports).
+    grid_risk_limits: Any = Field(default_factory=lambda: _build_default_grid_risk_limits())
 
     @model_validator(mode="after")
     def validate_production_constraints(self) -> SGRConfig:
@@ -371,6 +402,14 @@ class SGRConfig(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.environment == Environment.PRODUCTION
+
+
+def _build_default_grid_risk_limits() -> Any:
+    """Lazy-Import-Helper - siehe SGRConfig.grid_risk_limits Docstring
+    fuer die Begruendung (Package-__init__-Zyklus ueber sgr.risk)."""
+    from sgr.risk.grid_risk import GridRiskLimitsConfig
+
+    return GridRiskLimitsConfig()
 
 
 @lru_cache(maxsize=1)

@@ -512,6 +512,87 @@ class StrategySymbolValidationModel(Base):
     )
 
 
+class GridModel(Base):
+    """
+    Futures-Grid-Instanz (siehe sgr/core/grid_types.py::GridState und
+    sgr/execution/grid_controller.py::GridController). Eigene Tabelle
+    statt Wiederverwendung von PositionModel - ein Grid ist kein
+    einzelner Fill/eine einzelne Position, sondern eine Sammlung von
+    Preis-Leveln mit eigenem Lifecycle (siehe GridStatus). Die aus dem
+    Grid entstehenden EINZELNEN Fills laufen weiterhin ganz normal durch
+    OrderModel/PositionModel/TradeModel - GridModel/GridOrderModel sind
+    rein additive Grid-Buchhaltung obendrauf, kein Ersatz.
+    """
+
+    __tablename__ = "futures_grids"
+
+    id: Mapped[str] = mapped_column(PG_UUID(as_uuid=False), primary_key=True)
+    user_id: Mapped[str | None] = mapped_column(
+        PG_UUID(as_uuid=False), ForeignKey("users.id"), nullable=True
+    )
+    exchange: Mapped[str] = mapped_column(String(20), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False)
+    product_type: Mapped[str] = mapped_column(String(20), nullable=False, default="futures_grid")
+    strategy_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    trading_mode: Mapped[str] = mapped_column(String(10), nullable=False)
+    direction: Mapped[str] = mapped_column(String(10), nullable=False)  # long | short
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    parameters: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    net_position_qty: Mapped[Decimal] = mapped_column(
+        Numeric(precision=28, scale=8), nullable=False, default=0, server_default="0"
+    )
+    realized_pnl: Mapped[Decimal] = mapped_column(
+        Numeric(precision=28, scale=8), nullable=False, default=0, server_default="0"
+    )
+    fees_paid: Mapped[Decimal] = mapped_column(
+        Numeric(precision=28, scale=8), nullable=False, default=0, server_default="0"
+    )
+    funding_paid: Mapped[Decimal] = mapped_column(
+        Numeric(precision=28, scale=8), nullable=False, default=0, server_default="0"
+    )
+    fills_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    close_reason: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+    __table_args__ = (
+        Index("ix_futures_grids_status", "status", "trading_mode"),
+        Index("ix_futures_grids_user", "user_id", "status"),
+    )
+
+
+class GridOrderModel(Base):
+    """
+    Einzelner Level-Fill innerhalb eines Futures Grid (siehe
+    GridLevelState). Referenziert optional die zugehoerige Zeile in
+    `orders` (dieselbe order.id, die durch den normalen
+    ExecutionEngine/OrderSafety-Pfad bereits persistiert wird) - rein
+    additive Grid-spezifische Attribution, kein Duplikat der Order-Daten
+    selbst.
+    """
+
+    __tablename__ = "futures_grid_orders"
+
+    id: Mapped[str] = mapped_column(PG_UUID(as_uuid=False), primary_key=True)
+    grid_id: Mapped[str] = mapped_column(
+        PG_UUID(as_uuid=False), ForeignKey("futures_grids.id"), nullable=False
+    )
+    order_id: Mapped[str | None] = mapped_column(
+        PG_UUID(as_uuid=False), ForeignKey("orders.id"), nullable=True
+    )
+    level_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    price: Mapped[Decimal] = mapped_column(Numeric(precision=28, scale=8), nullable=False)
+    side: Mapped[str] = mapped_column(String(10), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(precision=28, scale=8), nullable=False)
+    is_opening: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    cycle_pnl: Mapped[Decimal | None] = mapped_column(Numeric(precision=28, scale=8), nullable=True)
+    filled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (Index("ix_futures_grid_orders_grid", "grid_id", "level_index"),)
+
+
 # ---------------------------------------------------------------------------
 # Engine & Session Factory
 # ---------------------------------------------------------------------------

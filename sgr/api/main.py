@@ -462,6 +462,7 @@ async def lifespan(app: FastAPI, role: LifespanRole = "worker") -> AsyncIterator
         # 8. Strategy Engine
         # Strategien registrieren (Import triggert @register Decorator)
         import sgr.strategy.breakout  # noqa: F401
+        import sgr.strategy.futures_grid  # noqa: F401
         import sgr.strategy.mean_reversion  # noqa: F401
         import sgr.strategy.momentum  # noqa: F401
         import sgr.strategy.trend_following  # noqa: F401
@@ -494,6 +495,33 @@ async def lifespan(app: FastAPI, role: LifespanRole = "worker") -> AsyncIterator
             )
         except Exception as e:
             log.error("sgr.api.strategy_validation_runner_failed", error=str(e))
+
+        # Grid-Strategien (Futures Grid Long/Short/Adaptive) durchlaufen
+        # eine EIGENE Backtest+Walk-Forward-Pipeline (siehe
+        # sgr/strategy/grid_validation_runner.py Modul-Docstring - der
+        # klassische StrategyValidationRunner oben ueberspringt sie
+        # bereits explizit). is_validated=True setzt hier NUR das
+        # Registry-Flag (Paper-Aktivierungs-Kandidat); es startet KEIN
+        # automatisches Live-Grid-Trading und weist kein echtes Kapital
+        # zu - dafuer existiert (bewusst, siehe Strategiebericht "offene
+        # Punkte") noch kein automatischer Scheduler, der aktive
+        # GridTradingStrategy-Instanzen periodisch gegen
+        # GridController.open_grid() ausfuehrt.
+        from sgr.strategy.grid_validation_runner import GridValidationRunner
+
+        try:
+            grid_validation_runner = GridValidationRunner()
+            grid_validation_summary = (
+                await grid_validation_runner.validate_pending_grid_strategies()
+            )
+            log.info(
+                "sgr.api.grid_strategy_validation_completed",
+                validated=grid_validation_summary.validated,
+                skipped=grid_validation_summary.skipped,
+                failed=list(grid_validation_summary.failed.keys()),
+            )
+        except Exception as e:
+            log.error("sgr.api.grid_validation_runner_failed", error=str(e))
 
         # Manueller Override (STRATEGY_FORCE_ACTIVATE env var), siehe
         # apply_strategy_force_activate_override() Docstring oben im Modul.

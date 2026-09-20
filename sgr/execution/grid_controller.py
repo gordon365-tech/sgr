@@ -1,0 +1,518 @@
+"""
+SGR Futures Grid Controller
+==============================
+Orchestriert den vollstaendigen Lifecycle einer Futures-Grid-Instanz:
+erstellen, Level-Orders erzeugen, Fills verarbeiten, Level neu
+auffuellen (Rebalancing), Funding/Stop-Loss/Take-Profit/Max-Holding-Time/
+Liquidationsrisiko ueberwachen, schliessen.
+
+KEINE STRATEGIE UMGEHT DIE RISIKOSCHICHT (siehe Aufgabenstellung):
+    open_grid() prueft IMMER, in dieser Reihenfolge:
+        1. Exchange/Produkt-Capability (sgr.exchanges.capabilities)
+        2. Compliance/Jurisdiktion/Account-Eligibility (sgr.compliance)
+        3. GridRiskEngine (sgr.risk.grid_risk)
+    Erst danach werden ueberhaupt Order-Level generiert.
+
+KEINE FAKE-SHORTCUT-EXECUTION:
+    Jede tatsaechliche Order (Level-Open, Level-Close, Notfall-Exit)
+    laeuft durch DIESELBE sgr.execution.engine.ExecutionEngine.execute()
+    wie jede andere SGR-Order - inklusive Preflight, Kill-Switch, Order
+    Safety/Idempotency, Quantization. Der Controller selbst platziert
+    NIEMALS eine Order direkt auf einem Exchange-Adapter.
+
+PAPER-Trading-Besonderheit (siehe sgr/exchanges/ccxt_base.py
+_simulate_order() Docstring: JEDE simulierte Order fuellt sofort zum
+aktuellen Marktpreis, unabhaengig vom Order-Typ - es gibt keine
+"ruhenden" Limit-Orders in der Simulation). Ein Futures Grid besteht
+aber gerade aus ruhenden Limit-Orders auf mehreren Preis-Leveln. Dieser
+Controller loest das, OHNE _simulate_order() selbst zu veraendern (Null
+Regressionsrisiko fuer alle bestehenden, direktionalen Strategien):
+er haelt den Grid-Zustand (welche Level sind "gefuellt") selbst und
+entscheidet bei jedem Preis-Tick (on_price_tick()), ob ein Level JETZT
+ausgeloest werden soll - erst dann wird eine (Markt-)Order tatsaechlich
+durch ExecutionEngine geschickt. Fuer LIVE Trading (siehe
+sgr/exchanges/pionex.py: aktuell nicht implementiert) waere der gleiche
+Controller-Code unveraendert nutzbar, nur dass echte ruhende
+Limit-Orders auf der Exchange platziert und ueber get_open_orders()
+ueberwacht wuerden - dieser MVP fokussiert auf den PAPER-Pfad, siehe
+"offene Punkte" im Strategiebericht.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from decimal import Decimal
+from typing import Any
+from uuid import uuid4
+
+from sgr.compliance.engine import ComplianceEngine, get_compliance_engine
+from sgr.compliance.types import AccountEligibility, ComplianceCheckResult
+from sgr.core.grid_types import (
+    FuturesGridParameters,
+    GridDecision,
+    GridLevelState,
+    GridRiskAssessment,
+    GridState,
+)
+from sgr.core.logging import get_logger
+from sgr.core.types import (
+    GridDirection,
+    GridStatus,
+    OrderRequest,
+    OrderStatus,
+    OrderType,
+    ProductType,
+    Side,
+    Symbol,
+    TradingMode,
+)
+from sgr.exchanges.capabilities import CapabilityStatus, check_capability
+from sgr.execution.engine import ExecutionEngine
+from sgr.risk.grid_risk import GridPortfolioSnapshot, GridRiskEngine, get_grid_risk_engine
+
+log = get_logger(__name__)
+
+
+class GridOpenResult:
+    """Ergebnis von GridController.open_grid() - entweder ein laufendes
+    GridState oder eine eindeutige Ablehnung (nie eine Exception fuer
+    den regulaeren Ablehnungsfall - fail-safe, analog zu RiskAssessment)."""
+
+    __slots__ = ("grid", "approved", "reason", "compliance_status")
+
+    def __init__(
+        self,
+        grid: GridState | None,
+        approved: bool,
+        reason: str,
+        compliance_status: str | None = None,
+    ) -> None:
+        self.grid = grid
+        self.approved = approved
+        self.reason = reason
+        self.compliance_status = compliance_status
+
+
+class GridController:
+    def __init__(
+        self,
+        execution_engine: ExecutionEngine,
+        trading_mode: TradingMode,
+        tenant_id: str | None = None,
+        grid_risk_engine: GridRiskEngine | None = None,
+        compliance_engine: ComplianceEngine | None = None,
+        grid_repository: Any = None,
+    ) -> None:
+        self._execution = execution_engine
+        self._trading_mode = trading_mode
+        self._tenant_id = tenant_id
+        self._grid_risk = grid_risk_engine or get_grid_risk_engine()
+        self._compliance = compliance_engine or get_compliance_engine()
+        self._grid_repo = grid_repository
+        # In-Memory-Registry aller vom Controller verwalteten Grids
+        # (Prozess-lokal - Persistenz best-effort via _grid_repo, analog
+        # zu PortfolioEngine._state._positions).
+        self._grids: dict[str, GridState] = {}
+
+    # ------------------------------------------------------------------
+    # Lifecycle: open
+    # ------------------------------------------------------------------
+
+    async def open_grid(
+        self,
+        decision: GridDecision,
+        symbol: Symbol,
+        strategy_name: str,
+        account: AccountEligibility,
+        portfolio_snapshot: GridPortfolioSnapshot,
+        current_price: Decimal,
+        liquidity_usd: Decimal | None = None,
+        funding_rate_annualized_pct: float | None = None,
+        volatility_atr_pct: float | None = None,
+    ) -> GridOpenResult:
+        if decision.direction == GridDirection.NEUTRAL or decision.parameters is None:
+            return GridOpenResult(
+                None, False, "GridDecision.direction ist NEUTRAL - kein Grid vorgeschlagen."
+            )
+
+        parameters = decision.parameters
+        exchange = symbol.exchange
+        product_type = ProductType.FUTURES_GRID
+
+        # 1. Capability
+        cap = check_capability(
+            exchange,
+            product_type,
+            requires_long=parameters.long_or_short == GridDirection.LONG,
+            requires_short=parameters.long_or_short == GridDirection.SHORT,
+            requires_leverage=parameters.leverage > 1,
+        )
+        if cap.status != CapabilityStatus.OK:
+            log.warning("grid_controller.capability_rejected", reason=cap.reason)
+            return GridOpenResult(
+                None, False, cap.reason, compliance_status="exchange_capability_missing"
+            )
+
+        # 2. Compliance
+        compliance_result: ComplianceCheckResult = self._compliance.check(
+            account,
+            exchange,
+            product_type,
+            requires_long=parameters.long_or_short == GridDirection.LONG,
+            requires_short=parameters.long_or_short == GridDirection.SHORT,
+            requires_leverage=parameters.leverage > 1,
+        )
+        if not compliance_result.allowed:
+            log.warning(
+                "grid_controller.compliance_rejected",
+                status=compliance_result.status.value,
+                reason=compliance_result.reason,
+            )
+            return GridOpenResult(
+                None,
+                False,
+                compliance_result.reason,
+                compliance_status=compliance_result.status.value,
+            )
+
+        # 3. Risk
+        risk_assessment: GridRiskAssessment = self._grid_risk.evaluate_new_grid(
+            parameters,
+            portfolio_snapshot,
+            current_price,
+            liquidity_usd=liquidity_usd,
+            funding_rate_annualized_pct=funding_rate_annualized_pct,
+            volatility_atr_pct=volatility_atr_pct,
+        )
+        if not risk_assessment.approved:
+            log.warning("grid_controller.risk_rejected", reason=risk_assessment.reason)
+            return GridOpenResult(None, False, risk_assessment.reason or "Risk rejected")
+
+        grid = self._build_grid_state(decision, symbol, strategy_name, parameters)
+        grid.last_price = current_price
+        self._grids[str(grid.id)] = grid
+        await self._persist(grid)
+
+        log.info(
+            "grid_controller.grid_opened",
+            grid_id=str(grid.id),
+            symbol=str(symbol),
+            direction=parameters.long_or_short.value,
+            levels=len(grid.levels),
+            leverage=str(parameters.leverage),
+        )
+        return GridOpenResult(grid, True, "")
+
+    def _build_grid_state(
+        self,
+        decision: GridDecision,
+        symbol: Symbol,
+        strategy_name: str,
+        parameters: FuturesGridParameters,
+    ) -> GridState:
+        levels_prices = parameters.compute_levels()
+        is_long = parameters.long_or_short == GridDirection.LONG
+        levels = [
+            GridLevelState(
+                index=i,
+                price=price,
+                side="buy" if is_long else "sell",
+            )
+            for i, price in enumerate(levels_prices)
+        ]
+        return GridState(
+            tenant_id=self._tenant_id,
+            exchange=symbol.exchange,
+            symbol=symbol,
+            strategy_name=strategy_name,
+            trading_mode=self._trading_mode,
+            direction=parameters.long_or_short,
+            status=GridStatus.ACTIVE,
+            parameters={
+                "grid_lower_price": str(parameters.grid_lower_price),
+                "grid_upper_price": str(parameters.grid_upper_price),
+                "grid_count": parameters.grid_count,
+                "grid_mode": parameters.grid_mode.value,
+                "leverage": str(parameters.leverage),
+                "margin_mode": parameters.margin_mode.value,
+                "position_size": str(parameters.position_size),
+                "max_notional": str(parameters.max_notional),
+                "take_profit": str(parameters.take_profit) if parameters.take_profit else None,
+                "stop_loss": str(parameters.stop_loss) if parameters.stop_loss else None,
+                "maximum_holding_time": parameters.maximum_holding_time,
+                "total_notional": str(parameters.total_notional()),
+            },
+            levels=levels,
+            opened_at=datetime.now(tz=UTC),
+        )
+
+    # ------------------------------------------------------------------
+    # Runtime: price ticks -> fills
+    # ------------------------------------------------------------------
+
+    async def on_price_tick(self, grid_id: str, current_price: Decimal) -> GridState:
+        """
+        Prueft bei jedem eingehenden Preis (siehe TradingOrchestrator.
+        on_candle_event() fuer das analoge Muster bei Directional-
+        Strategien), ob ein Grid-Level seit dem LETZTEN bekannten Preis
+        (grid.last_price) UEBERQUERT wurde - nicht ob es "erreichbar"
+        waere. Ohne diese Unterscheidung wuerden bei der allerersten
+        Preisabfrage nach Grid-Eroeffnung faelschlich ALLE Level auf der
+        "richtigen" Seite des Eroeffnungspreises gleichzeitig ausloesen
+        (jedes still nicht gefuellte Level oberhalb des Startpreises
+        erfuellt "current_price <= level.price" trivial).
+
+        LONG Grid: ein "buy"-Level oeffnet, wenn der Preis fallend durch
+            es hindurchlaeuft; das naechsthoehere Level schliesst die
+            Position wieder (Grid Capture), wenn der Preis steigend
+            durch es hindurchlaeuft. SHORT Grid: gespiegelt.
+        """
+        grid = self._require_grid(grid_id)
+        if not grid.is_active:
+            return grid
+
+        previous_price = grid.last_price if grid.last_price is not None else current_price
+        moving_down = current_price < previous_price
+        moving_up = current_price > previous_price
+
+        def _crossed(level_price: Decimal) -> bool:
+            """
+            True nur bei tatsaechlicher UEBERQUERUNG seit dem letzten
+            bekannten Preis - bewusst mit STRIKTER Grenze auf der Seite
+            von previous_price, damit ein Level, das zufaellig exakt
+            dem Eroeffnungspreis des Grids entspricht (z.B. ein
+            symmetrisches Grid um den aktuellen Preis, siehe
+            sgr.strategy.futures_grid._BaseFuturesGridStrategy.
+            _build_parameters()), NICHT bereits beim allerersten Tick
+            als "ueberquert" gilt, nur weil previous_price==level_price
+            zufaellig zutrifft (kein echter Trigger, keine Order haette
+            in der Realitaet an diesem Punkt gefuellt werden muessen -
+            das Grid startet dort "auf der Kante", nicht darueber
+            hinweg bewegt).
+            """
+            if moving_down:
+                return current_price <= level_price < previous_price
+            if moving_up:
+                return previous_price < level_price <= current_price
+            return False
+
+        is_long = grid.direction == GridDirection.LONG
+        levels = sorted(grid.levels, key=lambda lv: lv.index)
+
+        # Cell-Modell (identisch zu sgr.backtesting.grid_simulator):
+        # Cell i liegt zwischen levels[i] und levels[i+1]. Der
+        # Fuellzustand ("is_filled") wird auf dem EINTRITTS-Level der
+        # Cell gefuehrt (levels[i] fuer LONG, levels[i+1] fuer SHORT) -
+        # dasselbe Objekt wird sowohl beim Oeffnen als auch beim
+        # Schliessen dieser Cell an _fill_level() uebergeben.
+        for i in range(len(levels) - 1):
+            entry_state = levels[i] if is_long else levels[i + 1]
+            entry_price = entry_state.price
+            exit_price = levels[i + 1].price if is_long else levels[i].price
+
+            if not entry_state.is_filled and _crossed(entry_price):
+                opening_direction_ok = moving_down if is_long else moving_up
+                if opening_direction_ok:
+                    await self._fill_level(grid, entry_state, entry_price, opening=True)
+                    continue
+
+            if entry_state.is_filled and _crossed(exit_price):
+                closing_direction_ok = moving_up if is_long else moving_down
+                if closing_direction_ok:
+                    await self._fill_level(grid, entry_state, exit_price, opening=False)
+
+        grid.last_price = current_price
+        await self._persist(grid)
+        return grid
+
+    async def _fill_level(
+        self, grid: GridState, level: GridLevelState, current_price: Decimal, *, opening: bool
+    ) -> None:
+        is_long = grid.direction == GridDirection.LONG
+
+        if opening:
+            position_size = Decimal(str(grid.parameters.get("position_size", "0")))
+            if position_size <= 0:
+                return
+            qty = position_size / current_price
+        else:
+            # Beim Schliessen wird IMMER die beim Oeffnen tatsaechlich
+            # gefuellte Menge zurueckgegeben (siehe GridLevelState.quantity
+            # Docstring) - niemals eine neue, am Exit-Preis berechnete
+            # Menge. Sonst driftet net_position_qty nie zurueck auf 0 und
+            # die Order trifft nicht die tatsaechlich gehaltene Menge.
+            qty = level.quantity
+            if qty <= 0:
+                return
+
+        # opening: LONG kauft, SHORT verkauft. closing: jeweils umgekehrt.
+        if (opening and is_long) or (not opening and not is_long):
+            side = Side.BUY
+        else:
+            side = Side.SELL
+
+        order = OrderRequest(
+            signal_id=uuid4(),
+            symbol=grid.symbol,
+            side=side,
+            order_type=OrderType.MARKET,
+            quantity=qty,
+            trading_mode=grid.trading_mode,
+            reduce_only=not opening,
+            metadata={
+                "strategy": grid.strategy_name,
+                "product_type": ProductType.FUTURES_GRID.value,
+                "grid_id": str(grid.id),
+                "grid_level_index": level.index,
+                "target_leverage": grid.parameters.get("leverage", "1"),
+            },
+        )
+
+        result = await self._execution.execute(order)
+        if result.status != OrderStatus.FILLED:
+            log.warning(
+                "grid_controller.level_fill_rejected",
+                grid_id=str(grid.id),
+                level_index=level.index,
+                status=result.status.value,
+            )
+            return
+
+        level.is_filled = opening
+        level.last_order_id = result.exchange_order_id
+        level.last_filled_at = datetime.now(tz=UTC)
+        if opening:
+            level.cycle_count += 1
+            level.quantity = qty
+        grid.fills_count += 1
+        grid.fees_paid += result.fees
+
+        if opening:
+            grid.net_position_qty += qty if is_long else -qty
+        else:
+            grid.net_position_qty -= qty if is_long else -qty
+            # Grid Capture PnL fuer diesen abgeschlossenen Zyklus - qty ist
+            # hier die beim Oeffnen gefuellte Menge (siehe oben), nicht
+            # neu am Exit-Preis berechnet.
+            entry_price = level.price
+            exit_price = current_price
+            side_factor = Decimal("1") if is_long else Decimal("-1")
+            cycle_pnl = (exit_price - entry_price) * qty * side_factor - result.fees
+            grid.realized_pnl += cycle_pnl
+            level.quantity = Decimal("0")
+
+        log.info(
+            "grid_controller.level_filled",
+            grid_id=str(grid.id),
+            level_index=level.index,
+            opening=opening,
+            price=str(current_price),
+            qty=str(qty),
+        )
+
+        try:
+            from sgr.monitoring.metrics import record_futures_grid_fill
+
+            record_futures_grid_fill(
+                exchange=grid.exchange.value,
+                symbol=grid.symbol.ccxt_symbol,
+                strategy=grid.strategy_name,
+                direction=grid.direction.value,
+            )
+        except Exception as e:
+            log.debug("grid_controller.fill_metric_failed", error=str(e))
+
+    # ------------------------------------------------------------------
+    # Lifecycle: close
+    # ------------------------------------------------------------------
+
+    async def close_grid(self, grid_id: str, reason: str, current_price: Decimal) -> GridState:
+        grid = self._require_grid(grid_id)
+        if not grid.is_active:
+            return grid
+
+        grid.status = GridStatus.CLOSING
+        for level in grid.levels:
+            if not level.is_filled:
+                continue
+            await self._fill_level(grid, level, current_price, opening=False)
+
+        grid.status = GridStatus.CLOSED
+        grid.closed_at = datetime.now(tz=UTC)
+        grid.close_reason = reason
+        await self._persist(grid)
+
+        log.info(
+            "grid_controller.grid_closed",
+            grid_id=str(grid.id),
+            reason=reason,
+            realized_pnl=str(grid.realized_pnl),
+            fills=grid.fills_count,
+        )
+        return grid
+
+    # ------------------------------------------------------------------
+    # Monitoring
+    # ------------------------------------------------------------------
+
+    async def monitor_grids(
+        self,
+        prices: dict[str, Decimal],
+        funding_rates_annualized_pct: dict[str, float] | None = None,
+        volatility_atr_pct: dict[str, float] | None = None,
+    ) -> list[GridState]:
+        """
+        Periodischer Wartungslauf (analog zu PositionProtectionWatchdog):
+        prueft jedes aktive Grid gegen GridRiskEngine.check_ongoing_grid()
+        und schliesst es bei einer "hard"-Verletzung. prices/funding/
+        volatility sind pro symbol_key (ccxt_symbol) indiziert.
+        """
+        closed: list[GridState] = []
+        for grid in list(self._grids.values()):
+            if not grid.is_active:
+                continue
+            symbol_key = grid.symbol.ccxt_symbol
+            price = prices.get(symbol_key)
+            if price is None:
+                continue
+
+            violations = self._grid_risk.check_ongoing_grid(
+                grid,
+                price,
+                funding_rate_annualized_pct=(funding_rates_annualized_pct or {}).get(symbol_key),
+                volatility_atr_pct=(volatility_atr_pct or {}).get(symbol_key),
+            )
+            hard_violations = [v for v in violations if v.severity == "hard"]
+            if hard_violations:
+                reason = ";".join(v.code for v in hard_violations)
+                await self.close_grid(str(grid.id), reason, price)
+                closed.append(grid)
+            else:
+                await self.on_price_tick(str(grid.id), price)
+
+        return closed
+
+    # ------------------------------------------------------------------
+    # Queries / persistence
+    # ------------------------------------------------------------------
+
+    def get_grid(self, grid_id: str) -> GridState | None:
+        return self._grids.get(grid_id)
+
+    def active_grids(self) -> list[GridState]:
+        return [g for g in self._grids.values() if g.is_active]
+
+    def _require_grid(self, grid_id: str) -> GridState:
+        grid = self._grids.get(grid_id)
+        if grid is None:
+            raise KeyError(f"Grid {grid_id} not tracked by this GridController instance")
+        return grid
+
+    async def _persist(self, grid: GridState) -> None:
+        """Best-effort Persistenz (analog zu PortfolioEngine._persist_*)."""
+        if self._grid_repo is None:
+            return
+        try:
+            await self._grid_repo.upsert(grid)
+        except Exception as e:
+            log.error("grid_controller.persist_failed", grid_id=str(grid.id), error=str(e))

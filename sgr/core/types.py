@@ -47,6 +47,72 @@ class AssetClass(StrEnum):
     OPTIONS = "options"
 
 
+class ProductType(StrEnum):
+    """
+    Produktklasse eines Trades - orthogonal zu ExchangeID (WO gehandelt
+    wird) und Strategy (WAS entschieden wird). Eine Strategie deklariert,
+    welche ProductTypes sie unterstuetzt (siehe
+    sgr.exchanges.capabilities.ExchangeCapability); die Execution-Schicht
+    prueft vor jeder Order, ob die jeweilige Exchange diesen ProductType
+    fuer das konkrete Symbol tatsaechlich anbietet. Rein additiv - kein
+    bestehender Code-Pfad setzt/liest dieses Feld bisher, Spot-Handel
+    (Binance/Pionex) bleibt davon vollstaendig unberuehrt.
+
+    SPOT: klassischer Kassahandel, keine Hebelwirkung.
+    PERPETUAL: unbefristeter Futures-Kontrakt (Hebel, Funding, Margin).
+    FUTURES_GRID: SGR-eigene Grid-Strategie auf einem PERPETUAL-Markt -
+        kein exchange-natives Grid-Bot-Produkt (siehe Modul-Docstring in
+        sgr/exchanges/pionex.py: "Grid Trading Bots werden von SGR nicht
+        verwendet") - SGR verwaltet die Grid-Levels selbst ausschliesslich
+        ueber Standard-Orders auf einem PERPETUAL-Markt.
+    SPOT_GRID: dieselbe SGR-eigene Grid-Logik auf einem SPOT-Markt (kein
+        Hebel, keine Short-Seite) - Platzhalter fuer eine zukuenftige
+        Erweiterung, aktuell nicht durch eine konkrete Strategie belegt.
+    """
+
+    SPOT = "spot"
+    PERPETUAL = "perpetual"
+    FUTURES_GRID = "futures_grid"
+    SPOT_GRID = "spot_grid"
+
+
+class MarginMode(StrEnum):
+    """Margin-Modus einer gehebelten Position/eines Grids."""
+
+    CROSS = "cross"
+    ISOLATED = "isolated"
+
+
+class GridDirection(StrEnum):
+    """
+    Ausrichtung eines Futures Grid. NEUTRAL bedeutet "kein Grid aktiv" -
+    das ist ein legitimes, haeufiges Ergebnis der Adaptive-Futures-Grid-
+    Bewertung (siehe sgr/strategy/futures_grid.py), kein Fehlerzustand.
+    """
+
+    LONG = "long"
+    SHORT = "short"
+    NEUTRAL = "neutral"
+
+
+class GridSpacingMode(StrEnum):
+    """Wie die Preis-Levels innerhalb des Grid-Bereichs verteilt werden."""
+
+    ARITHMETIC = "arithmetic"  # konstanter Preis-Abstand zwischen Levels
+    GEOMETRIC = "geometric"  # konstantes prozentuales Verhaeltnis zwischen Levels
+
+
+class GridStatus(StrEnum):
+    """Lebenszyklus-Status eines Futures-Grid-Instanz (siehe GridState)."""
+
+    PENDING = "pending"  # erstellt, Orders werden gerade platziert
+    ACTIVE = "active"  # laeuft, Orders offen
+    PAUSED = "paused"  # Orders storniert, Position bleibt bestehen (kein Neu-Platzieren)
+    CLOSING = "closing"  # wird gerade geschlossen (Orders storniert, Position wird reduziert)
+    CLOSED = "closed"  # vollstaendig geschlossen, keine Exposure mehr
+    ERROR = "error"  # unerwarteter Fehler, erfordert manuelle Pruefung
+
+
 class Side(StrEnum):
     BUY = "buy"
     SELL = "sell"

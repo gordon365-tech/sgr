@@ -124,6 +124,48 @@ class TenantConfig(BaseModel):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
+    # ------------------------------------------------------------------
+    # Futures Grid / Multi-Product-Erweiterung (additiv - bestehende
+    # Tenants ohne diese Felder verhalten sich unveraendert: Futures
+    # Grid bleibt deaktiviert, enabled_product_types nur "spot", keine
+    # Jurisdiktion erfasst -> jeder Compliance-Check faellt auf
+    # COMPLIANCE_CHECK_REQUIRED/PRODUCT_NOT_AVAILABLE zurueck, siehe
+    # sgr.compliance.engine.ComplianceEngine. Diese Felder ersetzen NICHT
+    # die eigentliche Risk-/Compliance-Pruefung - sie sind reine
+    # Konfigurations-/Routing-Praeferenzen bzw. die vom Tenant/Operator
+    # gepflegten Compliance-Stammdaten, aus denen
+    # sgr.compliance.types.AccountEligibility gebaut wird).
+    # ------------------------------------------------------------------
+
+    primary_exchange: str | None = None
+    primary_futures_exchange: str | None = None
+    enable_pionex_futures_grid: bool = False
+    enable_binance: bool = True
+    enabled_product_types: list[str] = Field(default_factory=lambda: ["spot"])
+
+    # Compliance-Stammdaten (siehe sgr.compliance.types.AccountEligibility)
+    jurisdiction: str | None = None  # ISO-3166-1 alpha-2, z.B. "DE"
+    account_type: str = "retail"
+    kyc_verified: bool = False
+    futures_trading_enabled: bool = False
+    risk_disclosure_acknowledged: bool = False
+
+    def to_account_eligibility(self) -> Any:
+        """Baut ein sgr.compliance.types.AccountEligibility aus diesem
+        TenantConfig (lazy Import, um einen Modulzyklus saas<->compliance
+        zu vermeiden)."""
+        from sgr.compliance.types import AccountEligibility
+
+        return AccountEligibility(
+            tenant_id=self.user_id,
+            jurisdiction=self.jurisdiction,
+            account_type=self.account_type,
+            kyc_verified=self.kyc_verified,
+            futures_trading_enabled=self.futures_trading_enabled,
+            risk_disclosure_acknowledged=self.risk_disclosure_acknowledged,
+            enabled_product_types=self.enabled_product_types,
+        )
+
 
 class PortfolioSnapshot(BaseModel):
     """Periodischer Portfolio-Snapshot für Fee-Berechnung und Reporting."""

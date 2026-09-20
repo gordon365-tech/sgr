@@ -435,6 +435,28 @@ class ExchangeMaintenanceError(ExchangeError):
         )
 
 
+class AdapterFeatureNotImplementedError(ExchangeError):
+    """
+    Die Exchange selbst unterstuetzt dieses Feature vermutlich/nachweislich
+    (anders als NotSupportedFeatureError, das eine echte Exchange-seitige
+    Einschraenkung meldet) - der SGR-Adapter hat dafuer aber (noch) keine
+    verifizierte Implementierung. Fail-fast statt eine unverifizierte
+    Implementierung zu raten (z.B. Signatur-Verfahren einer privaten API,
+    die ohne Sandbox-Zugang nicht gegen echte Antworten getestet werden
+    kann) - siehe sgr/exchanges/pionex.py Modul-Docstring fuer den
+    konkreten Anwendungsfall (Pionex Private-REST-Endpunkte).
+    """
+
+    def __init__(self, exchange: str, feature: str, detail: str = "") -> None:
+        super().__init__(
+            f"{feature} ist fuer {exchange} in SGR (noch) nicht implementiert"
+            + (f": {detail}" if detail else "."),
+            exchange=exchange,
+            retryable=False,
+        )
+        self.feature = feature
+
+
 class NotSupportedFeatureError(ExchangeError):
     """
     Endpoint/feature not supported by this exchange (e.g. Futures-Endpunkte

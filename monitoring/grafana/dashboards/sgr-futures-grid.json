@@ -1,0 +1,314 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["sgr", "futures-grid"],
+  "templating": {
+    "list": [
+      {
+        "allValue": ".*",
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "datasource": "Prometheus",
+        "definition": "label_values(sgr_futures_grid_active, exchange)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Exchange",
+        "multi": true,
+        "name": "exchange",
+        "options": [],
+        "query": { "query": "label_values(sgr_futures_grid_active, exchange)", "refId": "exchange-variable" },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "datasource": "Prometheus",
+        "definition": "label_values(sgr_futures_grid_active, symbol)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Symbol",
+        "multi": true,
+        "name": "symbol",
+        "options": [],
+        "query": { "query": "label_values(sgr_futures_grid_active, symbol)", "refId": "symbol-variable" },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "datasource": "Prometheus",
+        "definition": "label_values(sgr_futures_grid_active, strategy)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Strategy",
+        "multi": true,
+        "name": "strategy",
+        "options": [],
+        "query": { "query": "label_values(sgr_futures_grid_active, strategy)", "refId": "strategy-variable" },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "hide": 0,
+        "includeAll": true,
+        "label": "Tenant",
+        "multi": true,
+        "name": "tenant",
+        "options": [
+          { "selected": false, "text": "Gordon", "value": "a47d994d-35cc-4619-83bb-86fd0cb48447" },
+          { "selected": false, "text": "Sumo", "value": "144f7bb0-113d-4c66-b5d3-7a34ab1d551a" }
+        ],
+        "query": "Gordon : a47d994d-35cc-4619-83bb-86fd0cb48447, Sumo : 144f7bb0-113d-4c66-b5d3-7a34ab1d551a",
+        "skipUrlSync": false,
+        "type": "custom"
+      }
+    ]
+  },
+  "time": { "from": "now-24h", "to": "now" },
+  "timepicker": {},
+  "timezone": "utc",
+  "title": "SGR - Futures Grid",
+  "uid": "sgr-futures-grid",
+  "version": 1,
+  "weekStart": "",
+  "panels": [
+    {
+      "collapsed": false,
+      "datasource": "Prometheus",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "panels": [],
+      "title": "Overview - Exchange / Product / Strategy / Tenant",
+      "type": "row"
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Active Grids",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "targets": [
+        {
+          "expr": "sum(sgr_futures_grid_active{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"})",
+          "legendFormat": "active"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Total Grid Exposure (USD)",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+      "targets": [
+        {
+          "expr": "sum(sgr_futures_grid_exposure_usd{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"})",
+          "legendFormat": "exposure"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Total Grid PnL (USD)",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+      "targets": [
+        {
+          "expr": "sum(sgr_futures_grid_pnl_usd{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"})",
+          "legendFormat": "pnl"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Total Funding Cost (USD)",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+      "targets": [
+        {
+          "expr": "sum(sgr_futures_grid_funding_cost_usd{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"})",
+          "legendFormat": "funding"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "datasource": "Prometheus",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "id": 10,
+      "panels": [],
+      "title": "Per-Grid Breakdown (Exchange / Product / Strategy / Tenant)",
+      "type": "row"
+    },
+    {
+      "id": 11,
+      "type": "table",
+      "title": "Active Grids - Exchange / Symbol / Strategy / Tenant",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 6 },
+      "targets": [
+        {
+          "expr": "sgr_futures_grid_active{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"} == 1",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "description": "Beispiel-Zeilen: Pionex/Futures Grid/Gordon, Pionex/Futures Grid/Sumo, Binance/Trend Following/Gordon, Binance/Mean Reversion/Sumo - siehe strategy+exchange+tenant Label-Kombination."
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Grid Exposure over Time",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "targets": [
+        {
+          "expr": "sgr_futures_grid_exposure_usd{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"}",
+          "legendFormat": "{{exchange}}/{{symbol}}/{{strategy}}/{{tenant}}"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Grid Realized PnL over Time",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "targets": [
+        {
+          "expr": "sgr_futures_grid_pnl_usd{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"}",
+          "legendFormat": "{{exchange}}/{{symbol}}/{{strategy}}/{{tenant}}"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "datasource": "Prometheus",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 },
+      "id": 20,
+      "panels": [],
+      "title": "Risk",
+      "type": "row"
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Liquidation Distance (%)",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 23 },
+      "targets": [
+        {
+          "expr": "sgr_futures_grid_liquidation_distance_pct{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"}",
+          "legendFormat": "{{exchange}}/{{symbol}}/{{strategy}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 0.15 },
+              { "color": "green", "value": 0.3 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Funding Cost Accumulation (USD)",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 23 },
+      "targets": [
+        {
+          "expr": "sgr_futures_grid_funding_cost_usd{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"}",
+          "legendFormat": "{{exchange}}/{{symbol}}/{{strategy}}"
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "Open Grid Orders",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 23 },
+      "targets": [
+        {
+          "expr": "sgr_futures_grid_orders{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"}",
+          "legendFormat": "{{exchange}}/{{symbol}}/{{strategy}}"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "datasource": "Prometheus",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 },
+      "id": 30,
+      "panels": [],
+      "title": "Edge & Regime Suitability",
+      "type": "row"
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Grid Edge Score (0-1)",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "targets": [
+        {
+          "expr": "sgr_futures_grid_edge{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"}",
+          "legendFormat": "{{exchange}}/{{symbol}}/{{strategy}}"
+        }
+      ]
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "Grid Suitability / Regime Score (0-1)",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "targets": [
+        {
+          "expr": "sgr_futures_grid_regime_score{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"}",
+          "legendFormat": "{{exchange}}/{{symbol}}/{{strategy}}"
+        }
+      ]
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "Grid Fills (rate)",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 40 },
+      "targets": [
+        {
+          "expr": "sum(rate(sgr_futures_grid_fills_total{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"}[5m])) by (exchange, symbol, strategy, tenant)",
+          "legendFormat": "{{exchange}}/{{symbol}}/{{strategy}}/{{tenant}}"
+        }
+      ]
+    }
+  ]
+}
