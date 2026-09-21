@@ -11,7 +11,16 @@ from __future__ import annotations
 
 import pytest
 
+from sgr.risk import symbol_kill_switch as symbol_kill_switch_module
 from sgr.risk.symbol_kill_switch import SymbolKillSwitch, get_symbol_kill_switch
+
+
+@pytest.fixture(autouse=True)
+def _reset_symbol_kill_switch_singletons():
+    """Isoliert die modul-globalen, Tenant-gescopten Singletons zwischen Tests."""
+    symbol_kill_switch_module._symbol_kill_switches.clear()
+    yield
+    symbol_kill_switch_module._symbol_kill_switches.clear()
 
 
 @pytest.fixture
@@ -154,3 +163,39 @@ class TestSingleton:
         first = get_symbol_kill_switch()
         second = get_symbol_kill_switch()
         assert first is second
+
+
+class TestTenantScoping:
+    """
+    BUG-FIX (Produktions-Audit): get_symbol_kill_switch() war zuvor ein
+    reines Prozess-Singleton ohne tenant_id (SymbolKillSwitch.get() /
+    _instance). Sicher nur dank OS-Prozesstrennung pro Tenant - ein
+    Instanz-Leak waere entstanden, haette ein Prozess je mehrere Tenants
+    gleichzeitig bedient. Diese Tests decken das neue, KillSwitch-analoge
+    Tenant-Scoping ab.
+    """
+
+    def test_different_tenants_get_different_instances(self) -> None:
+        a = get_symbol_kill_switch(tenant_id="tenant-a")
+        b = get_symbol_kill_switch(tenant_id="tenant-b")
+        assert a is not b
+
+    def test_same_tenant_returns_same_instance(self) -> None:
+        first = get_symbol_kill_switch(tenant_id="tenant-a")
+        second = get_symbol_kill_switch(tenant_id="tenant-a")
+        assert first is second
+
+    def test_default_call_matches_explicit_none_tenant(self) -> None:
+        assert get_symbol_kill_switch() is get_symbol_kill_switch(tenant_id=None)
+
+    async def test_deactivation_does_not_leak_across_tenants(self) -> None:
+        """Kern des Bugs: eine Deaktivierung fuer Tenant A durfte Tenant B
+        nie betreffen - genau das waere mit dem alten reinen Prozess-
+        Singleton passiert, haetten beide je im selben Prozess gelaufen."""
+        gordon = get_symbol_kill_switch(tenant_id="gordon")
+        sumo = get_symbol_kill_switch(tenant_id="sumo")
+
+        await gordon.deactivate("pionex:BTC/USDT", "anomaly detected")
+
+        assert gordon.is_active("pionex:BTC/USDT") is False
+        assert sumo.is_active("pionex:BTC/USDT") is True

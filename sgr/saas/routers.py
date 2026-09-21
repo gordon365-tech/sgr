@@ -120,16 +120,33 @@ async def login(body: LoginRequest, request: Request) -> TokenResponse:
 
 @auth_router.post("/refresh", response_model=TokenResponse)
 async def refresh_token(body: RefreshRequest) -> TokenResponse:
-    """Erneuert Access Token via Refresh Token."""
+    """
+    Erneuert Access Token via Refresh Token.
+
+    BUG-FIX (Produktions-Audit): lud bisher NICHT den echten User aus der
+    DB - stattdessen ein verworfener Platzhalter-Call
+    (get_by_email("")) und ein hart codiertes trading_mode=PAPER im neuen
+    Access Token, unabhaengig vom tatsaechlichen Modus/Admin-Status des
+    Users. Konsequenz: ein LIVE-User (oder Admin) verlor bei jedem Token-
+    Refresh stillschweigend seinen echten Modus/Status im neuen Token.
+    Jetzt: User per user_id laden (aus dem bereits verifizierten Refresh-
+    Token-Subject, nicht von aussen beeinflussbar) und trading_mode +
+    is_admin wie bei /auth/login real uebernehmen. Fail-safe: fehlender
+    oder deaktivierter User -> 401, analog zu AuthService.login().
+    """
     try:
         user_id = _auth.verify_refresh_token(body.refresh_token)
         from sgr.core.repositories import get_repositories
 
         repos = get_repositories()
-        await repos.users.get_by_email("")  # Placeholder
-        # In Produktion: User aus DB laden per user_id
-        mode = TradingMode.PAPER
-        access_token = _auth.create_access_token(user_id, mode)
+        db_user = await repos.users.get_by_id(user_id)
+        if db_user is None:
+            raise ValueError("User not found")
+        if not db_user["is_active"]:
+            raise ValueError("Account deactivated")
+
+        mode = TradingMode(db_user["trading_mode"])
+        access_token = _auth.create_access_token(user_id, mode, is_admin=db_user["is_admin"])
         new_refresh = _auth.create_refresh_token(user_id)
         return TokenResponse(
             access_token=access_token,

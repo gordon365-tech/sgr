@@ -523,12 +523,12 @@ def sample_candle_event_factory():
 
 @pytest.fixture(autouse=True)
 def _reset_symbol_kill_switch():
-    """Isoliert den modul-globalen SymbolKillSwitch-Singleton zwischen Tests."""
-    from sgr.risk.symbol_kill_switch import SymbolKillSwitch
+    """Isoliert die modul-globalen SymbolKillSwitch-Singletons zwischen Tests."""
+    from sgr.risk import symbol_kill_switch as symbol_kill_switch_module
 
-    SymbolKillSwitch._instance = None
+    symbol_kill_switch_module._symbol_kill_switches.clear()
     yield
-    SymbolKillSwitch._instance = None
+    symbol_kill_switch_module._symbol_kill_switches.clear()
 
 
 async def test_disabled_symbol_skips_signal_generation_entirely() -> None:

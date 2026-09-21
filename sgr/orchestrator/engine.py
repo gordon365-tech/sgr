@@ -91,6 +91,7 @@ class TradingOrchestrator:
         portfolio_engine: Any,
         feature_store: Any,
         trading_mode: TradingMode,
+        tenant_id: str | None = None,
     ) -> None:
         self._strategy_engine = strategy_engine
         self._risk_engine = risk_engine
@@ -98,6 +99,10 @@ class TradingOrchestrator:
         self._portfolio_engine = portfolio_engine
         self._feature_store = feature_store
         self._trading_mode = trading_mode
+        # Tenant-Scoping fuer den Symbol Kill Switch (siehe
+        # sgr/risk/symbol_kill_switch.py Klassen-Docstring) - Default None
+        # entspricht dem bisherigen, unveraenderten Single-Tenant-Verhalten.
+        self._tenant_id = tenant_id
 
     # ------------------------------------------------------------------
     # Main Entry Point
@@ -161,7 +166,7 @@ class TradingOrchestrator:
         #    erst gar kein Signal, das später durch die Risk Engine laufen
         #    müsste. Getrennt vom globalen KillSwitch (der wird bereits in
         #    RiskEngine.evaluate() geprüft) - dieser Check ist symbolspezifisch.
-        if not get_symbol_kill_switch().is_active(symbol_key):
+        if not get_symbol_kill_switch(tenant_id=self._tenant_id).is_active(symbol_key):
             log.info(
                 "orchestrator.cycle.symbol_disabled",
                 symbol_key=symbol_key,

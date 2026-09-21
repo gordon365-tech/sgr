@@ -18,6 +18,7 @@ dist/
 
 # Virtuelle Umgebungen
 .venv/
+.venv-dev/
 venv/
 env/
 

@@ -153,9 +153,31 @@ class TestLogin:
 
 
 class TestRefreshToken:
-    def test_refresh_token_success(self, auth_app: FastAPI) -> None:
+    def _db_user(
+        self,
+        *,
+        is_active: bool = True,
+        is_admin: bool = False,
+        trading_mode: str = "live",
+    ) -> dict:
+        return {
+            "id": "user-1",
+            "email": "trader@example.com",
+            "is_active": is_active,
+            "is_admin": is_admin,
+            "trading_mode": trading_mode,
+        }
+
+    def test_refresh_token_success_uses_real_user_state(self, auth_app: FastAPI) -> None:
+        """BUG-FIX-Regressionstest: frueher wurde IMMER trading_mode=PAPER
+        zurueckgegeben, unabhaengig vom echten User - hier trading_mode
+        bewusst auf 'live' + is_admin=True gesetzt, um zu verifizieren,
+        dass der neue Access Token den echten DB-State uebernimmt statt
+        eines hart codierten Platzhalters."""
         repos = MagicMock()
-        repos.users.get_by_email = AsyncMock(return_value=None)
+        repos.users.get_by_id = AsyncMock(
+            return_value=self._db_user(is_admin=True, trading_mode="live")
+        )
 
         with (
             patch(
@@ -163,7 +185,7 @@ class TestRefreshToken:
             ),
             patch(
                 "sgr.saas.routers._auth.create_access_token", return_value="new-access"
-            ),
+            ) as mock_create_access,
             patch(
                 "sgr.saas.routers._auth.create_refresh_token", return_value="new-refresh"
             ),
@@ -178,6 +200,47 @@ class TestRefreshToken:
         body = response.json()
         assert body["access_token"] == "new-access"
         assert body["user_id"] == "user-1"
+        assert body["trading_mode"] == "live"
+        repos.users.get_by_id.assert_awaited_once_with("user-1")
+        mock_create_access.assert_called_once_with(
+            "user-1", TradingMode.LIVE, is_admin=True
+        )
+
+    def test_refresh_token_rejects_deactivated_user(self, auth_app: FastAPI) -> None:
+        repos = MagicMock()
+        repos.users.get_by_id = AsyncMock(return_value=self._db_user(is_active=False))
+
+        with (
+            patch(
+                "sgr.saas.routers._auth.verify_refresh_token", return_value="user-1"
+            ),
+            patch("sgr.core.repositories.get_repositories", return_value=repos),
+        ):
+            client = TestClient(auth_app)
+            response = client.post(
+                "/api/v1/auth/refresh", json={"refresh_token": "some-refresh-token"}
+            )
+
+        assert response.status_code == 401
+        assert "deactivated" in response.json()["detail"]
+
+    def test_refresh_token_rejects_unknown_user(self, auth_app: FastAPI) -> None:
+        repos = MagicMock()
+        repos.users.get_by_id = AsyncMock(return_value=None)
+
+        with (
+            patch(
+                "sgr.saas.routers._auth.verify_refresh_token", return_value="user-1"
+            ),
+            patch("sgr.core.repositories.get_repositories", return_value=repos),
+        ):
+            client = TestClient(auth_app)
+            response = client.post(
+                "/api/v1/auth/refresh", json={"refresh_token": "some-refresh-token"}
+            )
+
+        assert response.status_code == 401
+        assert "not found" in response.json()["detail"]
 
     def test_refresh_token_maps_value_error_to_401(self, auth_app: FastAPI) -> None:
         with patch(

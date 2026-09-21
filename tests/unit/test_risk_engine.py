@@ -1162,6 +1162,89 @@ class TestLeverageGuard:
 
 
 # ---------------------------------------------------------------------------
+# Pre-Trade Leverage Cap (ergaenzt TestLeverageGuard oben: jener Guard
+# prueft nur den AKTUELLEN Zustand bestehender Positionen, post-hoc. Diese
+# Tests decken den neuen Pre-Trade-Check ab, der eine einzelne neue Order
+# daran hindert, das Portfolio ERST DURCH DIESEN TRADE ueber max_leverage
+# zu heben, bevor der naechste evaluate()-Zyklus es post-hoc erkennen
+# wuerde.)
+# ---------------------------------------------------------------------------
+
+
+class TestPreTradeLeverageCap:
+    @pytest.fixture
+    def eth_position(self) -> Position:
+        """Bestehende Position auf einem ANDEREN Symbol als sample_signal
+        (BTC) - vermeidet die separate Duplicate-Position-Pruefung
+        (Schritt 1c), die dasselbe Symbol sonst schon vorher ablehnen
+        wuerde, und isoliert damit den neuen Pre-Trade-Leverage-Check."""
+        return Position(
+            symbol=Symbol(base="ETH", quote="USDT", exchange=ExchangeID.BINANCE),
+            side=PositionSide.LONG,
+            quantity=Decimal("1.7"),
+            entry_price=Decimal("3000"),
+            current_price=Decimal("3000"),
+            opened_at=datetime.now(tz=UTC),
+            strategy_name="trend_v1",
+            trading_mode=TradingMode.PAPER,
+        )
+
+    async def test_new_order_capped_to_stay_within_leverage_limit(
+        self,
+        risk_engine: RiskEngine,
+        sample_signal: Signal,
+        eth_position: Position,
+    ) -> None:
+        """Bestehende Position: 1.7 ETH @ 3000 = 5100 Notional auf 100k
+        Portfolio (0.051x). Mit max_position_pct=10%/heat_limit=70% (Default)
+        wuerde der Sizer fuer das BTC-Signal ohne Cap ca. 7000 Notional
+        vorschlagen (0.07x zusaetzlich). Ein knapper max_leverage=0.10x
+        laesst nur 10000 - 5100 = 4900 Notional Headroom -> die Order muss
+        auf genau dieses Headroom gekappt werden, statt es zu ueberschreiten."""
+        await risk_engine.initialize()
+        risk_engine._limits.max_leverage = Decimal("0.10")
+
+        assessment = await risk_engine.evaluate(
+            signal=sample_signal,
+            open_positions=[eth_position],
+            portfolio_value=Decimal("100000"),
+            available_capital=Decimal("40000"),
+            current_price=Decimal("50000"),
+        )
+
+        assert assessment.decision == RiskDecision.REDUCED
+        assert any("leverage cap" in w.lower() for w in assessment.warnings)
+
+        existing_notional = Decimal("1.7") * Decimal("3000")
+        new_notional = assessment.approved_quantity * Decimal("50000")
+        resulting_leverage = (existing_notional + new_notional) / Decimal("100000")
+        assert resulting_leverage <= Decimal("0.10") + Decimal("0.0001")
+        assert assessment.approved_quantity > 0
+
+    async def test_order_not_capped_when_within_generous_leverage_limit(
+        self,
+        risk_engine: RiskEngine,
+        sample_signal: Signal,
+        eth_position: Position,
+    ) -> None:
+        """Regressionsschutz: bei einem grosszuegigen Limit (Default 3.0x)
+        darf der neue Pre-Trade-Check das bestehende Sizing-Ergebnis nicht
+        veraendern."""
+        await risk_engine.initialize()
+        assert risk_engine._limits.max_leverage == Decimal("3.0")
+
+        baseline = await risk_engine.evaluate(
+            signal=sample_signal,
+            open_positions=[eth_position],
+            portfolio_value=Decimal("100000"),
+            available_capital=Decimal("40000"),
+            current_price=Decimal("50000"),
+        )
+
+        assert not any("leverage cap" in w.lower() for w in baseline.warnings)
+
+
+# ---------------------------------------------------------------------------
 # Duplicate Position Rejection (Autonomous-Paper-Trading-Rollout, Task-
 # Vorgabe "Keine Strategieblindheit": mehrfaches Oeffnen derselben
 # Position / gleichzeitige gegensaetzliche Positionen ohne explizite

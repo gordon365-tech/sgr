@@ -62,7 +62,19 @@ class SymbolKillSwitchEntry:
 
 class SymbolKillSwitch:
     """
-    Singleton-Registry für symbolspezifische Trading-Deaktivierung.
+    Registry für symbolspezifische Trading-Deaktivierung. Eine Instanz pro
+    (Tenant, Prozess) - siehe get_symbol_kill_switch() weiter unten.
+
+    Tenant-Scoping (Produktions-Audit-Fix): frueher ein reines Prozess-
+    Singleton ohne tenant_id, analog zur urspruenglichen KillSwitch-
+    Implementierung vor deren eigenem Tenant-Scoping-Fix (siehe
+    sgr/risk/kill_switch.py Kommentar bei _kill_switches). Sicher nur
+    dank OS-Prozesstrennung pro Tenant (siehe SGRConfig.tenant_id
+    Docstring) - kein aktiver Exploit heute, aber ein Instanz-Leak WUERDE
+    entstehen, falls ein Prozess jemals mehrere Tenants gleichzeitig
+    bedienen wuerde. Wie beim KillSwitch-Fix: additiv, kein bestehender
+    Call-Site muss tenant_id angeben (Default None = unveraendertes
+    Verhalten, siehe get_symbol_kill_switch()).
 
     Thread-Safety: nur aus einem asyncio Event Loop verwenden (wie
     StrategyRegistry - keine expliziten Locks nötig, da Python's GIL
@@ -71,9 +83,8 @@ class SymbolKillSwitch:
     einem inkonsistenten Zustand führen könnte).
     """
 
-    _instance: SymbolKillSwitch | None = None
-
-    def __init__(self) -> None:
+    def __init__(self, tenant_id: str | None = None) -> None:
+        self._tenant_id = tenant_id
         self._entries: dict[str, SymbolKillSwitchEntry] = {}
         # Optional: Repository für Persistenz. None = rein in-memory,
         # additiv wie bei StrategyRegistry.inject_repository().
@@ -82,12 +93,6 @@ class SymbolKillSwitch:
     def inject_repository(self, repository: Any) -> None:
         """Injiziert ein Repository für Persistenz. Additiv, optional."""
         self._repo = repository
-
-    @classmethod
-    def get(cls) -> SymbolKillSwitch:
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
 
     # ------------------------------------------------------------------
     # Query (synchron, hot path)
@@ -198,5 +203,16 @@ class SymbolKillSwitch:
             )
 
 
-def get_symbol_kill_switch() -> SymbolKillSwitch:
-    return SymbolKillSwitch.get()
+
+# ---------------------------------------------------------------------------
+# Singletons (eine Instanz pro Tenant - siehe Klassen-Docstring oben und
+# das identische Muster in sgr/risk/kill_switch.py._kill_switches)
+# ---------------------------------------------------------------------------
+
+_symbol_kill_switches: dict[str | None, SymbolKillSwitch] = {}
+
+
+def get_symbol_kill_switch(tenant_id: str | None = None) -> SymbolKillSwitch:
+    if tenant_id not in _symbol_kill_switches:
+        _symbol_kill_switches[tenant_id] = SymbolKillSwitch(tenant_id=tenant_id)
+    return _symbol_kill_switches[tenant_id]

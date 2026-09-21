@@ -376,6 +376,37 @@ class RiskEngine:
             qty = qty * Decimal(str(reduction_factor))
             warnings.append(f"Position reduced to {reduction_factor:.0%} due to soft limit breach")
 
+        # 7b. Pre-Trade Leverage Cap: verhindert, dass DIESE eine neue Order
+        # das Portfolio ueber max_leverage hebt, BEVOR sie ausgefuehrt wird.
+        # Ergaenzt den Hard-Limit-Check "max_leverage" in _run_all_checks()
+        # (siehe Leverage-Guard-Commit), der nur den AKTUELLEN Zustand
+        # bestehender Positionen prueft und daher eine einzelne neue Order
+        # nicht abfangen konnte, die das Portfolio transient ueber das
+        # Limit schiebt, bevor der naechste evaluate()-Zyklus es erkennt
+        # und den Kill Switch ausloest. Statt hart abzulehnen wird die
+        # Groesse - analog zu den bestehenden Soft-Limit-Reduktionen -
+        # auf das verbleibende Leverage-Headroom gekappt.
+        max_leverage = self._limits.max_leverage
+        leverage_capped = False
+        if max_leverage > 0 and current_price > 0:
+            existing_notional = Decimal(str(metrics.gross_leverage)) * portfolio_value
+            headroom_notional = max_leverage * portfolio_value - existing_notional
+            prospective_new_notional = qty * current_price
+            if prospective_new_notional > headroom_notional:
+                if headroom_notional <= 0:
+                    return self._reject(
+                        signal.id,
+                        f"Pre-trade leverage cap: portfolio already at/above "
+                        f"{max_leverage}x gross leverage, no headroom for new exposure",
+                        portfolio_value,
+                        metrics,
+                    )
+                qty = headroom_notional / current_price
+                leverage_capped = True
+                warnings.append(
+                    f"Position reduced to stay within pre-trade leverage cap ({max_leverage}x)"
+                )
+
         # 8. Null-Qty → REJECT
         if qty <= 0:
             reason = reduction_reason or "Position size computed as 0"
@@ -393,7 +424,7 @@ class RiskEngine:
 
         decision = (
             RiskDecision.REDUCED
-            if (reduction_factor < 1.0 or reduction_reason)
+            if (reduction_factor < 1.0 or reduction_reason or leverage_capped)
             else RiskDecision.APPROVED
         )
 

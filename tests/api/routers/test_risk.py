@@ -16,14 +16,15 @@ from fastapi.testclient import TestClient
 from sgr.api.dependencies import TokenData, require_admin, require_auth
 from sgr.api.routers.risk import router as risk_router
 from sgr.core.types import TradingMode
-from sgr.risk.symbol_kill_switch import SymbolKillSwitch, get_symbol_kill_switch
+from sgr.risk import symbol_kill_switch as symbol_kill_switch_module
+from sgr.risk.symbol_kill_switch import get_symbol_kill_switch
 
 
 @pytest.fixture(autouse=True)
 def _reset_symbol_kill_switch():
-    SymbolKillSwitch._instance = None
+    symbol_kill_switch_module._symbol_kill_switches.clear()
     yield
-    SymbolKillSwitch._instance = None
+    symbol_kill_switch_module._symbol_kill_switches.clear()
 
 
 @pytest.fixture

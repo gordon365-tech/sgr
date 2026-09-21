@@ -1246,6 +1246,24 @@ class UserRepository:
                 "totp_secret": user.totp_secret,
             }
 
+    async def get_by_id(self, user_id: str) -> dict[str, Any] | None:
+        async with get_session() as session:
+            stmt = select(UserModel).where(UserModel.id == user_id)
+            result = await session.execute(stmt)
+            user = result.scalar_one_or_none()
+            if user is None:
+                return None
+            return {
+                "id": str(user.id),
+                "email": user.email,
+                "hashed_password": user.hashed_password,
+                "is_active": user.is_active,
+                "is_2fa_enabled": user.is_2fa_enabled,
+                "is_admin": user.is_admin,
+                "trading_mode": user.trading_mode,
+                "totp_secret": user.totp_secret,
+            }
+
     async def update_last_login(self, user_id: str) -> None:
         async with get_session() as session:
             stmt = (

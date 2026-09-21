@@ -571,6 +571,7 @@ async def lifespan(app: FastAPI, role: LifespanRole = "worker") -> AsyncIterator
             portfolio_engine=portfolio_engine,
             feature_store=feature_store,
             trading_mode=config.trading_mode,
+            tenant_id=config.tenant_id,
         )
         app.state.orchestrator = orchestrator
 

@@ -129,11 +129,22 @@ async def require_admin(
 
 async def require_live_2fa(
     user: Annotated[TokenData, Depends(require_auth)],
+    repos: Annotated[Repositories, Depends(get_repos)],
     x_totp_code: Annotated[str | None, Header()] = None,
 ) -> TokenData:
     """
     Dependency für Live-Trading Aktionen.
     Erfordert Auth + gültigen TOTP-Code (2FA).
+
+    BUG-FIX (Produktions-Audit): dieser Check pruefte bisher nur, ob der
+    X-TOTP-Code Header ueberhaupt gesetzt war - der Code selbst wurde nie
+    gegen das echte TOTP-Secret des Users verifiziert (jeder beliebige
+    Wert wurde akzeptiert). Die eigentliche Verifikations-Logik
+    (AuthService.verify_totp(), verschluesselte Secret-Speicherung) war
+    bereits vollstaendig implementiert und wird bereits beim Login
+    verwendet (siehe AuthService.login()) - hier fehlte nur die
+    Verdrahtung. Fail-closed: fehlendes/deaktiviertes 2FA-Setup oder ein
+    DB-Fehler fuehren zu 403, nie zu einem stillschweigenden Durchlassen.
     """
     if user.trading_mode == TradingMode.LIVE:
         if not x_totp_code:
@@ -141,10 +152,31 @@ async def require_live_2fa(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="2FA required for live trading actions. Provide X-TOTP-Code header.",
             )
-        # TOTP Validierung (vereinfacht – vollständige Impl. in auth service)
-        # In Produktion: TOTP Secret aus DB laden per user_id
-        # Hier: Placeholder-Validierung
-        log.info("live_trading.2fa_check", user_id=user.user_id)
+
+        db_user = await repos.users.get_by_id(user.user_id)
+        if (
+            db_user is None
+            or not db_user.get("is_2fa_enabled")
+            or not db_user.get("totp_secret")
+        ):
+            log.warning("live_trading.2fa_not_configured", user_id=user.user_id)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="2FA is not set up for this account. Live trading requires 2FA.",
+            )
+
+        from sgr.saas.auth import AuthService
+
+        auth_service = AuthService()
+        secret = auth_service.decrypt_totp_secret(db_user["totp_secret"])
+        if not auth_service.verify_totp(secret, x_totp_code):
+            log.warning("live_trading.2fa_invalid_code", user_id=user.user_id)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Invalid 2FA code.",
+            )
+
+        log.info("live_trading.2fa_check_passed", user_id=user.user_id)
 
     return user
 

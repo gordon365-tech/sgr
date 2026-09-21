@@ -71,16 +71,43 @@ class StrategyEntry:
 
 class StrategyRegistry:
     """
-    Singleton Registry aller Strategien.
+    Singleton Registry aller Strategien. Eine Instanz pro Tenant - siehe
+    get_strategy_registry() weiter unten.
+
+    BUG-FIX (Produktions-Audit, Tenant-Scoping): _entries war zuvor ein
+    KLASSEN-Attribut (dict[str, StrategyEntry] = {}), nicht in __init__
+    gesetzt - dadurch haetten sich SAEMTLICHE StrategyRegistry()-Instanzen
+    (nicht nur die ueber .get() gecachte) denselben Dict geteilt, unabhaengig
+    davon, ob sie fuer denselben Tenant gedacht waren oder nicht. Praktisch
+    folgenlos bisher, weil ausnahmslos ueber .get()/StrategyRegistry.register
+    zugegriffen wird (kein Call-Site konstruiert die Klasse direkt) - aber
+    ein Instanz-Attribut ist trotzdem die korrekte Grundlage fuer
+    Tenant-Scoping unten, analog zum bereits vorhandenen SymbolKillSwitch-
+    Fix (siehe sgr/risk/symbol_kill_switch.py).
+
+    Tenant-Scoping-Grenze (bewusst NICHT weiter aufgeloest): @register wird
+    als Klassen-Decorator zur Modul-Importzeit ausgefuehrt, also BEVOR ein
+    Tenant-Kontext ueberhaupt existiert - welche Strategie-KLASSEN existieren
+    ist daher unvermeidbar prozessweiter Code-Zustand, kein Tenant-Datum.
+    Nur der MUTABLE Zustand pro Eintrag (is_active, performance,
+    validation_status) waere tenant-spezifisch. Dutzende bestehende
+    Call-Sites (StrategyEngine, ExecutionEngine, ML-Engine,
+    Validation-Runner, ...) rufen StrategyRegistry.get() ohne tenant_id auf
+    - sie alle auf tenant_id umzustellen waere eine groessere
+    Architekturaenderung (siehe analoge Design-Entscheidung im
+    Leverage-Guard-Commit, nicht Teil dieses fokussierten Fixes) und ist
+    heute durch OS-Prozesstrennung pro Tenant (ein Worker-Prozess pro
+    Tenant, siehe SGRConfig.tenant_id Docstring) ohnehin sicher.
+    get_strategy_registry(tenant_id=...) steht additiv fuer zukuenftigen,
+    tenant-bewussten Code bereit; StrategyRegistry.get() bleibt unveraendert
+    das Default-Tenant-(None)-Singleton, das @register befuellt.
 
     Thread-Safety: nur aus einem asyncio Event Loop verwenden.
     Strategien sind immutable nach Registrierung.
     """
 
-    _instance: StrategyRegistry | None = None
-    _entries: dict[str, StrategyEntry] = {}
-
     def __init__(self) -> None:
+        self._entries: dict[str, StrategyEntry] = {}
         # Optional: StrategyRepository fuer Persistenz von
         # Aktivierung/Deaktivierung. None = rein in-memory (Tests,
         # Backtesting) - additiv, kein Pflichtfeld.
@@ -104,9 +131,10 @@ class StrategyRegistry:
 
     @classmethod
     def get(cls) -> StrategyRegistry:
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
+        """Default-Tenant-(None)-Singleton - das @register befuellt, siehe
+        Klassen-Docstring. Unveraendertes Verhalten fuer alle bestehenden
+        Call-Sites; identisch zu get_strategy_registry() ohne tenant_id."""
+        return get_strategy_registry(tenant_id=None)
 
     # ------------------------------------------------------------------
     # Registration
@@ -329,3 +357,18 @@ class StrategyRegistry:
         Cleanup-Aufruf nach einem bereits fehlgeschlagenen Trial darf
         nicht selbst scheitern)."""
         self._entries.pop(name, None)
+
+
+# ---------------------------------------------------------------------------
+# Singletons (eine Instanz pro Tenant - siehe Klassen-Docstring oben und
+# das identische Muster in sgr/risk/kill_switch.py._kill_switches /
+# sgr/risk/symbol_kill_switch.py._symbol_kill_switches)
+# ---------------------------------------------------------------------------
+
+_registries: dict[str | None, StrategyRegistry] = {}
+
+
+def get_strategy_registry(tenant_id: str | None = None) -> StrategyRegistry:
+    if tenant_id not in _registries:
+        _registries[tenant_id] = StrategyRegistry()
+    return _registries[tenant_id]
