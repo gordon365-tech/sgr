@@ -183,6 +183,33 @@ class TestUnknownStateHandling:
         assert result.raw_response["unknown"] is True
         assert "connection reset" in result.raw_response["error"]
 
+    async def test_submit_error_finalizes_pending_row_instead_of_orphaning_it(self) -> None:
+        """Reproduces the 2026-09-16/17 production incident: 1,496 orders
+        were left permanently stuck at status='pending' because
+        _persist_pending() commits the row in its own transaction before
+        the exchange call, and a submit failure returned early without
+        ever updating it - see sgr/execution/order_safety.py BUG-FIX
+        comment in execute_safely()'s except-block. A ticker/exchange
+        failure after the pending row is already committed must result in
+        the row being finalized (e.g. REJECTED with an unknown marker),
+        never left at PENDING forever."""
+        repo = AsyncMock()
+        repo.get_by_id = AsyncMock(return_value=None)
+        repo.create = AsyncMock(return_value="order-id")
+        repo.update_status = AsyncMock()
+
+        executor = SafeOrderExecutor(order_repository=repo, tenant_id="tenant-x")
+        order = _make_order_request()
+        submit_fn = AsyncMock(side_effect=RuntimeError("ticker fetch failed"))
+
+        result = await executor.execute_safely(order, submit_fn)
+
+        repo.create.assert_awaited_once()
+        repo.update_status.assert_awaited_once()
+        _, kwargs = repo.update_status.await_args
+        assert kwargs["status"] != OrderStatus.PENDING.value
+        assert result.raw_response["unknown"] is True
+
     async def test_unknown_state_order_is_released_and_can_be_retried(
         self, executor: SafeOrderExecutor
     ) -> None:

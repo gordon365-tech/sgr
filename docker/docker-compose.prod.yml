@@ -485,7 +485,7 @@ services:
       # (die 10 bestehenden Spot-Positionen wuerden fuer einen Futures-
       # Adapter unsichtbar).
       RISK_PROFILE_NAME: "TEST_1X"
-      RISK_MAX_OPEN_POSITIONS: "1"
+      RISK_MAX_OPEN_POSITIONS: "2"
       RISK_DEFAULT_LEVERAGE: "1"
       RISK_MAX_LEVERAGE: "1"
       RISK_POSITION_SIZE_USD: "20"
@@ -601,7 +601,7 @@ services:
       # (zwischen dieser Aenderung und dem eigentlichen Rollout) neu
       # eroeffnete Positionen faelschlich ungeschuetzt.
       RISK_PROFILE_NAME: "TEST_1X"
-      RISK_MAX_OPEN_POSITIONS: "1"
+      RISK_MAX_OPEN_POSITIONS: "2"
       RISK_DEFAULT_LEVERAGE: "1"
       RISK_MAX_LEVERAGE: "1"
       RISK_POSITION_SIZE_USD: "20"

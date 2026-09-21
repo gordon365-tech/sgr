@@ -214,6 +214,20 @@ class SafeOrderExecutor:
                 exc_info=True,
             )
             unknown_result = self._make_unknown_result(order, str(e))
+            # BUG-FIX (Produktions-Audit 2026-09-21, 1496 verwaiste PENDING-
+            # Orders bei Sumo): _persist_pending() oben hat den Record
+            # bereits in einer EIGENEN, committeten Transaktion angelegt -
+            # ohne diesen Aufruf blieb er bei jedem Submit-Fehler auf
+            # PENDING stehen, für immer, da execute_safely() hier direkt
+            # zurückkehrte, statt den bereits vorhandenen _persist_final()-
+            # Pfad (der REJECTED/unknown-Ergebnisse genauso persistiert wie
+            # FILLED-Ergebnisse) auch im Fehlerfall zu nutzen. Historisch
+            # ausgelöst durch wiederholte Binance-IP-Bans (siehe Commit
+            # 22a71fe) während get_ticker() in _simulate_order()
+            # (ccxt_base.py) exceptions warf, aber jeder zukünftige
+            # Submit-Fehler (Netzwerk, Timeout, Exchange-Fehler) hätte
+            # denselben Effekt gehabt.
+            await self._persist_final(order, unknown_result)
             self._in_flight.pop(order_key, None)
             return unknown_result
 
