@@ -10,21 +10,36 @@ Isolation, Paper Trading.
 
 Alle Tests verwenden ausschliesslich einen Fake-PionexClient (kein
 echtes Netzwerk, keine echten Credentials, keine echten Orders) - siehe
-FakePrivateClient unten. WICHTIG: kein Test ruft jemals place_order()
-mit trading_mode=LIVE erfolgreich auf - die einzigen LIVE-Order-Tests
-bestaetigen, dass das weiterhin BLOCKIERT bleibt (siehe
-TestLiveOrderSubmissionStaysBlocked).
+FakePrivateClient unten.
+
+Seit der Futures Write Integration (2026-09-21, siehe sgr/exchanges/
+pionex.py Modul-Docstring "FUTURES WRITE INTEGRATION") sind
+place_order()/cancel_order()/cancel_all_orders()/set_leverage() fuer
+LIVE+Futures echt implementiert - TestFuturesWriteOperations deckt sie
+ausschliesslich gegen den Fake-Client ab (KEIN echter Pionex-Account,
+KEINE echte Order - siehe Aufgabenstellung dieser Phase). LIVE+Spot
+bleibt weiterhin bewusst blockiert (siehe TestLiveSpotWriteStaysBlocked).
 """
 
 from __future__ import annotations
 
 from decimal import Decimal
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 import pytest
 import requests
 
-from sgr.core.types import ExchangeID, OrderStatus, PositionSide, Symbol, TradingMode
+from sgr.core.types import (
+    ExchangeID,
+    OrderRequest,
+    OrderStatus,
+    OrderType,
+    PositionSide,
+    Side,
+    Symbol,
+    TradingMode,
+)
 from sgr.exchanges.base import (
     AdapterFeatureNotImplementedError,
     ExchangeAuthenticationError,
@@ -38,13 +53,48 @@ from sgr.exchanges.pionex_client import PionexAPIError, PionexHTTPError
 from sgr.reconciliation.engine import ReconciliationEngine
 
 
+def _market_order(symbol="BTC/USDT", side=Side.BUY, quantity="0.01", reduce_only=False):
+    return OrderRequest(
+        signal_id=uuid4(),
+        symbol=Symbol(
+            base=symbol.split("/")[0], quote=symbol.split("/")[1], exchange=ExchangeID.PIONEX
+        ),
+        side=side,
+        order_type=OrderType.MARKET,
+        quantity=Decimal(quantity),
+        trading_mode=TradingMode.LIVE,
+        reduce_only=reduce_only,
+    )
+
+
+def _limit_order(
+    symbol="BTC/USDT", side=Side.BUY, quantity="0.01", price="58000", reduce_only=False
+):
+    return OrderRequest(
+        signal_id=uuid4(),
+        symbol=Symbol(
+            base=symbol.split("/")[0], quote=symbol.split("/")[1], exchange=ExchangeID.PIONEX
+        ),
+        side=side,
+        order_type=OrderType.LIMIT,
+        quantity=Decimal(quantity),
+        limit_price=Decimal(price),
+        trading_mode=TradingMode.LIVE,
+        reduce_only=reduce_only,
+    )
+
+
 class FakePrivateClient:
     """
     Konfigurierbarer Fake fuer PionexClient - deckt sowohl den Happy
     Path als auch injizierte Fehler ab (Invalid Credentials, Timeout,
-    Rate Limit, Malformed Response, Exchange unavailable). Kein Netzwerk,
-    keine Order-Methoden (existieren auf dieser Klasse bewusst nicht -
-    ein versehentlicher Aufruf wuerde mit AttributeError auffallen).
+    Rate Limit, Malformed Response, Exchange unavailable). Kein Netzwerk.
+
+    Seit der Futures Write Integration simuliert diese Klasse zusaetzlich
+    ein einfaches Server-seitiges Order-Buch (self.orders) fuer
+    create_futures_order/get_futures_order/get_futures_order_by_client_id/
+    cancel_futures_order/cancel_all_futures_orders/set_futures_leverage -
+    siehe TestFuturesWriteOperations weiter unten.
     """
 
     KLINE_INTERVALS = {"1h": "60M"}
@@ -56,6 +106,17 @@ class FakePrivateClient:
         self._error: Exception | None = None
         self._error_only_for: set[str] | None = None
         self.calls: list[str] = []
+        # --- Futures Write Integration: simuliertes Server-seitiges
+        # Order-Buch (order_id -> Order-Dict), damit place_order/
+        # cancel_order/get_order end-to-end konsistent zusammenspielen,
+        # genau wie ein echter Pionex-Account. MARKET_QTY-Orders "fuellen"
+        # sofort (status CLOSED), LIMIT-Orders bleiben OPEN (ruhend) -
+        # realistisches, aber bewusst einfaches Verhalten.
+        self.orders: dict[int, dict] = {}
+        self.client_order_index: dict[str, int] = {}
+        self._next_order_id = 9000
+        self.leverage_calls: list[tuple[str, str]] = []
+        self.cancel_all_calls: list[str] = []
 
     def inject_error(self, error: Exception, only_for: set[str] | None = None) -> None:
         """only_for=None (default): jeder folgende Aufruf schlaegt fehl
@@ -171,6 +232,17 @@ class FakePrivateClient:
     # --- private: orders ---
     def get_futures_open_orders(self, symbol=None, end_time=None, limit=100):
         self._maybe_raise("get_futures_open_orders")
+        # Dynamisch aus dem simulierten Order-Buch (self.orders), sobald
+        # ein Test tatsaechlich ueber create_futures_order() Orders
+        # angelegt hat (Futures Write Integration) - sonst (leeres
+        # self.orders) unveraendertes statisches Fixture wie zuvor, damit
+        # bestehende, rein lesende Tests unveraendert bleiben.
+        if self.orders:
+            return [
+                dict(o)
+                for o in self.orders.values()
+                if o["status"] == "OPEN" and (symbol is None or o["symbol"] == symbol)
+            ]
         return [
             {
                 "orderId": 555,
@@ -188,6 +260,8 @@ class FakePrivateClient:
 
     def get_futures_order(self, symbol, order_id):
         self._maybe_raise("get_futures_order")
+        if order_id in self.orders:
+            return dict(self.orders[order_id])
         return {
             "orderId": order_id,
             "symbol": symbol,
@@ -201,6 +275,76 @@ class FakePrivateClient:
             "createTime": 1786237680000,
             "updateTime": 1786237680000,
         }
+
+    # --- private: write (Futures Write Integration) ---
+    def create_futures_order(
+        self,
+        symbol,
+        side,
+        order_type,
+        size=None,
+        price=None,
+        reduce_only=None,
+        client_order_id=None,
+    ):
+        self._maybe_raise("create_futures_order")
+        order_id = self._next_order_id
+        self._next_order_id += 1
+        immediate_fill = order_type == "MARKET_QTY"
+        fill_price = price or "60000"
+        self.orders[order_id] = {
+            "orderId": order_id,
+            "symbol": symbol,
+            "side": side,
+            "type": order_type,
+            "price": price,
+            "origSize": size,
+            "size": size,
+            "filledSize": size if immediate_fill else "0",
+            "filledAmount": (
+                str(Decimal(size or "0") * Decimal(fill_price)) if immediate_fill else "0"
+            ),
+            "status": "CLOSED" if immediate_fill else "OPEN",
+            "reduceOnly": bool(reduce_only),
+            "clientOrderId": client_order_id,
+            "createTime": 1786237680000,
+            "updateTime": 1786237680000,
+        }
+        if client_order_id:
+            self.client_order_index[client_order_id] = order_id
+        return order_id
+
+    def get_futures_order_by_client_id(self, symbol, client_order_id):
+        self._maybe_raise("get_futures_order_by_client_id")
+        order_id = self.client_order_index.get(client_order_id)
+        if order_id is None:
+            raise PionexAPIError(
+                "TRADE_ORDER_NOT_FOUND: no order with this clientOrderId",
+                code="TRADE_ORDER_NOT_FOUND",
+            )
+        return dict(self.orders[order_id])
+
+    def cancel_futures_order(self, symbol, order_id):
+        self._maybe_raise("cancel_futures_order")
+        order = self.orders.get(order_id)
+        if order is None or order.get("status") == "CLOSED":
+            raise PionexAPIError(
+                "TRADE_ORDER_NOT_FOUND: order not found or already terminal",
+                code="TRADE_ORDER_NOT_FOUND",
+            )
+        order["status"] = "CLOSED"
+
+    def cancel_all_futures_orders(self, symbol):
+        self._maybe_raise("cancel_all_futures_orders")
+        self.cancel_all_calls.append(symbol)
+        for order in self.orders.values():
+            if order["symbol"] == symbol and order["status"] == "OPEN":
+                order["status"] = "CLOSED"
+
+    def set_futures_leverage(self, symbol, leverage):
+        self._maybe_raise("set_futures_leverage")
+        self.leverage_calls.append((symbol, leverage))
+        return {"symbol": symbol, "leverage": leverage}
 
     def get_spot_open_orders(self, symbol):
         self._maybe_raise("get_spot_open_orders")
@@ -650,13 +794,18 @@ class TestLeverageAndMargin:
 
         assert mode == "CROSS"
 
-    async def test_set_leverage_remains_a_write_endpoint_not_implemented(
-        self, patch_client
-    ) -> None:
+    async def test_set_leverage_now_implemented_for_live_futures(self, patch_client) -> None:
+        """
+        Seit der Futures Write Integration ist set_leverage() fuer
+        LIVE+Futures echt implementiert (POST /uapi/v1/account/leverage) -
+        ersetzt den vorherigen AdapterFeatureNotImplementedError-Test.
+        Spot bleibt weiterhin blockiert, siehe TestFuturesWriteOperations.
+        """
         adapter = await _connected_live_futures_adapter(patch_client)
 
-        with pytest.raises(AdapterFeatureNotImplementedError):
-            await adapter.set_leverage("BTC/USDT", Decimal("10"))
+        await adapter.set_leverage("BTC/USDT", Decimal("10"))
+
+        assert adapter._native_client.leverage_calls == [("BTC_USDT_PERP", "10")]
 
 
 # ---------------------------------------------------------------------
@@ -1002,37 +1151,310 @@ class TestPaperTradingUnaffected:
 
 
 # ---------------------------------------------------------------------
-# LIVE Order Submission stays blocked (Kernanforderung)
+# Futures Write Integration (2026-09-21) - place_order/cancel_order/
+# cancel_all_orders/set_leverage sind fuer LIVE+Futures jetzt echt
+# implementiert. Ausschliesslich gegen FakePrivateClient getestet - KEIN
+# echter Pionex-Account, KEINE echte Order (siehe Aufgabenstellung
+# "KEINE echten Pionex Write Requests ausfuehren" fuer diese Phase).
 # ---------------------------------------------------------------------
 
 
-class TestLiveOrderSubmissionStaysBlocked:
-    async def test_place_order_blocked_after_successful_live_connect(self, patch_client) -> None:
-        from uuid import uuid4
+class TestFuturesWriteOperations:
+    async def test_market_buy_order_fills_immediately(self, patch_client) -> None:
+        adapter = await _connected_live_futures_adapter(patch_client)
 
-        from sgr.core.types import OrderRequest, OrderType, Side
+        result = await adapter.place_order(_market_order(side=Side.BUY, quantity="0.01"))
 
+        assert result.status == OrderStatus.FILLED
+        assert result.filled_quantity == Decimal("0.01")
+        created = adapter._native_client.orders[result.raw_response["orderId"]]
+        assert created["side"] == "BUY"
+        assert created["type"] == "MARKET_QTY"
+
+    async def test_market_sell_order_fills_immediately(self, patch_client) -> None:
+        adapter = await _connected_live_futures_adapter(patch_client)
+
+        result = await adapter.place_order(_market_order(side=Side.SELL, quantity="0.02"))
+
+        assert result.status == OrderStatus.FILLED
+        created = adapter._native_client.orders[result.raw_response["orderId"]]
+        assert created["side"] == "SELL"
+
+    async def test_limit_order_stays_open(self, patch_client) -> None:
+        adapter = await _connected_live_futures_adapter(patch_client)
+
+        result = await adapter.place_order(_limit_order(price="58000", quantity="0.01"))
+
+        assert result.status == OrderStatus.SUBMITTED
+        created = adapter._native_client.orders[result.raw_response["orderId"]]
+        assert created["type"] == "LIMIT"
+        assert created["price"] == "58000"
+
+    async def test_reduce_only_flag_is_forwarded(self, patch_client) -> None:
+        adapter = await _connected_live_futures_adapter(patch_client)
+
+        result = await adapter.place_order(_market_order(reduce_only=True))
+
+        created = adapter._native_client.orders[result.raw_response["orderId"]]
+        assert created["reduceOnly"] is True
+
+    async def test_symbol_mapping_appends_perp_suffix(self, patch_client) -> None:
+        adapter = await _connected_live_futures_adapter(patch_client)
+
+        result = await adapter.place_order(_market_order(symbol="BTC/USDT"))
+
+        created = adapter._native_client.orders[result.raw_response["orderId"]]
+        assert created["symbol"] == "BTC_USDT_PERP"
+
+    async def test_quantity_mapping_sends_base_asset_quantity_as_string(self, patch_client) -> None:
+        adapter = await _connected_live_futures_adapter(patch_client)
+
+        result = await adapter.place_order(_market_order(quantity="0.12345"))
+
+        created = adapter._native_client.orders[result.raw_response["orderId"]]
+        assert created["size"] == "0.12345"
+
+    async def test_client_order_id_is_order_uuid(self, patch_client) -> None:
+        adapter = await _connected_live_futures_adapter(patch_client)
+        order = _market_order()
+
+        result = await adapter.place_order(order)
+
+        created = adapter._native_client.orders[result.raw_response["orderId"]]
+        assert created["clientOrderId"] == str(order.id)
+
+    async def test_idempotent_resubmit_returns_existing_order_without_creating_new_one(
+        self, patch_client
+    ) -> None:
+        """Ein zweiter place_order()-Aufruf mit DEMSELBEN OrderRequest
+        (identische order.id) darf keine zweite echte Order erzeugen -
+        siehe get_futures_order_by_client_id()-Vorab-Pruefung in
+        PionexAdapter.place_order()."""
+        adapter = await _connected_live_futures_adapter(patch_client)
+        order = _market_order()
+
+        first = await adapter.place_order(order)
+        orders_after_first = len(adapter._native_client.orders)
+        second = await adapter.place_order(order)
+
+        assert len(adapter._native_client.orders) == orders_after_first
+        assert second.exchange_order_id == first.exchange_order_id
+
+    async def test_cancel_order_success(self, patch_client) -> None:
+        adapter = await _connected_live_futures_adapter(patch_client)
+        placed = await adapter.place_order(_limit_order())
+        order_id = placed.exchange_order_id
+
+        cancelled = await adapter.cancel_order(order_id, "BTC/USDT")
+
+        assert cancelled is True
+        assert adapter._native_client.orders[int(order_id)]["status"] == "CLOSED"
+
+    async def test_cancel_order_not_found_returns_false(self, patch_client) -> None:
+        adapter = await _connected_live_futures_adapter(patch_client)
+
+        cancelled = await adapter.cancel_order("999999", "BTC/USDT")
+
+        assert cancelled is False
+
+    async def test_cancel_already_filled_order_returns_false(self, patch_client) -> None:
+        """Eine bereits gefuellte (MARKET_QTY, status CLOSED) Order laesst
+        sich nicht mehr stornieren - der Fake meldet TRADE_ORDER_NOT_FOUND,
+        der Adapter bildet das auf False ab (identisches Protocol-
+        Verhalten wie CCXTBaseAdapter.cancel_order() fuer Binance)."""
+        adapter = await _connected_live_futures_adapter(patch_client)
+        placed = await adapter.place_order(_market_order())
+        assert placed.status == OrderStatus.FILLED
+
+        cancelled = await adapter.cancel_order(placed.exchange_order_id, "BTC/USDT")
+
+        assert cancelled is False
+
+    async def test_cancel_all_orders_for_one_symbol(self, patch_client) -> None:
+        adapter = await _connected_live_futures_adapter(patch_client)
+        await adapter.place_order(_limit_order(symbol="BTC/USDT"))
+        await adapter.place_order(_limit_order(symbol="BTC/USDT", price="59000"))
+
+        cancelled_count = await adapter.cancel_all_orders("BTC/USDT")
+
+        assert cancelled_count == 2
+        assert adapter._native_client.cancel_all_calls == ["BTC_USDT_PERP"]
+        assert all(o["status"] == "CLOSED" for o in adapter._native_client.orders.values())
+
+    async def test_cancel_all_orders_across_symbols_without_filter(self, patch_client) -> None:
+        adapter = await _connected_live_futures_adapter(patch_client)
+        await adapter.place_order(_limit_order(symbol="BTC/USDT"))
+        await adapter.place_order(_limit_order(symbol="ETH/USDT", price="3000"))
+
+        cancelled_count = await adapter.cancel_all_orders()
+
+        assert cancelled_count == 2
+        assert set(adapter._native_client.cancel_all_calls) == {"BTC_USDT_PERP", "ETH_USDT_PERP"}
+
+    async def test_set_leverage_success(self, patch_client) -> None:
+        adapter = await _connected_live_futures_adapter(patch_client)
+
+        await adapter.set_leverage("BTC/USDT", Decimal("10"))
+
+        assert adapter._native_client.leverage_calls == [("BTC_USDT_PERP", "10")]
+
+    async def test_place_order_error_mapping_invalid_signature(self, patch_client) -> None:
+        adapter = await _connected_live_futures_adapter(patch_client)
+        adapter._native_client.inject_error(
+            PionexAPIError("INVALID_SIGNATURE: bad", code="INVALID_SIGNATURE"),
+            only_for={"create_futures_order"},
+        )
+
+        with pytest.raises(ExchangeAuthenticationError):
+            await adapter.place_order(_market_order())
+
+    async def test_place_order_error_mapping_rate_limit(self, patch_client) -> None:
+        adapter = await _connected_live_futures_adapter(patch_client)
+        adapter._native_client.inject_error(
+            PionexHTTPError(429, "too many requests"), only_for={"create_futures_order"}
+        )
+
+        with pytest.raises(RateLimitError):
+            await adapter.place_order(_market_order())
+
+    async def test_place_order_unknown_state_on_network_failure_after_submit(
+        self, patch_client
+    ) -> None:
+        """
+        Simuliert den Unknown-State-Fall: create_futures_order() selbst
+        gelingt (die Order KOENNTE auf Pionex existieren), aber der
+        anschliessende get_futures_order()-Statusabruf schlaegt fehl
+        (z.B. Netzwerkfehler). place_order() darf hier NICHT stillschweigend
+        einen Fill vortaeuschen, sondern muss den Fehler propagieren - das
+        bestehende SGR-seitige SafeOrderExecutor.execute_safely()
+        (sgr/execution/order_safety.py, unveraendert) faengt das dann als
+        raw_response["unknown"]=True ab, siehe dortiger Modul-Docstring.
+        """
+        adapter = await _connected_live_futures_adapter(patch_client)
+        adapter._native_client.inject_error(
+            PionexHTTPError(0, "connection reset"), only_for={"get_futures_order"}
+        )
+
+        with pytest.raises(ExchangeConnectionError):
+            await adapter.place_order(_market_order())
+
+        # Die Order EXISTIERT auf Pionex-Seite (create_futures_order lief
+        # durch) - genau das macht diesen Fall zu einem echten Unknown
+        # State statt eines simplen Fehlschlags.
+        assert len(adapter._native_client.orders) == 1
+
+    async def test_place_order_type_not_mapped_raises_without_network_call(
+        self, patch_client
+    ) -> None:
+        """STOP_MARKET/TAKE_PROFIT_MARKET/TWAP werden bewusst nicht
+        geraten (siehe pionex.py _map_order_type_to_pionex() Docstring) -
+        muss VOR jedem Netzwerk-Call ablehnen."""
         adapter = await _connected_live_futures_adapter(patch_client)
         order = OrderRequest(
             signal_id=uuid4(),
             symbol=Symbol(base="BTC", quote="USDT", exchange=ExchangeID.PIONEX),
             side=Side.BUY,
-            order_type=OrderType.MARKET,
-            quantity=Decimal("0.001"),
+            order_type=OrderType.STOP_MARKET,
+            quantity=Decimal("0.01"),
             trading_mode=TradingMode.LIVE,
         )
 
-        with pytest.raises(AdapterFeatureNotImplementedError, match="live_order_submission"):
+        with pytest.raises(AdapterFeatureNotImplementedError, match="order_type_stop_market"):
             await adapter.place_order(order)
 
-    async def test_cancel_order_blocked_in_live(self, patch_client) -> None:
+        assert adapter._native_client.orders == {}
+
+
+class TestPionexOrderNotFoundErrorCodeMapping:
+    """
+    TRADE_ORDER_NOT_EXIST ist der TATSAECHLICHE, live gegen einen echten
+    Pionex-Futures-Account verifizierte Fehlercode fuer "diese Order
+    existiert nicht" (Phase 4 Read-Only-Lauf, orderByClientOrderId-Probe
+    mit garantiert nicht existierender Test-ID, 2026-09-21) -
+    TRADE_ORDER_NOT_FOUND war zuvor nur aus der Dokumentation abgeleitet
+    und nie live bestaetigt. Beide Codes muessen von _map_pionex_error()
+    auf OrderNotFoundError abgebildet werden, siehe pionex.py.
+    """
+
+    async def test_map_pionex_error_recognizes_trade_order_not_exist(self, patch_client) -> None:
         adapter = await _connected_live_futures_adapter(patch_client)
 
-        with pytest.raises(AdapterFeatureNotImplementedError):
+        mapped = adapter._map_pionex_error(
+            PionexAPIError("TRADE_ORDER_NOT_EXIST: order not found", code="TRADE_ORDER_NOT_EXIST")
+        )
+
+        assert isinstance(mapped, OrderNotFoundError)
+
+    async def test_map_pionex_error_still_recognizes_trade_order_not_found(
+        self, patch_client
+    ) -> None:
+        """Regressionsschutz (Aufgabenstellung Punkt 3): die vorher
+        angenommene, nie live bestaetigte Schreibweise bleibt zusaetzlich
+        erkannt, falls Pionex sie an anderer Stelle doch verwendet."""
+        adapter = await _connected_live_futures_adapter(patch_client)
+
+        mapped = adapter._map_pionex_error(
+            PionexAPIError("TRADE_ORDER_NOT_FOUND: order not found", code="TRADE_ORDER_NOT_FOUND")
+        )
+
+        assert isinstance(mapped, OrderNotFoundError)
+
+    async def test_cancel_order_real_not_exist_code_returns_false(self, patch_client) -> None:
+        """End-to-end durch cancel_order(): der reale Fehlercode
+        TRADE_ORDER_NOT_EXIST muss - wie TRADE_ORDER_NOT_FOUND - als
+        False abgebildet werden, nicht als geworfener Fehler (identisches
+        Protocol-Verhalten wie CCXTBaseAdapter.cancel_order() fuer
+        Binance)."""
+        adapter = await _connected_live_futures_adapter(patch_client)
+        placed = await adapter.place_order(_limit_order())
+        adapter._native_client.inject_error(
+            PionexAPIError("TRADE_ORDER_NOT_EXIST: order not found", code="TRADE_ORDER_NOT_EXIST"),
+            only_for={"cancel_futures_order"},
+        )
+
+        cancelled = await adapter.cancel_order(placed.exchange_order_id, "BTC/USDT")
+
+        assert cancelled is False
+
+    async def test_place_order_idempotency_probe_treats_not_exist_as_no_duplicate(
+        self, patch_client
+    ) -> None:
+        """Die clientOrderId-Vorabpruefung (_find_existing_futures_order_by_client_id)
+        faengt JEDE Exception generisch ab (siehe pionex.py Docstring) -
+        bestaetigt hier explizit fuer den realen TRADE_ORDER_NOT_EXIST-Code:
+        eine neue Order wird trotzdem angelegt, kein falsches Duplikat-
+        Signal."""
+        adapter = await _connected_live_futures_adapter(patch_client)
+        adapter._native_client.inject_error(
+            PionexAPIError("TRADE_ORDER_NOT_EXIST: order not found", code="TRADE_ORDER_NOT_EXIST"),
+            only_for={"get_futures_order_by_client_id"},
+        )
+
+        result = await adapter.place_order(_market_order())
+
+        assert result.status == OrderStatus.FILLED
+        assert len(adapter._native_client.orders) == 1
+
+
+class TestLiveSpotWriteStaysBlocked:
+    """LIVE Spot write (place_order/cancel_order/cancel_all_orders) bleibt
+    bewusst nicht implementiert - nur der Futures-Pfad wurde gegen
+    openapi_futures.yaml verifiziert (siehe pionex.py Modul-Docstring)."""
+
+    async def test_place_order_blocked_for_spot(self, patch_client) -> None:
+        adapter = await _connected_live_spot_adapter(patch_client)
+
+        with pytest.raises(AdapterFeatureNotImplementedError, match="live_spot_order_submission"):
+            await adapter.place_order(_market_order())
+
+    async def test_cancel_order_blocked_for_spot(self, patch_client) -> None:
+        adapter = await _connected_live_spot_adapter(patch_client)
+
+        with pytest.raises(AdapterFeatureNotImplementedError, match="live_spot_cancel_order"):
             await adapter.cancel_order("1", "BTC/USDT")
 
-    async def test_cancel_all_orders_blocked_in_live(self, patch_client) -> None:
-        adapter = await _connected_live_futures_adapter(patch_client)
+    async def test_cancel_all_orders_blocked_for_spot(self, patch_client) -> None:
+        adapter = await _connected_live_spot_adapter(patch_client)
 
-        with pytest.raises(AdapterFeatureNotImplementedError):
+        with pytest.raises(AdapterFeatureNotImplementedError, match="live_spot_cancel_all_orders"):
             await adapter.cancel_all_orders()

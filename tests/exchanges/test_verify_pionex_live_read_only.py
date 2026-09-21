@@ -3,11 +3,12 @@ Offline-Sanity-Tests fuer scripts/verify_pionex_live_read_only.py.
 
 Diese Tests fuehren den Verification-Flow GEGEN EINEN FAKE-PionexClient
 aus (kein Netzwerk, keine echten Credentials) - sie bestaetigen, dass die
-Skript-LOGIK selbst korrekt ist (Control Flow, Fehlerbehandlung, Safety-
-Selbsttest, Report-Generierung), BEVOR das Skript je gegen einen echten,
-kapitalarmen Pionex-Account laeuft. Ersetzen NICHT die eigentliche Live-
-Verifikation (die erfordert echte Credentials + manuellen Start, siehe
-Skript-Docstring "Usage").
+Skript-LOGIK selbst korrekt ist (Control Flow, Fehlerbehandlung, Report-
+Generierung, und - seit der Futures Write Integration - dass NIE eine
+Pionex-Schreibmethode aufgerufen wird), BEVOR das Skript je gegen einen
+echten, kapitalarmen Pionex-Account laeuft. Ersetzen NICHT die
+eigentliche Live-Verifikation (die erfordert echte Credentials +
+manuellen Start, siehe Skript-Docstring "Usage").
 """
 
 from __future__ import annotations
@@ -18,13 +19,9 @@ import pytest
 
 from scripts.verify_pionex_live_read_only import (
     CheckResult,
-    WriteAttemptedError,
     _main,
     _scrub,
-    _selftest_write_endpoints_blocked,
 )
-from sgr.core.types import TradingMode
-from sgr.exchanges.pionex import PionexAdapter
 from sgr.exchanges.pionex_client import PionexAPIError
 
 
@@ -141,46 +138,57 @@ class TestMissingCredentials:
         assert "nicht gestartet" in capsys.readouterr().out
 
 
-class TestWriteSelftest:
-    async def test_selftest_passes_for_current_production_code(self, patch_client) -> None:
-        """Der Write-Block-Selbsttest muss gegen den ECHTEN (nicht
-        gemockten) PionexAdapter-Code aus sgr/exchanges/pionex.py gruen
-        sein - das ist die eigentliche Sicherheitsgarantie."""
-        adapter = PionexAdapter(
-            api_key="k", secret="s", trading_mode=TradingMode.LIVE, futures_mode=True
-        )
-        await adapter.connect()
+class TestNoWriteMethodsInvoked:
+    """
+    Seit der Futures Write Integration (sgr/exchanges/pionex.py)
+    fuehren place_order()/cancel_order()/cancel_all_orders()/
+    set_leverage() fuer LIVE+Futures ECHTE Netzwerk-Calls aus - der
+    fruehere Write-Block-Selbsttest dieses Skripts wurde deshalb
+    ersatzlos entfernt (ein Aufruf waere jetzt selbst ein Write-
+    Request). Diese Tests verifizieren stattdessen POSITIV, dass der
+    volle Flow NIE eine dieser vier Methoden aufruft - mit einem Fake-
+    Client, dessen Schreibmethoden bei Aufruf hart fehlschlagen, sodass
+    ein versehentlicher Aufruf sofort als Testfehler auffaellt.
+    """
 
-        await _selftest_write_endpoints_blocked(adapter, "BTC/USDT")
-
-    async def test_selftest_aborts_if_place_order_stops_raising(
-        self, patch_client, monkeypatch
+    async def test_full_flow_never_calls_any_write_method(
+        self, patch_client, env_credentials, monkeypatch, capsys
     ) -> None:
-        """Simuliert eine hypothetische Regression: place_order() wuerde
-        (faelschlich) erfolgreich zurueckkehren statt zu blockieren -
-        der Selbsttest MUSS das als SAFETY ABORT erkennen."""
-        adapter = PionexAdapter(
-            api_key="k", secret="s", trading_mode=TradingMode.LIVE, futures_mode=True
-        )
-        await adapter.connect()
-
-        async def _fake_success(order):
-            from uuid import uuid4
-
-            from sgr.core.types import OrderResult, OrderStatus
-
-            return OrderResult(
-                request_id=uuid4(),
-                exchange_order_id="fake",
-                symbol=order.symbol,
-                status=OrderStatus.FILLED,
-                trading_mode=TradingMode.LIVE,
+        def _fail(*_a, **_kw):
+            raise AssertionError(
+                "verify_pionex_live_read_only.py must never call a Pionex write method"
             )
 
-        monkeypatch.setattr(adapter, "place_order", _fake_success)
+        for method_name in (
+            "create_futures_order",
+            "cancel_futures_order",
+            "cancel_all_futures_orders",
+            "set_futures_leverage",
+        ):
+            monkeypatch.setattr(FakeScriptClient, method_name, _fail, raising=False)
 
-        with pytest.raises(WriteAttemptedError, match="SAFETY ABORT"):
-            await _selftest_write_endpoints_blocked(adapter, "BTC/USDT")
+        exit_code = await _main(_args())
+
+        out = capsys.readouterr().out
+        assert exit_code == 0
+        assert "AssertionError" not in out
+
+    def test_module_source_never_references_write_methods(self) -> None:
+        """Statische Belt-and-suspenders-Pruefung: der Skript-Quelltext
+        selbst darf keinen Aufruf von adapter.place_order/cancel_order/
+        cancel_all_orders/set_leverage enthalten."""
+        import inspect
+
+        import scripts.verify_pionex_live_read_only as module
+
+        source = inspect.getsource(module)
+        for forbidden in (
+            "adapter.place_order",
+            "adapter.cancel_order",
+            "adapter.cancel_all_orders",
+            "adapter.set_leverage",
+        ):
+            assert forbidden not in source, f"{forbidden}() must not appear in this script"
 
 
 class TestFullFlow:

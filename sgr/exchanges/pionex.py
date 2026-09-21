@@ -55,16 +55,11 @@ PIONEX PRIVATE API INTEGRATION (READ ONLY) - Folge-Erweiterung:
     Credentials per authentifiziertem Balance-Abruf (fail-fast bei
     falschem Key/Secret/IP-Whitelist).
 
-    KEINE ÄNDERUNG AN DER ORDER-SUBMISSION-SPERRE: place_order() prüft
+    KEINE ÄNDERUNG AN DER ORDER-SUBMISSION-SPERRE (galt bis zur unten
+    beschriebenen Futures Write Integration): place_order() prüfte
     JETZT EXPLIZIT (statt implizit durch einen fehlenden self._ccxt
-    auszufallen) und blockiert JEDE LIVE-Order sofort, bevor irgendein
-    Signing-/Netzwerk-Code erreicht wird - unabhängig davon, dass die
-    Verbindung selbst jetzt technisch für LIVE zustande kommt.
-    cancel_order()/cancel_all_orders() sind aus demselben Grund für LIVE
-    ebenfalls weiterhin blockiert (Schreib-Endpunkte, nicht Teil dieser
-    Read-Only-Erweiterung) - sie geben NICHT mehr stillschweigend
-    "erfolgreich" zurück, das wäre bei einem echten Account irreführend
-    (siehe dortiger Kommentar).
+    auszufallen) und blockierte JEDE LIVE-Order sofort, bevor irgendein
+    Signing-/Netzwerk-Code erreicht wurde.
 
     sgr.exchanges.capabilities/sgr.compliance/sgr.risk bleiben von dieser
     Erweiterung komplett unberührt - kein Grid-Scheduler, kein
@@ -72,6 +67,47 @@ PIONEX PRIVATE API INTEGRATION (READ ONLY) - Folge-Erweiterung:
     Erweiterung macht ausschließlich sichtbar, was auf einem echten
     Pionex-Account tatsächlich vorhanden ist (Balance, Positionen, offene
     Orders, Order-Status, Funding, Leverage/Margin) - sie handelt nicht.
+
+FUTURES WRITE INTEGRATION (2026-09-21) - Folge-Erweiterung (Phase 1
+"Adapter Implementierung" der Write-Roadmap, siehe Phasenplan-
+Diskussion):
+    place_order()/cancel_order()/cancel_all_orders()/set_leverage()
+    sind fuer LIVE + Futures jetzt ECHT implementiert - signierte
+    POST/DELETE-Requests gegen sgr.exchanges.pionex_client.PionexClient
+    (siehe dortiger Modul-Docstring "FUTURES WRITE INTEGRATION" fuer die
+    gegen openapi_futures.yaml verifizierten Endpoint-Details: Pfade,
+    Body-Schema, Order-Typ-Mapping MARKET_QTY/LIMIT, positionSide/
+    reduceOnly/clientOrderId-Verhalten). LIVE + Spot bleibt bewusst NICHT
+    implementiert (raises AdapterFeatureNotImplementedError) - nur der
+    Futures-Pfad wurde gegen die Dokumentation verifiziert.
+
+    WICHTIG - diese Implementierung wurde AUSSCHLIESSLICH gegen Fake-
+    Clients getestet, NIEMALS gegen einen echten Pionex-Account (siehe
+    Aufgabenstellung dieser Phase: "KEINE echten Pionex Write Requests
+    ausfuehren"). Der Live-Read-Only-Verifikationsflow
+    (scripts/verify_pionex_live_read_only.py) wurde entsprechend
+    angepasst (sein Write-Block-Selbsttest rief zuvor genau diese vier
+    Methoden absichtlich auf, um zu beweisen, dass sie blockiert sind -
+    das ist jetzt nicht mehr sicher moeglich und wurde entfernt, siehe
+    dortiger Kommentar) - ein kontrollierter erster echter Live-Write-
+    Test ist eine separate, noch nicht freigegebene Phase.
+
+    Idempotenz: order.id (SGR-UUID) wird als Pionex `clientOrderId`
+    gesendet (verifiziert: max. 64 Zeichen, nur alphanumerisch/
+    Bindestrich - eine UUID passt) und VOR jeder Order-Neuerstellung per
+    GET /uapi/v1/trade/orderByClientOrderId geprueft (analog zu
+    CCXTBaseAdapter._find_existing_order_by_client_id() fuer Binance) -
+    zusaetzlich zur bereits bestehenden, adapterunabhaengigen
+    SGR-seitigen Idempotenz in sgr/execution/order_safety.py
+    (SafeOrderExecutor, unveraendert).
+
+    Root-Cause-Fix bei dieser Gelegenheit: `_parse_native_order()`
+    bildete den Pionex-Status "CLOSED" bisher IMMER auf OrderStatus.FILLED
+    ab - eine echte, ungefuellte Stornierung/Ablehnung waere dadurch
+    faelschlich als Fill gemeldet worden (unkritisch fuer die bisherige
+    Read-Only-Nutzung, aber kritisch jetzt, da ExecutionEngine.
+    _monitor_fill() bei FILLED PortfolioEngine.on_order_filled()
+    ausloest) - siehe dortiger Kommentar fuer die Korrektur.
 """
 
 from __future__ import annotations
@@ -92,6 +128,7 @@ from sgr.core.types import (
     OrderRequest,
     OrderResult,
     OrderStatus,
+    OrderType,
     Position,
     PositionSide,
     Symbol,
@@ -395,20 +432,69 @@ class PionexAdapter(CCXTBaseAdapter):
         return await super().ping()
 
     # ------------------------------------------------------------------
-    # Order submission - EXPLICITLY BLOCKED for LIVE (native fallback).
+    # Order submission - Futures Write Integration (2026-09-21).
     #
-    # Diese Ueberschreibung ist der zentrale Sicherheitsmechanismus
-    # dieser Erweiterung (siehe Modul-Docstring "PIONEX PRIVATE API
-    # INTEGRATION"): seit connect() jetzt auch fuer LIVE ohne ccxt-
-    # Pionex-ID gelingt (native Fallback), wuerde OHNE dieses Override
-    # ein LIVE place_order()-Aufruf in CCXTBaseAdapter.place_order()
-    # laufen und dort bei `self._ccxt.create_order(...)` mit einem
-    # rohen AttributeError abstuerzen (self._ccxt ist im native Fallback
-    # immer None) - kein kontrollierter, aussagekraeftiger Fehler. Diese
-    # Methode faengt das VOR jeglichem Signing-/Netzwerk-Code ab, mit
-    # derselben AdapterFeatureNotImplementedError wie zuvor beim
-    # (jetzt entfernten) fail-fast in connect().
+    # LIVE + Futures: echte, signierte Order-Uebermittlung (Punkt 2 der
+    # Aufgabenstellung). Verifiziert gegen openapi_futures.yaml (siehe
+    # pionex_client.py Modul-Docstring "FUTURES WRITE INTEGRATION"),
+    # NICHT gegen einen echten Account (diese Session implementiert und
+    # testet ausschliesslich gegen Fake-Clients - siehe Aufgabenstellung
+    # "KEINE echten Pionex Write Requests ausfuehren"). LIVE + Spot bleibt
+    # bewusst nicht implementiert (Futures ist der einzige verifizierte
+    # Anwendungsfall dieser Erweiterung, siehe Modul-Docstring).
     # ------------------------------------------------------------------
+
+    # Pionex kennt kein einfaches "MARKET" (verifiziert gegen
+    # openapi_futures.yaml: `type` enum ist [LIMIT, MARKET_QTY, IOC,
+    # FOK, POSTONLY]) - Markt-Orders heissen explizit MARKET_QTY
+    # (quantity-basiert; ein quote-waehrungsbasiertes "amount"-Feld
+    # existiert nicht im Order-Request-Schema). SGR sendet aktuell
+    # ausschliesslich MARKET/LIMIT (siehe ExecutionEngine/GridController/
+    # PositionProtectionWatchdog - keine STOP_MARKET/TAKE_PROFIT_MARKET/
+    # TWAP-Auftraege in der Praxis) - andere OrderType-Werte werden
+    # bewusst NICHT geraten, sondern lehnen explizit ab.
+    _ORDER_TYPE_MAP: dict[OrderType, str] = {
+        OrderType.MARKET: "MARKET_QTY",
+        OrderType.LIMIT: "LIMIT",
+    }
+
+    def _map_order_type_to_pionex(self, order_type: OrderType) -> str:
+        mapped = self._ORDER_TYPE_MAP.get(order_type)
+        if mapped is None:
+            raise AdapterFeatureNotImplementedError(
+                self.exchange_id.value,
+                f"order_type_{order_type.value}",
+                detail=(
+                    "Pionex adapter only maps MARKET/LIMIT order types "
+                    "(verified against openapi_futures.yaml: LIMIT/MARKET_QTY/"
+                    f"IOC/FOK/POSTONLY) - {order_type.value} has no verified "
+                    "mapping and is deliberately not guessed."
+                ),
+            )
+        return mapped
+
+    async def _find_existing_futures_order_by_client_id(
+        self, client_order_id: str, pionex_symbol: str
+    ) -> dict[str, Any] | None:
+        """
+        Exchange-seitige Idempotenz-Pruefung VOR einer Order-
+        Neuerstellung (analog zu CCXTBaseAdapter.
+        _find_existing_order_by_client_id() fuer Binance) - verhindert
+        eine echte Doppel-Order, falls place_order() fuer dieselbe
+        order.id ein zweites Mal aufgerufen wird (z.B. nach einem
+        Netzwerkfehler zwischen Submit und Response). Jeder Fehler (u.a.
+        TRADE_ORDER_NOT_FOUND, wenn keine solche Order existiert) wird
+        als "kein Duplikat gefunden" behandelt - dieser Check darf eine
+        Submission niemals blockieren, nur ein Duplikat vermeiden.
+        """
+        try:
+            return await asyncio.to_thread(
+                self._native_client.get_futures_order_by_client_id,
+                pionex_symbol,
+                client_order_id,
+            )
+        except Exception:
+            return None
 
     async def place_order(self, order: OrderRequest) -> OrderResult:
         if not self._native_fallback:
@@ -423,22 +509,56 @@ class PionexAdapter(CCXTBaseAdapter):
             # PionexClient umgeleitet ist - siehe dortiger Override).
             return await self._simulate_order(order)
 
-        # LIVE: bewusst und explizit blockiert (siehe Modul-Docstring und
-        # Klassen-Kommentar oben) - unabhaengig davon, dass connect() fuer
-        # LIVE jetzt gelingt. Diese Sperre bleibt bestehen, bis ein
-        # verifizierter, gegen einen echten (oder offiziellen Sandbox-)
-        # Account getesteter Order-Submission-Pfad existiert.
-        raise AdapterFeatureNotImplementedError(
-            self.exchange_id.value,
-            "live_order_submission",
-            detail=(
-                "Pionex LIVE order submission remains intentionally blocked - "
-                "this session only implements verified READ-ONLY private API "
-                "access (balances, positions, orders, leverage, margin, "
-                "funding). See docs/SGR_STRATEGY_REPORT.md for the validation "
-                "path required before LIVE order submission can be enabled."
-            ),
+        if not self.futures_mode:
+            # Spot LIVE write bleibt bewusst nicht implementiert - siehe
+            # Klassen-Kommentar oben (nur Futures verifiziert).
+            raise AdapterFeatureNotImplementedError(
+                self.exchange_id.value,
+                "live_spot_order_submission",
+                detail=(
+                    "Pionex Spot LIVE order submission is not implemented - "
+                    "only the Futures write path has been built and verified "
+                    "against openapi_futures.yaml so far."
+                ),
+            )
+
+        pionex_symbol = _to_pionex_symbol(order.symbol.ccxt_symbol, futures=True)
+        pionex_type = self._map_order_type_to_pionex(order.order_type)
+        client_order_id = str(order.id)
+
+        existing = await self._find_existing_futures_order_by_client_id(
+            client_order_id, pionex_symbol
         )
+        if existing is not None:
+            return self._parse_native_order(existing, AssetClass.FUTURES)
+
+        try:
+            order_id = await asyncio.to_thread(
+                self._native_client.create_futures_order,
+                pionex_symbol,
+                order.side.value.upper(),
+                pionex_type,
+                str(order.quantity),
+                str(order.limit_price) if order.limit_price is not None else None,
+                order.reduce_only,
+                client_order_id,
+            )
+        except Exception as e:
+            raise self._map_pionex_error(e) from e
+
+        # Create-Order-Antwort enthaelt nur die orderId (Order ist async,
+        # siehe PionexClient.create_futures_order() Docstring) -
+        # vollstaendigen Status separat abfragen, genau wie
+        # ExecutionEngine._monitor_fill() es ohnehin fuer jede nicht
+        # sofort gefuellte Order tut.
+        try:
+            raw = await asyncio.to_thread(
+                self._native_client.get_futures_order, pionex_symbol, order_id
+            )
+        except Exception as e:
+            raise self._map_pionex_error(e) from e
+
+        return self._parse_native_order(raw, AssetClass.FUTURES)
 
     # ------------------------------------------------------------------
     # Market Data (native fallback overrides)
@@ -711,16 +831,47 @@ class PionexAdapter(CCXTBaseAdapter):
         raise SymbolNotFoundError(self.exchange_id.value, symbol)
 
     async def set_leverage(self, symbol: str, leverage: Decimal) -> None:
-        # Schreib-Endpunkt (POST /uapi/v1/account/leverage) - bewusst
-        # NICHT Teil dieser Read-Only-Erweiterung, siehe get_futures_
-        # leverage() fuer den Lese-Zugriff auf denselben Wert.
+        """
+        LIVE + Futures: echte, signierte Leverage-Aenderung (POST
+        /uapi/v1/account/leverage, Punkt 1 der Aufgabenstellung) - siehe
+        get_futures_leverage() fuer den bereits vorhandenen Lese-Zugriff
+        auf denselben Wert.
+
+        Spot (jeder Modus): NotSupportedFeatureError - Pionex Spot kennt
+        kein Leverage-Konzept, identisch zu CCXTBaseAdapter.set_leverage()
+        fuer Binance Spot (_require_feature("setLeverage")).
+
+        PAPER + Futures: bleibt AdapterFeatureNotImplementedError - Paper
+        Trading hat kein echtes Pionex-Konto (siehe get_balance()
+        Docstring: "Paper Trading bleibt strikt von jedem echten Account
+        getrennt"), unabhaengig davon, dass Pionex Futures das Konzept
+        unterstuetzt.
+        """
         if not self._native_fallback:
             return await super().set_leverage(symbol, leverage)
-        raise AdapterFeatureNotImplementedError(
-            self.exchange_id.value,
-            "set_leverage",
-            detail="Write endpoint - out of scope for the read-only Private API integration.",
-        )
+
+        self._require_connected()
+
+        if not self.futures_mode:
+            raise NotSupportedFeatureError(self.exchange_id.value, "setLeverage")
+
+        if self.trading_mode != TradingMode.LIVE:
+            raise AdapterFeatureNotImplementedError(
+                self.exchange_id.value,
+                "set_leverage_paper_mode",
+                detail=(
+                    "Pionex PAPER simulates fills locally and never connects to a "
+                    "real account - there is nothing to set leverage on."
+                ),
+            )
+
+        pionex_symbol = _to_pionex_symbol(symbol, futures=True)
+        try:
+            await asyncio.to_thread(
+                self._native_client.set_futures_leverage, pionex_symbol, str(leverage)
+            )
+        except Exception as e:
+            raise self._map_pionex_error(e) from e
 
     async def get_positions(self) -> list[Position]:
         """
@@ -778,27 +929,64 @@ class PionexAdapter(CCXTBaseAdapter):
         return positions
 
     async def cancel_all_orders(self, symbol: str | None = None) -> int:
+        """
+        LIVE + Futures: echte, signierte Massenstornierung (Punkt 1 der
+        Aufgabenstellung, benoetigt u.a. von KillSwitch._cancel_all_orders()).
+        Pionex' DELETE /uapi/v1/trade/allOrders verlangt laut Spezifikation
+        `symbol` als PFLICHT-Feld - es existiert KEIN "alle Symbole
+        gleichzeitig"-Endpunkt (siehe PionexClient.cancel_all_futures_orders()
+        Docstring). Ist `symbol=None`, werden zuerst die betroffenen offenen
+        Orders ueber ALLE Symbole gelesen (get_open_orders()) und dann pro
+        gefundenem Symbol einzeln storniert - identisches Fallback-Muster
+        wie CCXTBaseAdapter.cancel_all_orders() fuer Exchanges ohne
+        globalen Cancel. Die Anzahl wird aus der VORAB gelesenen
+        Orders-Liste gezaehlt (Pionex' Cancel-Response liefert selbst
+        keine Anzahl, nur einen BaseResponse ohne data-Feld).
+
+        LIVE + Spot: bewusst nicht implementiert (siehe place_order()).
+
+        PAPER: unveraendert 0 - PAPER-Orders fuellen sofort ueber
+        CCXTBaseAdapter._simulate_order() und hinterlassen nie eine
+        offene Exchange-seitige Order.
+        """
         if not self._native_fallback:
             return await super().cancel_all_orders(symbol)
-        if self.trading_mode == TradingMode.LIVE:
-            # Schreib-Endpunkt (DELETE /.../allOrders) - bewusst NICHT
-            # implementiert (siehe Modul-Docstring). WICHTIG: gibt NICHT
-            # mehr stillschweigend 0 zurueck wie zuvor - das waere bei
-            # einem ECHTEN Account irrefuehrend (koennte als "keine
-            # offenen Orders vorhanden" statt "Stornierung nicht
-            # unterstuetzt" missverstanden werden, z.B. waehrend eines
-            # Kill-Switch-Ereignisses).
+        if self.trading_mode != TradingMode.LIVE:
+            return 0
+
+        self._require_connected()
+
+        if not self.futures_mode:
             raise AdapterFeatureNotImplementedError(
                 self.exchange_id.value,
-                "cancel_all_orders",
-                detail="Write endpoint - out of scope for the read-only Private API integration.",
+                "live_spot_cancel_all_orders",
+                detail=(
+                    "Pionex Spot LIVE cancel-all is not implemented - only the "
+                    "Futures write path has been built and verified so far."
+                ),
             )
-        # PAPER-Grid-Orders fuellen ueber CCXTBaseAdapter._simulate_order()
-        # sofort und hinterlassen nie eine offene Exchange-seitige Order
-        # (siehe sgr/execution/grid_controller.py Modul-Docstring) - "0
-        # storniert" ist hier faktisch korrekt, kein Blindflug-No-Op wie
-        # bei einer echten LIVE-Exchange.
-        return 0
+
+        try:
+            open_orders = await self.get_open_orders(symbol)
+        except Exception as e:
+            raise self._map_pionex_error(e) from e
+
+        symbols_with_orders = {o.symbol.ccxt_symbol for o in open_orders}
+        total = 0
+        for sym in symbols_with_orders:
+            pionex_symbol = _to_pionex_symbol(sym, futures=True)
+            try:
+                await asyncio.to_thread(
+                    self._native_client.cancel_all_futures_orders, pionex_symbol
+                )
+                total += len([o for o in open_orders if o.symbol.ccxt_symbol == sym])
+            except Exception as e:
+                from sgr.core.logging import get_logger
+
+                get_logger(__name__).error(
+                    "pionex.cancel_all_orders.symbol_failed", symbol=sym, error=str(e)
+                )
+        return total
 
     async def get_open_orders(self, symbol: str | None = None) -> list[OrderResult]:
         """
@@ -846,16 +1034,52 @@ class PionexAdapter(CCXTBaseAdapter):
         return [self._parse_native_order(raw, asset_class) for raw in raw_orders]
 
     async def cancel_order(self, order_id: str, symbol: str) -> bool:
+        """
+        LIVE + Futures: echte, signierte Stornierung (DELETE
+        /uapi/v1/trade/order, Punkt 1 der Aufgabenstellung). Gibt
+        - wie CCXTBaseAdapter.cancel_order() fuer Binance - False
+        zurueck statt zu werfen, wenn die Order nicht (mehr) existiert
+        (bereits gefuellt/storniert) - dasselbe, bereits etablierte
+        Protocol-Verhalten, keine Pionex-Sonderlogik.
+
+        LIVE + Spot: bewusst nicht implementiert (siehe place_order()).
+
+        PAPER: unveraendert True - PAPER-Orders fuellen sofort, es gibt
+        nie eine offene Order zu stornieren, aber "nichts zu tun"
+        entspricht semantisch "erfolgreich storniert".
+        """
         if not self._native_fallback:
             return await super().cancel_order(order_id, symbol)
-        if self.trading_mode == TradingMode.LIVE:
-            # Wie cancel_all_orders(): Schreib-Endpunkt, bewusst nicht
-            # implementiert, gibt NICHT mehr stillschweigend True zurueck.
+        if self.trading_mode != TradingMode.LIVE:
+            return True
+
+        self._require_connected()
+
+        if not self.futures_mode:
             raise AdapterFeatureNotImplementedError(
                 self.exchange_id.value,
-                "cancel_order",
-                detail="Write endpoint - out of scope for the read-only Private API integration.",
+                "live_spot_cancel_order",
+                detail=(
+                    "Pionex Spot LIVE cancel is not implemented - only the "
+                    "Futures write path has been built and verified so far."
+                ),
             )
+
+        try:
+            numeric_id = int(order_id)
+        except (TypeError, ValueError) as e:
+            raise OrderNotFoundError(self.exchange_id.value, order_id) from e
+
+        pionex_symbol = _to_pionex_symbol(symbol, futures=True)
+        try:
+            await asyncio.to_thread(
+                self._native_client.cancel_futures_order, pionex_symbol, numeric_id
+            )
+        except Exception as e:
+            mapped = self._map_pionex_error(e)
+            if isinstance(mapped, OrderNotFoundError):
+                return False
+            raise mapped from e
         return True
 
     async def get_order(self, order_id: str, symbol: str) -> OrderResult:
@@ -893,13 +1117,35 @@ class PionexAdapter(CCXTBaseAdapter):
         return self._parse_native_order(raw, asset_class)
 
     def _parse_native_order(self, raw: dict[str, Any], asset_class: AssetClass) -> OrderResult:
-        """Uebersetzt eine rohe Pionex-Order (Spot oder Futures, beide
+        """
+        Uebersetzt eine rohe Pionex-Order (Spot oder Futures, beide
         Schemas sind kompatibel genug fuer eine gemeinsame Abbildung) in
-        ein SGR OrderResult."""
-        status_map = {"OPEN": OrderStatus.SUBMITTED, "CLOSED": OrderStatus.FILLED}
+        ein SGR OrderResult.
+
+        Status-Mapping (verifiziert gegen openapi_futures.yaml `Order`-
+        Schema): Pionex kennt nur zwei Buckets - "OPEN includes
+        SUBMITTED/CONFIRMED/PARTIAL_FILLED. CLOSED includes
+        FILLED/CANCELED/REJECTED." Kein feineres Statusfeld ist im
+        Schema dokumentiert. Root-Cause-Fix (Futures Write Integration):
+        die vorherige Version bildete CLOSED IMMER auf FILLED ab - eine
+        echte, ungefuellte Stornierung/Ablehnung (filledSize==0, Status
+        CLOSED) waere dadurch faelschlich als erfolgreicher Fill
+        gemeldet worden (kritisch fuer ExecutionEngine._monitor_fill(),
+        das bei OrderStatus.FILLED PortfolioEngine.on_order_filled()
+        ausloest). Fix: CLOSED mit filled_size>0 -> FILLED (auch bei
+        einem Teil-Fill, der danach geschlossen wurde - besser als eine
+        Order mit tatsaechlichem Fill faelschlich als CANCELLED zu
+        verwerfen), CLOSED mit filled_size<=0 -> CANCELLED (kein Fill,
+        Pionex unterscheidet CANCELED/REJECTED in diesem Schema nicht
+        weiter - CANCELLED ist die konservativere, generische Wahl).
+        """
         filled_size = self._safe_decimal(raw.get("filledSize")) or Decimal("0")
         size = self._safe_decimal(raw.get("size")) or Decimal("0")
-        status = status_map.get(str(raw.get("status")), OrderStatus.SUBMITTED)
+        raw_status = str(raw.get("status"))
+        if raw_status == "CLOSED":
+            status = OrderStatus.FILLED if filled_size > 0 else OrderStatus.CANCELLED
+        else:
+            status = OrderStatus.SUBMITTED
         if status == OrderStatus.SUBMITTED and 0 < filled_size < size:
             status = OrderStatus.PARTIALLY_FILLED
 
@@ -1134,9 +1380,23 @@ class PionexAdapter(CCXTBaseAdapter):
             code = str(exc.code) if exc.code is not None else ""
             if code in _AUTH_ERROR_CODES:
                 return ExchangeAuthenticationError(self.exchange_id.value, str(exc), code=code)
-            if code == "TRADE_ORDER_NOT_FOUND":
+            # TRADE_ORDER_NOT_EXIST ist der TATSAECHLICHE, live gegen einen
+            # echten Pionex-Futures-Account verifizierte Fehlercode (Phase 4
+            # Read-Only-Lauf, orderByClientOrderId-Probe mit garantiert nicht
+            # existierender Test-ID, 2026-09-21) - TRADE_ORDER_NOT_FOUND war
+            # nur aus der Dokumentation abgeleitet und nie live bestaetigt;
+            # bleibt defensiv zusaetzlich erkannt, falls Pionex ihn an
+            # anderer Stelle (z.B. einem anderen Endpunkt) doch verwendet.
+            if code in ("TRADE_ORDER_NOT_EXIST", "TRADE_ORDER_NOT_FOUND"):
                 return OrderNotFoundError(self.exchange_id.value, "unknown")
-            if code == "TRADE_INVALID_SYMBOL":
+            # TRADE_INVAILD_SYMBOL ist ein dokumentierter Tippfehler
+            # ("INVAILD" statt "INVALID") - gefunden in pionex-doc.
+            # gitbook.io/apidocs/llms-full.txt, waehrend openapi_futures.
+            # yaml an anderer Stelle korrekt "TRADE_INVALID_SYMBOL"
+            # schreibt (identisches Muster wie INVALIE_APIKEY/
+            # INVALID_APIKEY, siehe _AUTH_ERROR_CODES oben) - beide
+            # Schreibweisen defensiv erkannt.
+            if code in ("TRADE_INVALID_SYMBOL", "TRADE_INVAILD_SYMBOL"):
                 return SymbolNotFoundError(self.exchange_id.value, "unknown")
             if "RATE" in code or "LIMIT" in code:
                 # Kein dokumentierter Rate-Limit-Fehlercode gefunden (siehe

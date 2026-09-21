@@ -497,14 +497,18 @@ class TestNativeFallback:
         assert fallback_paper_adapter._native_fallback is True
         assert fallback_paper_adapter._ccxt is None
 
-    async def test_live_mode_reaches_native_fallback_but_stays_read_only(self, monkeypatch) -> None:
+    async def test_live_mode_reaches_native_fallback_spot_write_stays_blocked(
+        self, monkeypatch
+    ) -> None:
         """
-        Seit der Private-API-Integration (read-only) DARF LIVE den
-        nativen Fallback erreichen (siehe TestNativeFallbackLive fuer
-        die volle Abdeckung) - die eigentliche Sicherheitsgrenze ist
-        jetzt place_order(), nicht mehr connect(). Dieser Test belegt
-        beide Haelften an einer Stelle: connect() gelingt, place_order()
-        bleibt blockiert.
+        LIVE darf den nativen Fallback erreichen (siehe TestNativeFallbackLive
+        fuer die volle Abdeckung). Dieser Adapter ist hier futures_mode=False
+        (Spot, Default) - LIVE Spot Order-Submission bleibt bewusst NICHT
+        implementiert (siehe sgr/exchanges/pionex.py Modul-Docstring
+        "FUTURES WRITE INTEGRATION": nur der Futures-Pfad wurde gegen die
+        Dokumentation verifiziert). Fuer den jetzt implementierten LIVE
+        Futures Write Pfad siehe tests/exchanges/test_pionex_private_api.py
+        TestFuturesWriteOperations.
         """
         import ccxt.async_support as ccxt_async
 
@@ -531,7 +535,7 @@ class TestNativeFallback:
             quantity=Decimal("0.001"),
             trading_mode=TradingMode.LIVE,
         )
-        with pytest.raises(AdapterFeatureNotImplementedError, match="live_order_submission"):
+        with pytest.raises(AdapterFeatureNotImplementedError, match="live_spot_order_submission"):
             await adapter.place_order(order)
 
     async def test_get_ticker_uses_book_ticker_for_bid_ask(
@@ -595,17 +599,50 @@ class TestNativeFallback:
         oi = await fallback_paper_adapter.get_open_interest("BTC/USDT")
         assert oi.open_interest == Decimal("12345.6")
 
-    async def test_set_leverage_still_not_implemented(
+    async def test_set_leverage_spot_raises_not_supported(
         self, fallback_paper_adapter: PionexAdapter
     ) -> None:
-        """set_leverage() ist ein Schreib-Endpunkt - bleibt bewusst
-        ausserhalb des Scopes dieser Read-Only-Erweiterung."""
-        from sgr.exchanges.base import AdapterFeatureNotImplementedError
+        """
+        fallback_paper_adapter ist futures_mode=False (Spot) - Spot kennt
+        kein Leverage-Konzept, unabhaengig vom trading_mode. Seit der
+        Futures Write Integration (siehe sgr/exchanges/pionex.py
+        set_leverage() Docstring) ist das jetzt NotSupportedFeatureError
+        (identisch zu Binance Spot via CCXTBaseAdapter._require_feature),
+        nicht mehr die generische AdapterFeatureNotImplementedError von
+        vorher.
+        """
+        from sgr.exchanges.base import NotSupportedFeatureError
 
         await fallback_paper_adapter.connect()
 
-        with pytest.raises(AdapterFeatureNotImplementedError):
+        with pytest.raises(NotSupportedFeatureError):
             await fallback_paper_adapter.set_leverage("BTC/USDT", 5)
+
+    async def test_set_leverage_futures_paper_mode_not_implemented(self, monkeypatch) -> None:
+        """
+        Futures + PAPER hat kein echtes Pionex-Konto (Paper Trading bleibt
+        strikt von jedem echten Account getrennt, siehe get_balance()
+        Docstring) - set_leverage() bleibt dort bewusst
+        AdapterFeatureNotImplementedError, unabhaengig davon, dass Pionex
+        Futures das Konzept grundsaetzlich unterstuetzt und LIVE jetzt
+        implementiert ist.
+        """
+        import ccxt.async_support as ccxt_async
+
+        from sgr.exchanges.base import AdapterFeatureNotImplementedError
+
+        monkeypatch.delattr(ccxt_async, "pionex", raising=False)
+        monkeypatch.setattr("sgr.exchanges.pionex_client.PionexClient", FakePionexClient)
+        adapter = PionexAdapter(
+            api_key="paper_key",
+            secret="paper_secret",
+            trading_mode=TradingMode.PAPER,
+            futures_mode=True,
+        )
+        await adapter.connect()
+
+        with pytest.raises(AdapterFeatureNotImplementedError, match="set_leverage_paper_mode"):
+            await adapter.set_leverage("BTC/USDT", 5)
 
     async def test_positions_and_order_query_are_safe_no_ops(
         self, fallback_paper_adapter: PionexAdapter

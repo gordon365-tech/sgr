@@ -11,24 +11,35 @@ GET-Requests. Kein Order Placement, keine Order Cancellation, kein
 Leverage/Margin-Write, kein Grid-Scheduler, kein automatischer Trading
 Loop.
 
-Sicherheitsaudit (VOR Implementierung dieses Skripts durchgefuehrt):
-    `grep -n "session\\.\\(post\\|put\\|delete\\|patch\\)" sgr/exchanges/
-    pionex_client.py` findet GENAU EINE Netzwerk-Aufrufstelle im
-    gesamten Client (`self.session.get(...)` in `_get()`), verwendet
-    von JEDER oeffentlichen und privaten Methode. PionexClient besitzt
-    STRUKTURELL keine POST/PUT/DELETE/PATCH-Methode - ein versehentlicher
-    Write-Request ist auf Client-Ebene technisch gar nicht moeglich.
+Sicherheitsaudit - WICHTIGE AKTUALISIERUNG (2026-09-21, Futures Write
+Integration):
+    Bis einschliesslich der Read-Only-Phase galt: PionexClient besass
+    STRUKTURELL keine POST/PUT/DELETE-Methode, und PionexAdapter.
+    place_order()/cancel_order()/cancel_all_orders()/set_leverage()
+    warfen fuer LIVE NACHWEISLICH eine AdapterFeatureNotImplementedError
+    VOR jeglichem Signing-/Netzwerk-Code - dieses Skript konnte diese
+    Garantie deshalb gefahrlos LIVE selbst pruefen (fruehere Version
+    dieses Docstrings, siehe Git-Historie).
 
-    Auf Adapter-Ebene (PionexAdapter) sind place_order()/cancel_order()/
-    cancel_all_orders()/set_leverage() fuer LIVE + nativen Fallback
-    NACHWEISLICH so implementiert, dass sie VOR jeglichem Signing-/
-    Netzwerk-Code eine AdapterFeatureNotImplementedError werfen (siehe
-    pionex.py, Zeilen um place_order()). Dieses Skript verifiziert das
-    zusaetzlich zur Laufzeit GEGEN DEN ECHTEN, VERBUNDENEN LIVE-ADAPTER
-    (siehe _selftest_write_endpoints_blocked()) BEVOR irgendein Lese-Call
-    stattfindet - schlaegt dieser Selbsttest fehl, bricht der GESAMTE
-    Flow sofort ab (SAFETY ABORT), ohne einen einzigen weiteren Call zu
-    machen.
+    Das gilt NICHT MEHR: sgr/exchanges/pionex_client.py implementiert
+    jetzt signierte POST/DELETE-Schreibmethoden (create_futures_order,
+    cancel_futures_order, cancel_all_futures_orders,
+    set_futures_leverage), und sgr/exchanges/pionex.py's place_order()/
+    cancel_order()/cancel_all_orders()/set_leverage() fuehren fuer LIVE +
+    Futures jetzt ECHTE, signierte Netzwerk-Calls aus (siehe dortiger
+    Modul-Docstring "FUTURES WRITE INTEGRATION").
+
+    KONSEQUENZ: dieses Skript ruft diese vier Methoden AUSSCHLIESSLICH
+    NICHT MEHR AUF (der fruehere Write-Block-Selbsttest wurde ersatzlos
+    entfernt - ein Aufruf waere jetzt selbst ein echter Write-Request,
+    genau das, was dieses Skript per Namen und Zweck niemals tun darf).
+    Der verbleibende Ablauf besteht ausschliesslich aus GET-Requests
+    (siehe Endpunkt-Liste unten) - verifiziert durch Code-Review dieser
+    Datei: kein Aufruf von place_order/cancel_order/cancel_all_orders/
+    set_leverage irgendwo in diesem Modul. Ein dedizierter, separat
+    freizugebender kontrollierter Live-Write-Test (Phase 4 der
+    Write-Roadmap) ist ein EIGENSTAENDIGES, hier nicht enthaltenes
+    Skript/Verfahren.
 
 Credentials
 ===========
@@ -72,11 +83,9 @@ import argparse
 import asyncio
 import sys
 from dataclasses import dataclass
-from decimal import Decimal
 from typing import Any
-from uuid import uuid4
 
-from sgr.core.types import ExchangeID, OrderRequest, OrderType, Side, Symbol, TradingMode
+from sgr.core.types import ExchangeID, TradingMode
 from sgr.exchanges.base import AdapterFeatureNotImplementedError
 from sgr.exchanges.pionex import PionexAdapter, _to_pionex_symbol
 
@@ -99,11 +108,15 @@ Erneut mit --yes aufrufen, um fortzufahren:
 
 class WriteAttemptedError(RuntimeError):
     """
-    Wird geworfen (und bricht den GESAMTEN Verification Flow sofort ab),
-    wenn der Write-Endpunkt-Selbsttest (_selftest_write_endpoints_blocked)
-    NICHT das erwartete AdapterFeatureNotImplementedError liefert - siehe
-    Modul-Docstring "Sicherheitsaudit". Das ist die konkrete Umsetzung von
-    Aufgabenstellung Punkt 10 ("Flow sofort abbrechen").
+    Reserviert als Sicherheitsabbruch-Mechanismus fuer diesen Flow -
+    aktuell von keinem Codepfad mehr ausgeloest, seit der Write-Block-
+    Selbsttest entfernt wurde (siehe Modul-Docstring "Sicherheitsaudit
+    - WICHTIGE AKTUALISIERUNG"): ein Aufruf der vier Schreibmethoden zum
+    Zweck des Selbsttests waere seit der Futures Write Integration
+    selbst ein echter Write-Request und darf in diesem GET-only-Skript
+    nicht mehr stattfinden. Bleibt als importierbarer Typ bestehen,
+    falls ein kuenftiger, dedizierter Sicherheits-Check hier wieder
+    ansetzen soll.
     """
 
 
@@ -149,58 +162,6 @@ def _announce(category: str, endpoint: str) -> None:
         f"[VERIFY] trading_mode=live exchange=pionex category={category} "
         f"endpoint={endpoint} read_only=True"
     )
-
-
-async def _selftest_write_endpoints_blocked(adapter: PionexAdapter, symbol: str) -> None:
-    """
-    Ruft alle vier Schreib-Endpunkte des Adapters BEWUSST auf, BEVOR
-    irgendein Lese-Call dieses Flows stattfindet, und erwartet fuer jeden
-    AdapterFeatureNotImplementedError (siehe sgr/exchanges/pionex.py -
-    dieser Codepfad wirft nachweislich VOR jeglichem Netzwerk-/Signing-
-    Code, siehe dortige Kommentare). Das ist der scharfe Realtest von
-    Aufgabenstellung Punkt 9 ("connect() != permission to trade") GEGEN
-    den echten, verbundenen LIVE-Adapter - kein Mock.
-
-    Verhaelt sich irgendeiner dieser vier Aufrufe abweichend (kein
-    Fehler, ein ANDERER Fehlertyp), wird SOFORT eine WriteAttemptedError
-    geworfen - der Aufrufer (_run_mode) propagiert das ungefangen bis
-    _main(), das den GESAMTEN Flow ohne weiteren Call abbricht
-    (Aufgabenstellung Punkt 10).
-    """
-    base, _, quote = symbol.partition("/")
-    order = OrderRequest(
-        signal_id=uuid4(),
-        symbol=Symbol(base=base, quote=quote, exchange=ExchangeID.PIONEX),
-        side=Side.BUY,
-        order_type=OrderType.MARKET,
-        quantity=Decimal("0.001"),
-        trading_mode=TradingMode.LIVE,
-    )
-
-    checks: list[tuple[str, Any]] = [
-        ("place_order", lambda: adapter.place_order(order)),
-        ("cancel_order", lambda: adapter.cancel_order("1", symbol)),
-        ("cancel_all_orders", lambda: adapter.cancel_all_orders()),
-        ("set_leverage", lambda: adapter.set_leverage(symbol, Decimal("5"))),
-    ]
-
-    for name, call in checks:
-        try:
-            await call()
-        except AdapterFeatureNotImplementedError:
-            continue
-        except Exception as e:
-            raise WriteAttemptedError(
-                f"SAFETY ABORT: {name}() raised {type(e).__name__} instead of "
-                "AdapterFeatureNotImplementedError - write-block self-test failed. "
-                "Aborting entire verification flow before any read call was made."
-            ) from e
-        else:
-            raise WriteAttemptedError(
-                f"SAFETY ABORT: {name}() returned successfully instead of raising "
-                "AdapterFeatureNotImplementedError - a LIVE write may have been "
-                "sent. Aborting entire verification flow immediately."
-            )
 
 
 async def _check(
@@ -422,21 +383,12 @@ async def _run_mode(
         CheckResult(category, "connect()", "SUCCESS", None, None, "authenticated + connected")
     )
 
-    # Aufgabenstellung Punkt 9/10: Write-Block-Selbsttest VOR jedem
-    # Lese-Call. Ein Fehlschlag hier propagiert ungefangen bis _main()
-    # und bricht den gesamten Flow ab.
-    await _selftest_write_endpoints_blocked(adapter, symbol)
-    results.append(
-        CheckResult(
-            category,
-            "write-endpoints-selftest",
-            "SUCCESS",
-            None,
-            None,
-            "place_order/cancel_order/cancel_all_orders/set_leverage all raised "
-            "AdapterFeatureNotImplementedError as expected - no network call made",
-        )
-    )
+    # KEIN Write-Block-Selbsttest mehr (siehe Modul-Docstring
+    # "Sicherheitsaudit - WICHTIGE AKTUALISIERUNG"): place_order()/
+    # cancel_order()/cancel_all_orders()/set_leverage() fuehren fuer
+    # LIVE + Futures jetzt echte Netzwerk-Calls aus - dieser Flow ruft
+    # sie deshalb ab hier bewusst NIE auf, nur die folgenden reinen
+    # GET-Endpunkte.
 
     if futures_mode:
         await _futures_checks(adapter, symbol, results, secrets, meta)
@@ -559,10 +511,11 @@ def _print_report(results: list[CheckResult], meta: dict[str, Any]) -> None:
     )
 
     print("\nH. Capability Detection unterscheidet Read/Write korrekt:")
-    print("   True (Report wird nur erreicht, wenn der Write-Block-Selbsttest VOR jedem")
-    print("   Lese-Call erfolgreich bestaetigt hat, dass place_order/cancel_order/")
-    print("   cancel_all_orders/set_leverage weiterhin AdapterFeatureNotImplementedError")
-    print("   werfen - siehe write-endpoints-selftest Eintraege oben unter A.)")
+    print("   N/A fuer diesen Lauf - der fruehere Write-Block-Selbsttest wurde entfernt,")
+    print("   seit place_order/cancel_order/cancel_all_orders/set_leverage fuer LIVE+Futures")
+    print("   echte Netzwerk-Calls ausfuehren (siehe Modul-Docstring 'Sicherheitsaudit -")
+    print("   WICHTIGE AKTUALISIERUNG'). Dieses Skript ruft sie deshalb nicht mehr auf und")
+    print("   kann diese Unterscheidung nicht mehr selbst live pruefen.")
 
     print("\nRaw capability detection:")
     for key in ("spot_capabilities", "futures_capabilities"):
