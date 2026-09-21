@@ -24,6 +24,13 @@ from sgr.core.startup_checks import StartupSafetyChecker, StartupSafetyError
 from sgr.core.types import TradingMode
 from sgr.risk.kill_switch import get_kill_switch
 
+# ExchangeCredentials(_env_file=None) statt des bloßen ExchangeCredentials():
+# seit dem Bugfix fuer die Pionex Live-Read-Only-Verification liest
+# ExchangeCredentials auch aus einer .env-Datei im Arbeitsverzeichnis (siehe
+# sgr/core/config.py) - Tests, die bewusst "gar keine Credentials
+# konfiguriert" simulieren, muessen diesen Fallback deterministisch
+# deaktivieren, sonst haengt der Testausgang vom Inhalt einer lokalen .env ab.
+
 
 def _live_config(**risk_overrides: object) -> SGRConfig:
     """Baut eine LIVE-Config mit vollständigen Credentials und optional
@@ -85,7 +92,7 @@ class TestLiveCredentialsPresent:
     def test_fails_without_credentials(self) -> None:
         config = SGRConfig(
             trading_mode=TradingMode.LIVE,
-            credentials=ExchangeCredentials(),
+            credentials=ExchangeCredentials(_env_file=None),
         )
         result = StartupSafetyChecker(config)._check_live_credentials_present()
         assert result.passed is False
@@ -96,7 +103,7 @@ class TestLiveCredentialsPresent:
         dort gar nicht erst ausgeführt werden."""
         config = SGRConfig(
             trading_mode=TradingMode.PAPER,
-            credentials=ExchangeCredentials(),
+            credentials=ExchangeCredentials(_env_file=None),
         )
         report = StartupSafetyChecker(config).run()
         names = [c.name for c in report.checks]
@@ -186,7 +193,7 @@ class TestRunOrRaise:
     def test_live_mode_missing_credentials_raises(self) -> None:
         config = SGRConfig(
             trading_mode=TradingMode.LIVE,
-            credentials=ExchangeCredentials(),
+            credentials=ExchangeCredentials(_env_file=None),
         )
         with pytest.raises(StartupSafetyError, match="live_credentials_present"):
             StartupSafetyChecker(config).run_or_raise()
@@ -208,7 +215,7 @@ class TestRunOrRaise:
         einer fehlgeschlagenen Config als mehrere Boot-Versuche)."""
         config = SGRConfig(
             trading_mode=TradingMode.LIVE,
-            credentials=ExchangeCredentials(),
+            credentials=ExchangeCredentials(_env_file=None),
             risk_limits=RiskLimitsConfig(max_order_notional=None),
         )
         with pytest.raises(StartupSafetyError) as exc_info:
@@ -221,7 +228,7 @@ class TestRunOrRaise:
     def test_report_failures_property(self) -> None:
         config = SGRConfig(
             trading_mode=TradingMode.LIVE,
-            credentials=ExchangeCredentials(),
+            credentials=ExchangeCredentials(_env_file=None),
         )
         report = StartupSafetyChecker(config).run()
         assert report.all_passed is False

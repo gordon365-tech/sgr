@@ -11,6 +11,7 @@ import pytest
 
 from sgr.core.config import (
     EncryptionConfig,
+    ExchangeCredentials,
     RiskLimitsConfig,
     SGRConfig,
     get_config,
@@ -108,3 +109,105 @@ class TestSGRConfigTenantId:
     def test_tenant_id_explicit_constructor_arg(self) -> None:
         config = SGRConfig(tenant_id="sumo")
         assert config.tenant_id == "sumo"
+
+
+class TestExchangeCredentialsEnvFileLoading:
+    """
+    Bugfix (Pionex Live Read-Only Verification, gefunden waehrend eines
+    echten Laufs gegen einen realen Account): SGRConfig.credentials wird
+    per `Field(default_factory=ExchangeCredentials)` gebaut -
+    `ExchangeCredentials()` ist eine EIGENSTAENDIGE BaseSettings-Instanz
+    und erbte das `env_file=".env"` von SGRConfig bisher NICHT. Damit
+    konnte `python scripts/verify_pionex_live_read_only.py --yes` (und
+    jeder andere reine .env-basierte, nicht-Docker-Aufruf) Pionex-
+    Credentials aus .env nie finden, obwohl .env.example genau das
+    suggeriert. Siehe sgr/core/config.py ExchangeCredentials.model_config
+    fuer die eigentliche Behebung; diese Tests verifizieren sie isoliert
+    von jedem echten Repo-.env (eigenes tmp_path-Arbeitsverzeichnis).
+    """
+
+    def test_reads_pionex_credentials_from_env_file_without_process_env(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        monkeypatch.delenv("PIONEX_LIVE_API_KEY", raising=False)
+        monkeypatch.delenv("PIONEX_LIVE_SECRET", raising=False)
+        (tmp_path / ".env").write_text(
+            "PIONEX_LIVE_API_KEY=dotenv_test_key\nPIONEX_LIVE_SECRET=dotenv_test_secret\n"
+        )
+        monkeypatch.chdir(tmp_path)
+
+        credentials = ExchangeCredentials()
+        result = credentials.get_credentials("pionex", TradingMode.LIVE)
+
+        assert result["apiKey"] == "dotenv_test_key"
+        assert result["secret"] == "dotenv_test_secret"
+
+    def test_real_process_env_var_takes_priority_over_env_file(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """Sicherheitsgarantie fuer Docker (siehe sgr/core/config.py
+        Kommentar): ein bereits im echten Prozess-Environment gesetzter
+        Wert (z.B. via docker-compose env_file-Direktive) darf NIEMALS
+        von einer zufaellig vorhandenen .env-Datei ueberschrieben werden."""
+        monkeypatch.setenv("PIONEX_LIVE_API_KEY", "real_process_env_key")
+        monkeypatch.setenv("PIONEX_LIVE_SECRET", "real_process_env_secret")
+        (tmp_path / ".env").write_text(
+            "PIONEX_LIVE_API_KEY=stale_dotenv_key\nPIONEX_LIVE_SECRET=stale_dotenv_secret\n"
+        )
+        monkeypatch.chdir(tmp_path)
+
+        credentials = ExchangeCredentials()
+        result = credentials.get_credentials("pionex", TradingMode.LIVE)
+
+        assert result["apiKey"] == "real_process_env_key"
+        assert result["secret"] == "real_process_env_secret"
+
+    def test_env_file_override_none_ignores_env_file(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """Escape Hatch fuer Tests, die bewusst 'gar keine Credentials
+        konfiguriert' simulieren wollen (siehe test_pionex.py,
+        test_startup_checks.py) - muss den Fallback vollstaendig
+        deaktivieren koennen, unabhaengig vom Arbeitsverzeichnis."""
+        monkeypatch.delenv("PIONEX_LIVE_API_KEY", raising=False)
+        monkeypatch.delenv("PIONEX_LIVE_SECRET", raising=False)
+        (tmp_path / ".env").write_text(
+            "PIONEX_LIVE_API_KEY=should_not_be_read\nPIONEX_LIVE_SECRET=should_not_be_read\n"
+        )
+        monkeypatch.chdir(tmp_path)
+
+        credentials = ExchangeCredentials(_env_file=None)
+
+        with pytest.raises(ValueError, match="Credentials not configured"):
+            credentials.get_credentials("pionex", TradingMode.LIVE)
+
+    def test_missing_everywhere_still_raises(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        monkeypatch.delenv("PIONEX_LIVE_API_KEY", raising=False)
+        monkeypatch.delenv("PIONEX_LIVE_SECRET", raising=False)
+        monkeypatch.chdir(tmp_path)  # kein .env vorhanden
+
+        credentials = ExchangeCredentials()
+
+        with pytest.raises(ValueError, match="Credentials not configured"):
+            credentials.get_credentials("pionex", TradingMode.LIVE)
+
+    def test_binance_credentials_also_benefit_from_the_fix(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        """Der Fix ist exchange-uebergreifend (ExchangeCredentials selbst,
+        nicht Pionex-spezifisch) - Binance profitiert identisch, keine
+        Pionex-Sonderlogik noetig."""
+        monkeypatch.delenv("BINANCE_LIVE_API_KEY", raising=False)
+        monkeypatch.delenv("BINANCE_LIVE_SECRET", raising=False)
+        (tmp_path / ".env").write_text(
+            "BINANCE_LIVE_API_KEY=binance_dotenv_key\nBINANCE_LIVE_SECRET=binance_dotenv_secret\n"
+        )
+        monkeypatch.chdir(tmp_path)
+
+        credentials = ExchangeCredentials()
+        result = credentials.get_credentials("binance", TradingMode.LIVE)
+
+        assert result["apiKey"] == "binance_dotenv_key"
+        assert result["secret"] == "binance_dotenv_secret"

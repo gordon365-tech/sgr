@@ -186,7 +186,31 @@ class ExchangeCredentials(BaseSettings):
     Paper and live are ALWAYS separate keys.
     """
 
-    model_config = SettingsConfigDict(extra="ignore")
+    # Bugfix (Pionex Live Read-Only Verification, live gegen echten
+    # Account nachgewiesen): SGRConfig.credentials wird per
+    # `Field(default_factory=ExchangeCredentials)` gebaut - das ruft
+    # `ExchangeCredentials()` OHNE Argumente auf und erzeugt damit eine
+    # EIGENSTAENDIGE BaseSettings-Instanz mit IHRER EIGENEN
+    # Sources-Konfiguration. SGRConfig's env_file=".env" (siehe unten)
+    # wird an diese verschachtelte Instanz NICHT vererbt - ohne dieses
+    # env_file HIER liest ExchangeCredentials Credentials ausschliesslich
+    # aus dem tatsaechlichen Prozess-Environment (os.environ), NIEMALS
+    # aus einer .env-Datei, obwohl .env.example genau das suggeriert und
+    # scripts/verify_pionex_live_read_only.py (Usage-Docstring) genau
+    # das voraussetzt.
+    #
+    # Docker bleibt unveraendert/regressionsfrei: docker-compose setzt
+    # PIONEX_*/BINANCE_*-Werte bereits ueber `env_file:`-Direktiven als
+    # ECHTE Prozess-Environment-Variablen (siehe docker/docker-compose*.
+    # yml Kommentare "env_file laedt .env explizit"). pydantic-settings'
+    # Standard-Quellenreihenfolge ist init > env (os.environ) > dotenv >
+    # file secrets - eine hier zusaetzlich gelesene .env-Datei wirkt
+    # daher NUR als Fallback fuer Werte, die im echten Environment noch
+    # fehlen, und ueberschreibt nie einen bereits gesetzten echten
+    # Environment-Wert. Fuer ein direktes `python scripts/...` ausserhalb
+    # von Docker (kein Prozess-Environment gesetzt) wird die .env-Datei
+    # dadurch ueberhaupt erst als Quelle wirksam - das war die Luecke.
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     # Binance – Paper (Testnet)
     binance_paper_api_key: SecretStr | None = None

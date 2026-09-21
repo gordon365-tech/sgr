@@ -28,11 +28,13 @@ class FakeSession:
         self.headers = {}
         self.last_url = None
         self.last_params = None
+        self.last_headers = None
         self.closed = False
 
-    def get(self, url, params=None, timeout=None):
+    def get(self, url, params=None, headers=None, timeout=None):
         self.last_url = url
         self.last_params = params
+        self.last_headers = headers
         self.last_timeout = timeout
         return self.response
 
@@ -112,9 +114,7 @@ def test_get_book_tickers():
 
 
 def test_get_symbols():
-    client, session = make_client(
-        {"result": True, "data": {"symbols": [{"symbol": "BTC_USDT"}]}}
-    )
+    client, session = make_client({"result": True, "data": {"symbols": [{"symbol": "BTC_USDT"}]}})
 
     assert client.get_symbols() == [{"symbol": "BTC_USDT"}]
     assert session.last_url.endswith("/api/v1/common/symbols")
@@ -223,9 +223,7 @@ def test_empty_ticker_is_api_error():
 
 
 def test_pionex_api_error():
-    client, _ = make_client(
-        {"result": False, "code": 10001, "message": "Invalid symbol"}
-    )
+    client, _ = make_client({"result": False, "code": 10001, "message": "Invalid symbol"})
 
     with pytest.raises(PionexAPIError, match="10001") as exc_info:
         client.get_ticker("INVALID")

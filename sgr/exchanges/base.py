@@ -353,6 +353,28 @@ class RateLimitError(ExchangeError):
         self.retry_after_seconds = retry_after_seconds
 
 
+class ExchangeAuthenticationError(ExchangeError):
+    """
+    Private-API-Authentifizierung fehlgeschlagen (ungueltiger/abgelaufener
+    API Key, ungueltige Signatur, IP nicht gewhitelistet, fehlende
+    Berechtigung, Timestamp ausserhalb des erlaubten Fensters). Getrennt
+    von ExchangeConnectionError (Netzwerk/Erreichbarkeit) und
+    InsufficientFundsError (Konto erreichbar, aber Guthaben reicht nicht) -
+    eine Authentifizierungs-Ablehnung bedeutet "diese Credentials duerfen
+    diesen Request nicht stellen", unabhaengig von Netzwerk oder
+    Kontostand. NICHT retryable: ein erneuter Versuch mit denselben
+    Credentials wuerde am selben Ergebnis scheitern.
+    """
+
+    def __init__(self, exchange: str, detail: str, code: str | None = None) -> None:
+        super().__init__(
+            f"Authentication failed on {exchange}: {detail}",
+            exchange=exchange,
+            retryable=False,
+        )
+        self.code = code
+
+
 class InsufficientFundsError(ExchangeError):
     """Not enough balance. Not retryable."""
 

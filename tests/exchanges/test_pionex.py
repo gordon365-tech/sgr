@@ -19,6 +19,7 @@ Abdeckung:
 
 from __future__ import annotations
 
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -193,25 +194,27 @@ class TestConnectLiveMode:
 
         base_connect.assert_awaited_once()
 
-    async def test_connect_fails_fast_when_ccxt_has_no_pionex_id(
+    async def test_connect_without_ccxt_falls_back_to_native_client(
         self, live_adapter: PionexAdapter, monkeypatch
     ) -> None:
-        """Architektur-Befund: die real installierte ccxt-Version (siehe
-        Modul-Docstring sgr/exchanges/pionex.py) fuehrt keine 'pionex'-ID.
-        LIVE Trading darf sich in diesem Fall NICHT verbinden (sonst
-        wuerde erst die erste Order unkontrolliert scheitern) - es muss
-        stattdessen sofort und eindeutig fehlschlagen. Explizit
-        delattr statt sich auf die Umgebung zu verlassen, damit dieser
-        Test deterministisch bleibt, falls eine zukuenftige ccxt-Version
-        "pionex" wieder registriert."""
+        """
+        Seit der Private-API-Integration (read-only) verbindet sich LIVE
+        auch OHNE ccxt-Pionex-ID erfolgreich - ueber den nativen,
+        signierten Fallback (siehe TestNativeFallbackLive fuer die
+        vollstaendige Abdeckung: Authentication/Connectivity/Balance/
+        Positions/Orders/Funding). Diese Sperre ist absichtlich
+        verschoben worden: verbinden (=lesen) ist jetzt erlaubt, SENDEN
+        bleibt blockiert (siehe test_place_order_blocked_in_live_native_
+        fallback in TestNativeFallbackLive)."""
         import ccxt.async_support as ccxt_async
 
-        from sgr.exchanges.base import AdapterFeatureNotImplementedError
-
         monkeypatch.delattr(ccxt_async, "pionex", raising=False)
+        monkeypatch.setattr("sgr.exchanges.pionex_client.PionexClient", FakePionexClient)
 
-        with pytest.raises(AdapterFeatureNotImplementedError, match="live_order_submission"):
-            await live_adapter.connect()
+        await live_adapter.connect()
+
+        assert live_adapter._connected is True
+        assert live_adapter._native_fallback is True
 
 
 # ---------------------------------------------------------------------
@@ -220,6 +223,12 @@ class TestConnectLiveMode:
 
 
 class TestFromConfig:
+    # ExchangeCredentials(_env_file=None) statt des bloßen
+    # ExchangeCredentials(): seit dem Bugfix fuer die Pionex Live-Read-
+    # Only-Verification liest ExchangeCredentials auch aus einer .env-
+    # Datei im Arbeitsverzeichnis (siehe sgr/core/config.py) - Tests, die
+    # bewusst "gar keine Credentials konfiguriert" simulieren, muessen
+    # diesen Fallback deterministisch deaktivieren.
     def _fake_config(self, credentials: ExchangeCredentials) -> MagicMock:
         config = MagicMock()
         config.credentials = credentials
@@ -242,7 +251,7 @@ class TestFromConfig:
         """Ohne konfigurierte Paper-Credentials werden Platzhalter verwendet,
         da die CCXT-Instanz Parameter erwartet, aber Paper Mode keine echte
         Authentifizierung benötigt."""
-        creds = ExchangeCredentials()
+        creds = ExchangeCredentials(_env_file=None)
         monkeypatch.setattr("sgr.core.config.get_config", lambda: self._fake_config(creds))
 
         adapter = PionexAdapter.from_config(TradingMode.PAPER)
@@ -264,7 +273,7 @@ class TestFromConfig:
         assert adapter.trading_mode == TradingMode.LIVE
 
     def test_live_mode_without_credentials_raises(self, monkeypatch) -> None:
-        creds = ExchangeCredentials()
+        creds = ExchangeCredentials(_env_file=None)
         monkeypatch.setattr("sgr.core.config.get_config", lambda: self._fake_config(creds))
 
         with pytest.raises(ValueError, match="Credentials not configured"):
@@ -277,14 +286,22 @@ class TestFromConfig:
 
 
 class FakePionexClient:
-    """Minimaler synchroner Stand-in fuer PionexClient (native Fallback)."""
+    """Minimaler synchroner Stand-in fuer PionexClient (native Fallback).
+
+    Deckt sowohl die oeffentlichen Methoden (unveraendert seit dem
+    Futures-Grid-Baustein) als auch die neuen privaten (signierten)
+    Methoden ab - Letztere werden nur von den LIVE-Native-Fallback-Tests
+    in TestNativeFallbackLive tatsaechlich aufgerufen.
+    """
 
     KLINE_INTERVALS = {"1h": "60M"}
 
-    def __init__(self) -> None:
+    def __init__(self, api_key=None, api_secret=None) -> None:
         self.closed = False
+        self.api_key = api_key
+        self.api_secret = api_secret
 
-    def get_symbols(self):
+    def get_symbols(self, symbols=None, market_type=None, status=None):
         return [
             {
                 "symbol": "BTC_USDT",
@@ -329,6 +346,135 @@ class FakePionexClient:
     def close(self):
         self.closed = True
 
+    # --- Private (signed) methods - only reached in LIVE mode ---
+
+    def get_account_balances(self):
+        return [
+            {"coin": "USDT", "free": "1000.00000000", "frozen": "50.00000000"},
+            {"coin": "BTC", "free": "0.10000000", "frozen": "0.00000000"},
+        ]
+
+    def get_futures_account_balances(self):
+        return {
+            "balances": [
+                {"coin": "USDT", "free": "5000.00000000", "frozen": "200.00000000", "debts": "0"}
+            ],
+            "isolates": [],
+        }
+
+    def get_futures_positions(self, symbol=None):
+        return [
+            {
+                "positionId": "pos-1",
+                "symbol": "BTC_USDT_PERP",
+                "isolatedMode": "CROSS",
+                "positionSide": "LONG",
+                "netSize": "0.05",
+                "avgPrice": "60000",
+                "unrealizedPnL": "50.00",
+                "markPrice": "61000",
+                "leverage": "3",
+                "createTime": 1786237680000,
+                "updateTime": 1786237680000,
+            }
+        ]
+
+    def get_futures_leverage(self, symbol):
+        return {"symbol": symbol, "leverage": "3"}
+
+    def get_futures_margin_mode(self, symbol):
+        return {"symbol": symbol, "isolatedMode": "CROSS"}
+
+    def get_futures_open_orders(self, symbol=None, end_time=None, limit=100):
+        return [
+            {
+                "orderId": 987654321,
+                "symbol": symbol or "BTC_USDT_PERP",
+                "type": "LIMIT",
+                "side": "BUY",
+                "price": "59000",
+                "size": "0.01",
+                "filledSize": "0",
+                "status": "OPEN",
+                "clientOrderId": "abc-123",
+                "source": "API",
+                "createTime": 1786237680000,
+                "updateTime": 1786237680000,
+            }
+        ]
+
+    def get_futures_order(self, symbol, order_id):
+        return {
+            "orderId": order_id,
+            "symbol": symbol,
+            "type": "LIMIT",
+            "side": "BUY",
+            "price": "59000",
+            "size": "0.01",
+            "filledSize": "0.01",
+            "filledAmount": "590.00",
+            "status": "CLOSED",
+            "createTime": 1786237680000,
+            "updateTime": 1786237680000,
+        }
+
+    def get_spot_open_orders(self, symbol):
+        return [
+            {
+                "orderId": 111222333,
+                "symbol": symbol,
+                "type": "LIMIT",
+                "side": "SELL",
+                "price": "62000",
+                "size": "0.01",
+                "filledSize": "0",
+                "status": "OPEN",
+                "createTime": 1786237680000,
+                "updateTime": 1786237680000,
+            }
+        ]
+
+    def get_spot_order(self, order_id):
+        return {
+            "orderId": order_id,
+            "symbol": "BTC_USDT",
+            "type": "LIMIT",
+            "side": "SELL",
+            "price": "62000",
+            "size": "0.01",
+            "filledSize": "0.01",
+            "filledAmount": "620.00",
+            "fee": "0.62",
+            "feeCoin": "USDT",
+            "status": "CLOSED",
+            "createTime": 1786237680000,
+            "updateTime": 1786237680000,
+        }
+
+    def get_futures_funding_fees(self, symbol=None, start_time=None, end_time=None, limit=100):
+        return [
+            {
+                "symbol": symbol or "BTC_USDT_PERP",
+                "isolatedMode": "CROSS",
+                "fundingFee": "-0.42",
+                "fundingCoin": "USDT",
+                "timestamp": 1786237680000,
+                "fundingRate": "0.0001",
+            }
+        ]
+
+    def get_funding_rates(self, symbol, end_time=None, limit=1):
+        return {
+            "symbol": symbol,
+            "rates": [{"fundingRate": "0.0001", "fundingTime": 1786237680000}],
+        }
+
+    def get_open_interests(self):
+        return [{"symbol": "BTC_USDT_PERP", "openInterest": "12345.6"}]
+
+    def get_futures_risk_table(self, symbol=None):
+        return [{"symbol": symbol or "BTC_USDT_PERP", "rows": [{"maxLeverage": "20"}]}]
+
 
 @pytest.fixture
 def fallback_paper_adapter(monkeypatch) -> PionexAdapter:
@@ -351,21 +497,42 @@ class TestNativeFallback:
         assert fallback_paper_adapter._native_fallback is True
         assert fallback_paper_adapter._ccxt is None
 
-    async def test_live_mode_never_reaches_native_fallback(self, monkeypatch) -> None:
-        """Der native Fallback ist PAPER-only (siehe Modul-Docstring) -
-        LIVE muss vorher fail-fast abbrechen, nicht stillschweigend auf
-        oeffentliche Marktdaten ohne echte Order-Ausfuehrung zurueckfallen."""
+    async def test_live_mode_reaches_native_fallback_but_stays_read_only(self, monkeypatch) -> None:
+        """
+        Seit der Private-API-Integration (read-only) DARF LIVE den
+        nativen Fallback erreichen (siehe TestNativeFallbackLive fuer
+        die volle Abdeckung) - die eigentliche Sicherheitsgrenze ist
+        jetzt place_order(), nicht mehr connect(). Dieser Test belegt
+        beide Haelften an einer Stelle: connect() gelingt, place_order()
+        bleibt blockiert.
+        """
         import ccxt.async_support as ccxt_async
 
         from sgr.exchanges.base import AdapterFeatureNotImplementedError
 
         monkeypatch.delattr(ccxt_async, "pionex", raising=False)
+        monkeypatch.setattr("sgr.exchanges.pionex_client.PionexClient", FakePionexClient)
         adapter = PionexAdapter(api_key="k", secret="s", trading_mode=TradingMode.LIVE)
 
-        with pytest.raises(AdapterFeatureNotImplementedError):
-            await adapter.connect()
+        await adapter.connect()
+        assert adapter._native_fallback is True
+        assert adapter._connected is True
 
-        assert adapter._native_fallback is False
+        from decimal import Decimal
+        from uuid import uuid4
+
+        from sgr.core.types import OrderRequest, OrderType, Side, Symbol
+
+        order = OrderRequest(
+            signal_id=uuid4(),
+            symbol=Symbol(base="BTC", quote="USDT", exchange=ExchangeID.PIONEX),
+            side=Side.BUY,
+            order_type=OrderType.MARKET,
+            quantity=Decimal("0.001"),
+            trading_mode=TradingMode.LIVE,
+        )
+        with pytest.raises(AdapterFeatureNotImplementedError, match="live_order_submission"):
+            await adapter.place_order(order)
 
     async def test_get_ticker_uses_book_ticker_for_bid_ask(
         self, fallback_paper_adapter: PionexAdapter
@@ -410,17 +577,33 @@ class TestNativeFallback:
         assert limits.amount_precision == 6
         assert limits.min_amount == 0.0001 or str(limits.min_amount) == "0.0001"
 
-    async def test_unimplemented_futures_endpoints_raise_clearly(
+    async def test_public_funding_and_open_interest_now_implemented(
         self, fallback_paper_adapter: PionexAdapter
     ) -> None:
+        """
+        Seit der Private-API-Integration sind get_funding_rate()/
+        get_open_interest() ueber die OEFFENTLICHEN Pionex-Endpunkte
+        (/api/v1/market/fundingRates, /api/v1/market/openInterests)
+        implementiert - funktionieren in PAPER wie LIVE ohne Credentials.
+        Ersetzt die vorherige AdapterFeatureNotImplementedError.
+        """
+        await fallback_paper_adapter.connect()
+
+        funding = await fallback_paper_adapter.get_funding_rate("BTC/USDT")
+        assert funding.rate == Decimal("0.0001")
+
+        oi = await fallback_paper_adapter.get_open_interest("BTC/USDT")
+        assert oi.open_interest == Decimal("12345.6")
+
+    async def test_set_leverage_still_not_implemented(
+        self, fallback_paper_adapter: PionexAdapter
+    ) -> None:
+        """set_leverage() ist ein Schreib-Endpunkt - bleibt bewusst
+        ausserhalb des Scopes dieser Read-Only-Erweiterung."""
         from sgr.exchanges.base import AdapterFeatureNotImplementedError
 
         await fallback_paper_adapter.connect()
 
-        with pytest.raises(AdapterFeatureNotImplementedError):
-            await fallback_paper_adapter.get_funding_rate("BTC/USDT")
-        with pytest.raises(AdapterFeatureNotImplementedError):
-            await fallback_paper_adapter.get_open_interest("BTC/USDT")
         with pytest.raises(AdapterFeatureNotImplementedError):
             await fallback_paper_adapter.set_leverage("BTC/USDT", 5)
 
