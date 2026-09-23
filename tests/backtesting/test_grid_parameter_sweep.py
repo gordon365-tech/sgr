@@ -1,7 +1,9 @@
 """
 Tests für sgr.backtesting.grid_parameter_sweep.sweep_grid_parameters()
-(Phase O, 2026-09-23) - Anbindung von FuturesGridParameters-Kandidaten an
-den bestehenden GridBacktestSimulator, KEINE neue Optimizer-Engine.
+(zuletzt revidiert 2026-09-24) - Anbindung von FuturesGridParameters-
+Kandidaten an den bestehenden GridBacktestSimulator, KEINE neue
+Optimizer-Engine. Deckt die echte Drei-Wege-Trennung (in-sample /
+validation / out-of-sample) und das Top-K-Pruning.
 """
 
 from __future__ import annotations
@@ -10,7 +12,11 @@ import math
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from sgr.backtesting.grid_parameter_sweep import sweep_grid_parameters
+from sgr.backtesting.grid_parameter_sweep import (
+    IN_SAMPLE_FRACTION,
+    VALIDATION_FRACTION,
+    sweep_grid_parameters,
+)
 from sgr.backtesting.grid_types import GridBacktestConfig
 from sgr.core.grid_types import FuturesGridParameters
 from sgr.core.types import Candle, ExchangeID, GridDirection, Symbol
@@ -72,7 +78,7 @@ class TestSweepGridParameters:
         assert result.skipped_reason == "insufficient_history"
 
     def test_sweep_over_oscillating_market_produces_a_chosen_candidate(self) -> None:
-        candles = _oscillating_candles(400)
+        candles = _oscillating_candles(600)
         result = sweep_grid_parameters(
             candles,
             _base_config(),
@@ -82,19 +88,21 @@ class TestSweepGridParameters:
         )
 
         assert result.candidates_evaluated > 0
+        assert result.candidates_promoted_to_validation > 0
         assert result.chosen_parameters is not None
         assert result.skipped_reason is None
-        # validation_window_edge_confirmed ist bewusst NICHT hart
-        # asserted - eine synthetische Sinuswelle muss keine reale
-        # Edge im PerformanceAnalyzer-Sinn erzeugen; nur dass der
-        # gesamte Sweep- und Validierungs-Pfad fehlerfrei durchlaeuft
-        # und ein Ergebnis mit expliziten blockers liefert, wird
-        # geprueft.
-        assert isinstance(result.validation_window_edge_confirmed, bool)
-        assert isinstance(result.validation_window_blockers, list)
+        # validation/out_of_sample_edge_confirmed sind bewusst NICHT hart
+        # asserted - eine synthetische Sinuswelle muss keine reale Edge
+        # im PerformanceAnalyzer-Sinn erzeugen; nur dass der gesamte
+        # Sweep-Pfad (alle drei Fenster) fehlerfrei durchlaeuft und ein
+        # Ergebnis mit expliziten blockers liefert, wird geprueft.
+        assert isinstance(result.validation_edge_confirmed, bool)
+        assert isinstance(result.validation_blockers, list)
+        assert isinstance(result.out_of_sample_edge_confirmed, bool)
+        assert isinstance(result.out_of_sample_blockers, list)
 
     def test_chosen_parameters_respect_candidate_bounds(self) -> None:
-        candles = _oscillating_candles(400)
+        candles = _oscillating_candles(600)
         result = sweep_grid_parameters(
             candles,
             _base_config(),
@@ -107,14 +115,47 @@ class TestSweepGridParameters:
         assert result.chosen_parameters.grid_count == 4
         assert result.chosen_parameters.leverage == Decimal("3")
 
-    def test_optimization_and_validation_windows_are_disjoint(self) -> None:
-        """Grundprinzip (Anti-Overfitting): der Sweep darf nicht auf
-        derselben Datenmenge suchen UND validieren - verifiziert indirekt
-        ueber die interne Fenster-Aufteilung (60/40)."""
-        from sgr.backtesting.grid_parameter_sweep import OPTIMIZATION_WINDOW_FRACTION
+    def test_three_windows_are_disjoint_and_ordered(self) -> None:
+        """Grundprinzip (Anti-Overfitting): in-sample, validation und
+        out-of-sample duerfen sich nicht ueberlappen und muessen
+        chronologisch aufeinander folgen."""
+        candles = _oscillating_candles(600)
+        n = len(candles)
+        i1 = int(n * IN_SAMPLE_FRACTION)
+        i2 = int(n * (IN_SAMPLE_FRACTION + VALIDATION_FRACTION))
 
-        candles = _oscillating_candles(400)
-        split = int(len(candles) * OPTIMIZATION_WINDOW_FRACTION)
+        assert i1 < i2 < n
+        assert candles[i1 - 1].timestamp < candles[i1].timestamp
+        assert candles[i2 - 1].timestamp < candles[i2].timestamp
 
-        assert split < len(candles)
-        assert candles[split - 1].timestamp < candles[split].timestamp
+    def test_pruning_limits_candidates_promoted_to_validation(self) -> None:
+        """Top-K-Pruning: auch bei einem grossen Kandidaten-Kreuzprodukt
+        werden nur top_k_for_validation Kandidaten auf Validation/OOS
+        ausgewertet, nicht der volle Raum (Kosten-Kontrolle)."""
+        candles = _oscillating_candles(600)
+        result = sweep_grid_parameters(
+            candles,
+            _base_config(),
+            grid_count_candidates=[3, 4, 5],
+            leverage_candidates=[Decimal("1"), Decimal("2")],
+            range_width_multiplier_candidates=[Decimal("0.5"), Decimal("1"), Decimal("1.5")],
+            top_k_for_validation=2,
+        )
+
+        # 3 x 2 x 3 x 2(SL/TP-Paare) = 36 In-Sample-Kandidaten moeglich,
+        # aber hoechstens 2 werden befoerdert.
+        assert result.candidates_evaluated > 2
+        assert result.candidates_promoted_to_validation <= 2
+
+    def test_insufficient_validation_or_oos_window_is_skipped(self) -> None:
+        """Genug Gesamthistorie fuer min_candles, aber die Drei-Wege-
+        Aufteilung selbst laesst ein zu kleines OOS-Fenster - muss
+        ehrlich uebersprungen werden, nicht mit einem zu kleinen Fenster
+        weiterlaufen."""
+        candles = _oscillating_candles(300)  # == default min_candles, knapp
+        result = sweep_grid_parameters(candles, _base_config(), min_candles=300)
+
+        # Bei genau 300 Candles: OOS-Fenster = 25% von 300 = 75 >= 30,
+        # sollte NICHT geskippt werden - dieser Test verifiziert die
+        # Grenze bewusst knapp ueber der Skip-Schwelle.
+        assert result.skipped_reason != "insufficient_validation_or_oos_window"

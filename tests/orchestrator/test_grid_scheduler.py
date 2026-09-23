@@ -289,3 +289,88 @@ class TestEnabledBehavior:
         # verhindern.
         await scheduler.on_candle_event(_candle_event())
         assert controller.open_grid.await_count == 1
+
+
+class TestDirectionalExposureWiring:
+    def test_no_portfolio_engine_returns_none(self) -> None:
+        controller = _grid_controller_mock()
+        scheduler = GridScheduler(controller, _feature_store_mock(), TradingMode.PAPER)
+
+        assert scheduler._directional_exposure_usd() is None
+
+    def test_sums_absolute_notional_of_open_positions(self) -> None:
+        from decimal import Decimal
+
+        pos_long = MagicMock()
+        pos_long.notional_value = Decimal("1000")
+        pos_short = MagicMock()
+        pos_short.notional_value = Decimal("-500")  # abs() erwartet
+        portfolio = MagicMock()
+        portfolio.positions = [pos_long, pos_short]
+
+        controller = _grid_controller_mock()
+        scheduler = GridScheduler(
+            controller, _feature_store_mock(), TradingMode.PAPER, portfolio_engine=portfolio
+        )
+
+        assert scheduler._directional_exposure_usd() == Decimal("1500")
+
+    def test_portfolio_engine_error_returns_none_not_raises(self) -> None:
+        portfolio = MagicMock()
+        def _raise(self: Any) -> Any:
+            raise RuntimeError("db down")
+
+        type(portfolio).positions = property(_raise)
+
+        controller = _grid_controller_mock()
+        scheduler = GridScheduler(
+            controller, _feature_store_mock(), TradingMode.PAPER, portfolio_engine=portfolio
+        )
+
+        assert scheduler._directional_exposure_usd() is None
+
+    async def test_open_grid_call_receives_computed_exposure(self, monkeypatch) -> None:
+        from decimal import Decimal
+
+        from sgr.core.grid_types import FuturesGridParameters
+        from sgr.execution.grid_controller import GridOpenResult
+
+        pos = MagicMock()
+        pos.notional_value = Decimal("777")
+        portfolio = MagicMock()
+        portfolio.positions = [pos]
+
+        strategy = MagicMock()
+        strategy.name = "futures_grid_long_v1"
+        strategy.evaluate.return_value = GridDecision(
+            direction=GridDirection.LONG,
+            parameters=FuturesGridParameters(
+                grid_lower_price=Decimal("49000"),
+                grid_upper_price=Decimal("51000"),
+                grid_count=5,
+                long_or_short=GridDirection.LONG,
+                position_size=Decimal("50"),
+            ),
+            confidence=0.8,
+            reasons=["ranging"],
+        )
+        monkeypatch.setattr(
+            "sgr.orchestrator.grid_scheduler.get_active_grid_strategies", lambda: [strategy]
+        )
+        controller = _grid_controller_mock()
+        controller.open_grid = AsyncMock(
+            return_value=GridOpenResult(grid=MagicMock(id="fake"), approved=True, reason="")
+        )
+        scheduler = GridScheduler(
+            controller,
+            _feature_store_mock(),
+            TradingMode.PAPER,
+            enabled=True,
+            account_eligibility_provider=lambda: MagicMock(),
+            portfolio_engine=portfolio,
+        )
+
+        await scheduler.on_candle_event(_candle_event())
+
+        _, kwargs = controller.open_grid.call_args
+        assert kwargs["directional_exposure_usd"] == Decimal("777")

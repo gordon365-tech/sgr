@@ -552,6 +552,14 @@ class GridModel(Base):
     realized_pnl: Mapped[Decimal] = mapped_column(
         Numeric(precision=28, scale=8), nullable=False, default=0, server_default="0"
     )
+    # Mark-to-Market (Migration 0010, siehe GridState.unrealized_pnl/
+    # peak_value Docstring in sgr/core/grid_types.py).
+    unrealized_pnl: Mapped[Decimal] = mapped_column(
+        Numeric(precision=28, scale=8), nullable=False, default=0, server_default="0"
+    )
+    peak_value: Mapped[Decimal] = mapped_column(
+        Numeric(precision=28, scale=8), nullable=False, default=0, server_default="0"
+    )
     fees_paid: Mapped[Decimal] = mapped_column(
         Numeric(precision=28, scale=8), nullable=False, default=0, server_default="0"
     )

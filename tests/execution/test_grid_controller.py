@@ -1203,7 +1203,14 @@ class TestGridRecoveryIdempotencyAndNoResubmit:
 # ---------------------------------------------------------------------------
 
 
-class TestAllOrNothingFillSemantics:
+class TestPartialFillHandling:
+    """Phase 7 (2026-09-24): revidierte Einordnung nach kritischer Pruefung
+    - MARKET-Orders KOENNEN auf Binance Futures real PARTIALLY_FILLED
+    zurueckkommen (siehe _fill_level() Docstring). Ein Fill mit
+    filled_quantity>0 wird IMMER mit der tatsaechlichen Menge verarbeitet,
+    unabhaengig vom exakten Status-Enum-Wert. Nur filled_quantity==0
+    bleibt ein vollstaendiger No-Op."""
+
     async def _open_grid_and_get_execution_double(self, controller, account):
         result = await controller.open_grid(
             _decision(), _symbol(), "futures_grid_long_v1", account, _snapshot(),
@@ -1211,53 +1218,50 @@ class TestAllOrNothingFillSemantics:
         )
         return result.grid
 
-    def _non_filled_result(self, order, status) -> Any:
+    def _result(
+        self, order, status, filled_quantity=Decimal("0"), price=Decimal("49500")
+    ) -> Any:
         from sgr.core.types import OrderResult
 
         return OrderResult(
             request_id=order.id,
-            exchange_order_id="MOCK-NONFILLED",
+            exchange_order_id="MOCK-RESULT",
             symbol=order.symbol,
             status=status,
-            filled_quantity=Decimal("0"),
-            average_fill_price=None,
-            fees=Decimal("0"),
+            filled_quantity=filled_quantity,
+            average_fill_price=price if filled_quantity > 0 else None,
+            fees=(
+                filled_quantity * price * Decimal("0.0005")
+                if filled_quantity > 0
+                else Decimal("0")
+            ),
             submitted_at=datetime.now(tz=UTC),
             trading_mode=order.trading_mode,
         )
 
-    async def test_partially_filled_status_causes_zero_state_mutation(
+    async def test_zero_filled_quantity_causes_zero_state_mutation(
         self, controller: GridController, account
     ) -> None:
-        """Ein OrderResult mit status=PARTIALLY_FILLED (die Exchange hat
-        theoretisch nur einen Teil der Order gefuellt) darf NIEMALS zu
-        einem Teilzustand fuehren - GridController behandelt jeden
-        nicht-FILLED-Status wie eine komplett fehlgeschlagene Order: kein
-        Level-Zustand, kein net_position_qty, kein Fills-Zaehler-
-        Inkrement. Direkt am ExecutionEngine-Double getestet (umgeht das
-        MockExchangeAdapter-Fill-Monitoring, das fuer MARKET-Orders
-        strukturell immer FILLED zurueckliefert - kein Bug in
-        GridController, sondern eine Grenze des Test-Doubles fuer diesen
-        spezifischen Fall)."""
+        """status=PARTIALLY_FILLED, aber filled_quantity==0 (Randfall,
+        z.B. Exchange meldet den Zwischenstatus, bevor irgendetwas
+        tatsaechlich gefuellt wurde) - bleibt korrekt ein No-Op."""
         from sgr.core.types import OrderStatus
 
         grid_before = await self._open_grid_and_get_execution_double(controller, account)
         fills_before = grid_before.fills_count
-        net_qty_before = grid_before.net_position_qty
         levels_before = [(lv.index, lv.is_filled, lv.quantity) for lv in grid_before.levels]
 
         controller._execution.execute = AsyncMock(
-            side_effect=lambda order, **kw: self._non_filled_result(
-                order, OrderStatus.PARTIALLY_FILLED
+            side_effect=lambda order, **kw: self._result(
+                order, OrderStatus.PARTIALLY_FILLED, filled_quantity=Decimal("0")
             )
         )
 
         grid_after = await controller.on_price_tick(str(grid_before.id), Decimal("49500"))
 
         assert grid_after.fills_count == fills_before
-        assert grid_after.net_position_qty == net_qty_before
         levels_after = [(lv.index, lv.is_filled, lv.quantity) for lv in grid_after.levels]
-        assert levels_after == levels_before  # bitgenau unveraendert, kein Teilzustand
+        assert levels_after == levels_before
 
     async def test_rejected_status_causes_zero_state_mutation(
         self, controller: GridController, account
@@ -1267,13 +1271,122 @@ class TestAllOrNothingFillSemantics:
         grid_before = await self._open_grid_and_get_execution_double(controller, account)
 
         controller._execution.execute = AsyncMock(
-            side_effect=lambda order, **kw: self._non_filled_result(order, OrderStatus.REJECTED)
+            side_effect=lambda order, **kw: self._result(order, OrderStatus.REJECTED)
         )
 
         grid_after = await controller.on_price_tick(str(grid_before.id), Decimal("49500"))
 
         assert grid_after.fills_count == 0
         assert all(not lv.is_filled for lv in grid_after.levels)
+
+    async def test_partial_open_fill_uses_actual_filled_quantity(
+        self, controller: GridController, account
+    ) -> None:
+        """Level-Preis 49500 -> Level-Index 1 (siehe Recovery-Tests weiter
+        oben fuer die Preis-Level-Herleitung). Exchange fuellt nur 60% der
+        beabsichtigten Menge -> level.quantity MUSS die tatsaechliche
+        (kleinere) Menge tragen, is_filled trotzdem True, net_position_qty
+        nutzt die tatsaechliche Menge."""
+        from sgr.core.types import OrderStatus
+
+        grid_before = await self._open_grid_and_get_execution_double(controller, account)
+        requested_qty = Decimal("50") / Decimal("49500")  # position_size / price
+        partial_qty = requested_qty * Decimal("0.6")
+
+        controller._execution.execute = AsyncMock(
+            side_effect=lambda order, **kw: self._result(
+                order, OrderStatus.PARTIALLY_FILLED, filled_quantity=partial_qty
+            )
+        )
+
+        grid_after = await controller.on_price_tick(str(grid_before.id), Decimal("49500"))
+
+        level_1 = next(lv for lv in grid_after.levels if lv.index == 1)
+        assert level_1.is_filled is True
+        assert level_1.quantity == partial_qty
+        assert grid_after.net_position_qty == partial_qty
+        assert grid_after.fills_count == 1
+
+    async def test_partial_close_leaves_level_open_with_remainder(
+        self, controller: GridController, account, adapter: MockExchangeAdapter
+    ) -> None:
+        """Level vollstaendig geoeffnet, dann NUR teilweise geschlossen -
+        das Level muss mit der Restmenge offen bleiben (is_filled=True),
+        nicht faelschlich als komplett geschlossen gelten."""
+        result = await controller.open_grid(
+            _decision(), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            current_price=Decimal("50000"),
+        )
+        grid = result.grid
+        adapter.ticker_price = Decimal("49500")
+        grid = await controller.on_price_tick(str(grid.id), Decimal("49500"))
+        level_1 = next(lv for lv in grid.levels if lv.index == 1)
+        full_qty = level_1.quantity
+        assert full_qty > 0
+
+        from sgr.core.types import OrderStatus
+
+        partial_close_qty = full_qty * Decimal("0.4")
+        controller._execution.execute = AsyncMock(
+            side_effect=lambda order, **kw: self._result(
+                order, OrderStatus.PARTIALLY_FILLED, filled_quantity=partial_close_qty,
+                price=Decimal("50000"),
+            )
+        )
+
+        grid_after = await controller.on_price_tick(str(grid.id), Decimal("50000"))
+
+        level_1_after = next(lv for lv in grid_after.levels if lv.index == 1)
+        assert level_1_after.is_filled is True  # weiterhin offen, nur kleiner
+        assert level_1_after.quantity == full_qty - partial_close_qty
+        assert grid_after.net_position_qty == full_qty - partial_close_qty
+
+    async def test_full_partial_close_sequence_eventually_flattens_level(
+        self, controller: GridController, account
+    ) -> None:
+        """Zwei aufeinanderfolgende Partial-Closes, die zusammen die
+        volle Menge ergeben, muessen das Level am Ende korrekt schliessen
+        (is_filled=False, quantity=0)."""
+        from sgr.core.types import OrderStatus
+
+        grid_before = await self._open_grid_and_get_execution_double(controller, account)
+        full_qty = Decimal("50") / Decimal("49500")
+
+        controller._execution.execute = AsyncMock(
+            side_effect=lambda order, **kw: self._result(
+                order, OrderStatus.FILLED, filled_quantity=full_qty
+            )
+        )
+        grid = await controller.on_price_tick(str(grid_before.id), Decimal("49500"))
+        level_1 = next(lv for lv in grid.levels if lv.index == 1)
+        assert level_1.quantity == full_qty
+
+        half = full_qty / 2
+        controller._execution.execute = AsyncMock(
+            side_effect=lambda order, **kw: self._result(
+                order, OrderStatus.PARTIALLY_FILLED, filled_quantity=half, price=Decimal("50000")
+            )
+        )
+        grid = await controller.on_price_tick(str(grid_before.id), Decimal("50000"))
+        level_1 = next(lv for lv in grid.levels if lv.index == 1)
+        assert level_1.is_filled is True
+        assert level_1.quantity == full_qty - half
+
+        # Preis muss wieder unter 50000 UND dann wieder ueber 50000 laufen,
+        # damit _crossed() ein zweites Mal fuer dieselbe Cell ausloest -
+        # direkter zweiter _fill_level()-Aufruf simuliert das ohne den
+        # vollen Crossing-Zyklus nachzubilden (dieselbe Technik wie oben).
+        remaining = level_1.quantity
+        controller._execution.execute = AsyncMock(
+            side_effect=lambda order, **kw: self._result(
+                order, OrderStatus.FILLED, filled_quantity=remaining, price=Decimal("50000")
+            )
+        )
+        await controller._fill_level(grid, level_1, Decimal("50000"), opening=False)
+
+        level_1_final = next(lv for lv in grid.levels if lv.index == 1)
+        assert level_1_final.is_filled is False
+        assert level_1_final.quantity == Decimal("0")
 
 
 # ---------------------------------------------------------------------------
@@ -1332,3 +1445,119 @@ class TestRateLimiterIntegration:
         grid = await controller.on_price_tick(str(result.grid.id), Decimal("49500"))
 
         assert any(lv.is_filled for lv in grid.levels)
+
+
+# ---------------------------------------------------------------------------
+# Phase 8: Grid Mark-to-Market (unrealized PnL / Drawdown)
+# ---------------------------------------------------------------------------
+
+
+class TestGridMarkToMarket:
+    async def test_unrealized_pnl_zero_before_any_fill(
+        self, controller: GridController, account
+    ) -> None:
+        result = await controller.open_grid(
+            _decision(), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            current_price=Decimal("50000"),
+        )
+        assert result.grid.unrealized_pnl == Decimal("0")
+        assert result.grid.peak_value == Decimal("0")
+
+    async def test_long_grid_rising_price_after_fill_shows_positive_unrealized_pnl(
+        self, controller: GridController, account, adapter: MockExchangeAdapter
+    ) -> None:
+        result = await controller.open_grid(
+            _decision(GridDirection.LONG), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            current_price=Decimal("50000"),
+        )
+        # Level 1 (49500) oeffnen (Preisabfall).
+        adapter.ticker_price = Decimal("49500")
+        grid = await controller.on_price_tick(str(result.grid.id), Decimal("49500"))
+        assert grid.unrealized_pnl == Decimal("0")  # exakt am Entry-Preis noch 0
+
+        # Preis steigt (OHNE das Level zu schliessen, z.B. 49800 < exit 50000)
+        grid = await controller.on_price_tick(str(grid.id), Decimal("49800"))
+
+        assert grid.unrealized_pnl > Decimal("0")  # LONG: Preis gestiegen -> Gewinn
+
+    async def test_long_grid_falling_price_after_fill_shows_negative_unrealized_pnl(
+        self, controller: GridController, account, adapter: MockExchangeAdapter
+    ) -> None:
+        result = await controller.open_grid(
+            _decision(GridDirection.LONG), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            current_price=Decimal("50000"),
+        )
+        adapter.ticker_price = Decimal("49500")
+        grid = await controller.on_price_tick(str(result.grid.id), Decimal("49500"))
+
+        grid = await controller.on_price_tick(str(grid.id), Decimal("49100"))
+
+        assert grid.unrealized_pnl < Decimal("0")  # LONG: Preis weiter gefallen -> Verlust
+
+    async def test_short_grid_falling_price_after_fill_shows_positive_unrealized_pnl(
+        self, controller: GridController, account, adapter: MockExchangeAdapter
+    ) -> None:
+        """SHORT-Grid: Preisverfall NACH Entry ist ein Gewinn (gespiegelt zu LONG)."""
+        result = await controller.open_grid(
+            _decision(GridDirection.SHORT), _symbol(), "futures_grid_short_v1", account,
+            _snapshot(), current_price=Decimal("50000"),
+        )
+        # SHORT: Level oeffnet bei STEIGENDEM Preis (siehe on_price_tick()
+        # Cell-Modell, gespiegelt zu LONG).
+        adapter.ticker_price = Decimal("50500")
+        grid = await controller.on_price_tick(str(result.grid.id), Decimal("50500"))
+        assert any(lv.is_filled for lv in grid.levels)
+
+        grid = await controller.on_price_tick(str(grid.id), Decimal("50200"))
+
+        assert grid.unrealized_pnl > Decimal("0")  # SHORT: Preis gefallen -> Gewinn
+
+    async def test_peak_value_tracks_monotonic_maximum(
+        self, controller: GridController, account, adapter: MockExchangeAdapter
+    ) -> None:
+        result = await controller.open_grid(
+            _decision(GridDirection.LONG), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            current_price=Decimal("50000"),
+        )
+        adapter.ticker_price = Decimal("49500")
+        grid = await controller.on_price_tick(str(result.grid.id), Decimal("49500"))
+
+        grid = await controller.on_price_tick(str(grid.id), Decimal("49900"))
+        peak_after_rise = grid.peak_value
+        assert peak_after_rise > Decimal("0")
+
+        # Preis faellt wieder - peak_value darf NICHT sinken (monotones Maximum).
+        grid = await controller.on_price_tick(str(grid.id), Decimal("49300"))
+
+        assert grid.peak_value == peak_after_rise
+        assert grid.unrealized_pnl < Decimal("0")
+
+    async def test_unrealized_pnl_falls_to_zero_after_full_close(
+        self, controller: GridController, account, adapter: MockExchangeAdapter
+    ) -> None:
+        result = await controller.open_grid(
+            _decision(GridDirection.LONG), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            current_price=Decimal("50000"),
+        )
+        adapter.ticker_price = Decimal("49500")
+        grid = await controller.on_price_tick(str(result.grid.id), Decimal("49500"))
+
+        closed = await controller.close_grid(str(grid.id), "manual_test", Decimal("49900"))
+
+        assert closed.unrealized_pnl == Decimal("0")  # keine offene Exposure mehr
+        assert closed.realized_pnl != Decimal("0")  # dafuer realisiert
+
+    async def test_mark_to_market_restored_after_recovery(self, pool: ExchangePool) -> None:
+        """peak_value darf nach einem Neustart NICHT auf 0 zurueckfallen -
+        das wuerde die bisherige Drawdown-Historie verlieren."""
+        row = _grid_row(_G1, last_price="49800")
+        row["peak_value"] = Decimal("42")
+        row["realized_pnl"] = Decimal("10")
+        row["unrealized_pnl"] = Decimal("5")
+        repo = FakeGridRepo(open_grids=[row], fills_by_grid={})
+        controller = _controller_for_recovery(pool, repo)
+
+        restored = await controller.restore_from_persistence()
+
+        assert restored[0].peak_value == Decimal("42")
+        assert restored[0].unrealized_pnl == Decimal("5")

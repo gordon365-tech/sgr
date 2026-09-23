@@ -169,7 +169,7 @@ class GridController:
         liquidity_usd: Decimal | None = None,
         funding_rate_annualized_pct: float | None = None,
         volatility_atr_pct: float | None = None,
-        directional_exposure_usd: Decimal = Decimal("0"),
+        directional_exposure_usd: Decimal | None = None,
     ) -> GridOpenResult:
         if decision.direction == GridDirection.NEUTRAL or decision.parameters is None:
             return GridOpenResult(
@@ -513,8 +513,80 @@ class GridController:
                     await self._fill_level(grid, entry_state, exit_price, opening=False)
 
         grid.last_price = current_price
+        self._update_mark_to_market(grid, current_price)
         await self._persist(grid)
+        self._record_snapshot_metric(grid)
         return grid
+
+    def _update_mark_to_market(self, grid: GridState, current_price: Decimal) -> None:
+        """
+        Grid-Mark-to-Market (2026-09-24, Phase 8 - ersetzt die vorherigen
+        0.0-Platzhalter fuer unrealized_pnl/drawdown). Berechnet bei JEDEM
+        Preis-Tick (nicht nur bei einem Fill) neu, damit z.B. ein Preis,
+        der sich zwischen zwei Fills bewegt, sofort in der Beobachtbarkeit
+        sichtbar ist, nicht erst beim naechsten Fill.
+
+        Verwendet EXAKT dasselbe Entry-Preis/Menge-Modell wie realized_pnl
+        beim tatsaechlichen Level-Close (siehe _fill_level()) - kein neues
+        PnL-Konzept, nur ohne einen echten Exit: fuer jedes aktuell
+        gefuellte Level wird (current_price - level.price) * level.quantity
+        * side_factor aufsummiert.
+
+        peak_value ist ein monoton wachsendes Maximum von
+        (realized_pnl + unrealized_pnl) seit Grid-Eroeffnung - Drawdown
+        wird vom Aufrufer (record_futures_grid_extended_snapshot()) daraus
+        abgeleitet, nicht hier gespeichert (kein zweiter, redundanter
+        Zustand).
+        """
+        is_long = grid.direction == GridDirection.LONG
+        side_factor = Decimal("1") if is_long else Decimal("-1")
+        unrealized = Decimal("0")
+        for level in grid.levels:
+            if not level.is_filled or level.quantity <= 0:
+                continue
+            unrealized += (current_price - level.price) * level.quantity * side_factor
+
+        grid.unrealized_pnl = unrealized
+        total_value = grid.realized_pnl + unrealized
+        if total_value > grid.peak_value:
+            grid.peak_value = total_value
+
+    def _record_snapshot_metric(self, grid: GridState) -> None:
+        """Best-effort Metrik-Update (siehe record_futures_grid_extended_snapshot()
+        Docstring) - separat von _fill_level()'s try/except, damit ein
+        reiner Preis-Tick ohne Fill die Observability trotzdem aktuell
+        haelt (vorher wurden unrealized_pnl/drawdown nur bei einem
+        tatsaechlichen Fill aktualisiert)."""
+        try:
+            from sgr.monitoring.metrics import record_futures_grid_extended_snapshot
+
+            levels_active = sum(1 for lv in grid.levels if lv.is_filled)
+            levels_total = len(grid.levels)
+            closed_cycles = sum(lv.cycle_count for lv in grid.levels) - levels_active
+            avg_profit_per_cycle = (
+                float(grid.realized_pnl) / closed_cycles if closed_cycles > 0 else 0.0
+            )
+            total_value = grid.realized_pnl + grid.unrealized_pnl
+            drawdown_pct = (
+                float((grid.peak_value - total_value) / grid.peak_value)
+                if grid.peak_value > 0
+                else 0.0
+            )
+            record_futures_grid_extended_snapshot(
+                exchange=grid.exchange.value,
+                symbol=grid.symbol.ccxt_symbol,
+                strategy=grid.strategy_name,
+                direction=grid.direction.value,
+                trading_mode=grid.trading_mode.value,
+                levels_active=levels_active,
+                levels_total=levels_total,
+                unrealized_pnl_usd=float(grid.unrealized_pnl),
+                drawdown_pct=max(drawdown_pct, 0.0),
+                avg_profit_per_cycle_usd=avg_profit_per_cycle,
+                fees_usd=float(grid.fees_paid),
+            )
+        except Exception as e:
+            log.debug("grid_controller.snapshot_metric_failed", grid_id=str(grid.id), error=str(e))
 
     async def _fill_level(
         self,
@@ -526,37 +598,57 @@ class GridController:
         fill_type: str = GRID_FILL_TYPE_LEVEL_CROSS,
     ) -> None:
         """
-        All-or-Nothing-Fill-Semantik (Phase P, 2026-09-23, explizite
-        Anweisung: "AON sauber als explizite Grid-Limitation kapseln"):
-        ein Level-Fill wird IMMER vollstaendig oder gar nicht verarbeitet.
-        `GridLevelState.quantity` ist ein einzelner Decimal-Wert (kein
-        "teilweise gefuellt, Rest ausstehend"-Zustand modelliert) - jede
-        Order, deren OrderResult.status NICHT exakt FILLED ist (siehe
-        Check unten, insbesondere PARTIALLY_FILLED), fuehrt zu einem
-        VOLLSTAENDIGEN No-Op: kein Level-Zustand, kein net_position_qty,
-        kein Fill-Ledger-Eintrag, KEIN Teilzustand wird geschrieben. Diese
-        Entscheidung gilt konsistent ueber alle Schichten:
-            - Risk (GridRiskEngine): rechnet ausschliesslich mit der vollen
-              parameters.position_size pro Level, keine Teilmengen.
-            - Recovery (restore_from_persistence()): der Fill-Ledger
-              enthaelt ausschliesslich vollstaendige Fills (siehe oben -
-              ein PARTIALLY_FILLED-Ergebnis erzeugt gar keinen
-              Ledger-Eintrag), Replay kennt daher strukturell keine
-              Teil-Fills.
-            - Accounting (grid.net_position_qty/realized_pnl): wird
-              ausschliesslich bei einem vollstaendigen Fill aktualisiert.
-            - Backtest (GridBacktestSimulator): simuliert ebenfalls
-              All-or-Nothing pro Level (dokumentierte Vereinfachung, siehe
-              dortigen Docstring - keine partiellen Cell-Fills).
-            - Paper (CCXTBaseAdapter._simulate_order()): liefert fuer
-              MARKET-Orders strukturell immer FILLED oder einen Fehler,
-              nie PARTIALLY_FILLED - Paper kann diesen Zustand aktuell gar
-              nicht erzeugen.
-        Ein echtes Partial-Fill-Handling wuerde eine grundlegend andere
-        GridLevelState-Modellierung erfordern (verbleibende Restmenge pro
-        Level, mehrere Teil-Orders pro Level-Zyklus) - bewusst NICHT in
-        diesem Schritt eingefuehrt, um keinen Zustand vorzutaeuschen, den
-        Risk/Recovery/Accounting/Backtest nicht konsistent verstehen.
+        Fill-Semantik (Phase 7, 2026-09-24, Revision der vorherigen "AON"-
+        Einordnung nach kritischer Pruefung: MARKET-Orders auf Binance
+        Futures KOENNEN in der Realitaet (duennes Orderbuch, extreme
+        Volatilitaet) mit status=PARTIALLY_FILLED zurueckkommen - siehe
+        ExecutionEngine._monitor_fill(): dessen Poll-Loop bricht NUR bei
+        FILLED/CANCELLED/REJECTED, ein dauerhaft PARTIALLY_FILLED-Zustand
+        laeuft in den Timeout, die Restmenge wird auf der Exchange
+        storniert, aber der bereits gefuellte Teil bleibt real auf dem
+        Account offen. Die vorherige Behandlung ("alles ausser FILLED ist
+        ein kompletter No-Op") haette genau diesen real gefuellten Teil
+        SGR-seitig verloren - ein echter, live-relevanter Bug, kein
+        theoretisches Risiko.
+
+        Neue Regel: JEDER Fill mit result.filled_quantity > 0 wird mit der
+        TATSAECHLICH gefuellten Menge verarbeitet (result.filled_quantity),
+        NICHT mit der urspruenglich beabsichtigten qty. Nur ein Ergebnis
+        mit filled_quantity == 0 (REJECTED/CANCELLED ohne jeden Fill) bleibt
+        ein vollstaendiger No-Op. Dies ist KEIN Aufbau einer zweiten
+        Orderpfad-Architektur (weiterhin ausschliesslich MARKET-Orders bei
+        erkanntem Crossing, siehe Modul-Docstring) - nur eine korrekte
+        Behandlung eines bereits moeglichen Exchange-Antwortzustands
+        innerhalb desselben Pfads:
+
+            - Opening: level.quantity = tatsaechlich gefuellte Menge (kann
+              kleiner als das urspruengliche position_size-Ziel sein).
+              level.is_filled=True auch bei einem Partial-Open - die
+              Restmenge des urspruenglichen Ziels wird NICHT nachbestellt
+              (kein automatisches Nachfassen, das waere ein neuer,
+              spekulativer Order-Pfad) - das Level haelt schlicht eine
+              kleinere Position als geplant, bis es beim naechsten
+              Crossing wieder schliesst.
+            - Closing: reduziert level.quantity um die tatsaechlich
+              geschlossene Menge. Bleibt eine Restmenge > 0, bleibt
+              is_filled=True (Level ist weiterhin, nur kleiner, offen) -
+              realized_pnl wird NUR fuer den tatsaechlich geschlossenen
+              Anteil gebucht, nicht fuer die urspruenglich beabsichtigte
+              Gesamtmenge.
+            - Ledger/Recovery: record_level_fill() persistiert die
+              TATSAECHLICHE Menge - Ledger-Replay (restore_from_persistence())
+              rekonstruiert dadurch automatisch korrekt, auch nach einem
+              Partial Fill, ohne eigene Sonderlogik dort.
+            - Backtest (GridBacktestSimulator): bleibt bewusst bei der
+              All-or-Nothing-Vereinfachung pro Bar (dokumentiert dort) -
+              Bar-Aufloesung kann einen echten Tick-Level-Partial-Fill
+              ohnehin nicht abbilden; das ist eine separate, bereits
+              dokumentierte Backtest-Grenze, keine Inkonsistenz zum
+              Live-Pfad.
+            - Paper (CCXTBaseAdapter._simulate_order()): erzeugt weiterhin
+              nie PARTIALLY_FILLED (liefert MARKET-Orders immer sofort
+              vollstaendig oder einen Fehler) - Paper kann diesen Pfad
+              nicht ausloesen, LIVE kann es.
         """
         is_long = grid.direction == GridDirection.LONG
 
@@ -626,7 +718,10 @@ class GridController:
                 return
 
         result = await self._execution.execute(order)
-        if result.status != OrderStatus.FILLED:
+        actual_qty = result.filled_quantity
+        is_partial = result.status == OrderStatus.PARTIALLY_FILLED
+        fill_ok = result.status in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED)
+        if not fill_ok or actual_qty <= 0:
             log.warning(
                 "grid_controller.level_fill_rejected",
                 grid_id=str(grid.id),
@@ -634,6 +729,14 @@ class GridController:
                 status=result.status.value,
             )
             return
+        if is_partial:
+            log.warning(
+                "grid_controller.level_partial_fill",
+                grid_id=str(grid.id),
+                level_index=level.index,
+                requested_qty=str(qty),
+                filled_qty=str(actual_qty),
+            )
 
         now = datetime.now(tz=UTC)
 
@@ -653,7 +756,7 @@ class GridController:
                     level_index=level.index,
                     price=current_price,
                     side=side.value,
-                    quantity=qty,
+                    quantity=actual_qty,
                     is_opening=opening,
                     filled_at=now,
                     order_id=str(order.id),
@@ -667,28 +770,39 @@ class GridController:
                     error=str(e),
                 )
 
-        level.is_filled = opening
         level.last_order_id = result.exchange_order_id
         level.last_filled_at = now
-        if opening:
-            level.cycle_count += 1
-            level.quantity = qty
         grid.fills_count += 1
         grid.fees_paid += result.fees
 
         if opening:
-            grid.net_position_qty += qty if is_long else -qty
+            # is_filled=True auch bei Partial-Open (siehe Docstring) - das
+            # Level haelt jetzt real actual_qty, nicht zwingend die
+            # urspruenglich geplante qty.
+            level.is_filled = True
+            level.cycle_count += 1
+            level.quantity = actual_qty
+            grid.net_position_qty += actual_qty if is_long else -actual_qty
         else:
-            grid.net_position_qty -= qty if is_long else -qty
-            # Grid Capture PnL fuer diesen abgeschlossenen Zyklus - qty ist
-            # hier die beim Oeffnen gefuellte Menge (siehe oben), nicht
-            # neu am Exit-Preis berechnet.
+            # Schliessen: reduziert die gehaltene Menge um genau das, was
+            # TATSAECHLICH geschlossen wurde. Bleibt ein Rest > 0 (Partial
+            # Close), bleibt das Level offen (is_filled=True) - kein
+            # Nachbestellen, kein zweiter Orderpfad, das naechste Crossing
+            # behandelt den Rest ganz normal.
+            grid.net_position_qty -= actual_qty if is_long else -actual_qty
             entry_price = level.price
             exit_price = current_price
             side_factor = Decimal("1") if is_long else Decimal("-1")
-            cycle_pnl = (exit_price - entry_price) * qty * side_factor - result.fees
+            cycle_pnl = (exit_price - entry_price) * actual_qty * side_factor - result.fees
             grid.realized_pnl += cycle_pnl
-            level.quantity = Decimal("0")
+
+            remaining_qty = level.quantity - actual_qty
+            if remaining_qty <= Decimal("0.00000001"):
+                level.is_filled = False
+                level.quantity = Decimal("0")
+            else:
+                level.is_filled = True
+                level.quantity = remaining_qty
 
         # Sofortiger Persist NACH JEDEM einzelnen Fill (Phase B/C-Fix,
         # 2026-09-23): vorher wurde grid.levels erst am ENDE von
@@ -707,15 +821,18 @@ class GridController:
             level_index=level.index,
             opening=opening,
             price=str(current_price),
-            qty=str(qty),
+            qty=str(actual_qty),
+            partial=is_partial,
             fill_type=fill_type,
         )
 
+        # Mark-to-Market NACH jeder Zustandsaenderung neu berechnen (Phase 8)
+        # - current_price ist hier der tatsaechliche Fill-Preis, eine
+        # bessere Momentaufnahme als der vorherige grid.last_price.
+        self._update_mark_to_market(grid, current_price)
+
         try:
-            from sgr.monitoring.metrics import (
-                record_futures_grid_extended_snapshot,
-                record_futures_grid_fill,
-            )
+            from sgr.monitoring.metrics import record_futures_grid_fill
 
             record_futures_grid_fill(
                 exchange=grid.exchange.value,
@@ -732,27 +849,7 @@ class GridController:
                     strategy=grid.strategy_name,
                     direction=grid.direction.value,
                 )
-            levels_active = sum(1 for lv in grid.levels if lv.is_filled)
-            levels_total = len(grid.levels)
-            closed_cycles = sum(lv.cycle_count for lv in grid.levels) - levels_active
-            avg_profit_per_cycle = (
-                float(grid.realized_pnl) / closed_cycles if closed_cycles > 0 else 0.0
-            )
-            record_futures_grid_extended_snapshot(
-                exchange=grid.exchange.value,
-                symbol=grid.symbol.ccxt_symbol,
-                strategy=grid.strategy_name,
-                direction=grid.direction.value,
-                trading_mode=grid.trading_mode.value,
-                levels_active=levels_active,
-                levels_total=levels_total,
-                # unrealized_pnl_usd/drawdown_pct: kein Mark-to-Market-Preis bzw. keine
-                # Peak-Value-Historie fuer Grids gefuehrt (siehe Abschlussbericht).
-                unrealized_pnl_usd=0.0,
-                drawdown_pct=0.0,
-                avg_profit_per_cycle_usd=avg_profit_per_cycle,
-                fees_usd=float(grid.fees_paid),
-            )
+            self._record_snapshot_metric(grid)
         except Exception as e:
             log.debug("grid_controller.fill_metric_failed", error=str(e))
             try:
@@ -785,7 +882,11 @@ class GridController:
         grid.status = GridStatus.CLOSED
         grid.closed_at = datetime.now(tz=UTC)
         grid.close_reason = reason
+        # Nach vollstaendigem Close ist die Exposure per Definition 0 -
+        # unrealized_pnl faellt korrekt auf 0 (keine gefuellten Level mehr).
+        self._update_mark_to_market(grid, current_price)
         await self._persist(grid)
+        self._record_snapshot_metric(grid)
 
         log.info(
             "grid_controller.grid_closed",
@@ -1051,6 +1152,16 @@ class GridController:
             levels=levels,
             net_position_qty=Decimal(str(row.get("net_position_qty") or "0")),
             realized_pnl=Decimal(str(row.get("realized_pnl") or "0")),
+            # unrealized_pnl wird sofort beim naechsten on_price_tick()
+            # neu berechnet (siehe _update_mark_to_market()) - hier trotzdem
+            # aus der Zeile uebernommen statt hart auf 0 gesetzt, damit ein
+            # Metrik-Read UNMITTELBAR nach Recovery (vor dem ersten Tick)
+            # nicht faelschlich 0 zeigt. peak_value MUSS aus der Zeile
+            # uebernommen werden - sonst verliert ein Neustart die bisherige
+            # Drawdown-Historie (ein monoton wachsendes Maximum wuerde sonst
+            # faelschlich auf 0 zurueckfallen).
+            unrealized_pnl=Decimal(str(row.get("unrealized_pnl") or "0")),
+            peak_value=Decimal(str(row.get("peak_value") or "0")),
             fees_paid=Decimal(str(row.get("fees_paid") or "0")),
             funding_paid=Decimal(str(row.get("funding_paid") or "0")),
             fills_count=int(row.get("fills_count") or 0),

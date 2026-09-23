@@ -501,3 +501,50 @@ class TestRangeBreakoutProtection:
         violations = engine.check_ongoing_grid(grid, current_price=Decimal("999999"))
 
         assert not any(v.code == "range_breakout" for v in violations)
+
+
+# ---------------------------------------------------------------------------
+# Phase 9: Fail-Closed bei unbestimmbarer direktionaler Exposure
+# ---------------------------------------------------------------------------
+
+
+class TestCombinedExposureFailClosed:
+    def test_none_exposure_with_limit_configured_is_rejected(self) -> None:
+        """max_combined_exposure_usd konfiguriert, aber
+        directional_exposure_usd=None (nicht bestimmbar) - MUSS ablehnen,
+        darf NICHT stillschweigend 0 annehmen."""
+        limits = GridRiskLimitsConfig(max_combined_exposure_usd=Decimal("10000"))
+        engine = GridRiskEngine(limits)
+
+        result = engine.evaluate_new_grid(
+            _params(), _snapshot(), current_price=Decimal("100"),
+            directional_exposure_usd=None,
+        )
+
+        assert result.approved is False
+        assert "fail-closed" in (result.reason or "").lower()
+
+    def test_none_exposure_without_limit_configured_has_no_effect(self) -> None:
+        """Ohne konfiguriertes Limit (Default) ist directional_exposure_usd
+        irrelevant - None ist dann kein Problem."""
+        engine = GridRiskEngine()  # max_combined_exposure_usd default None
+
+        result = engine.evaluate_new_grid(
+            _params(), _snapshot(), current_price=Decimal("100"),
+            directional_exposure_usd=None,
+        )
+
+        assert result.approved is True
+
+    def test_explicit_zero_exposure_is_accepted_as_a_real_value(self) -> None:
+        """Decimal(0) ist ein GUELTIGER, bestaetigter Wert (echte Null-
+        Exposure) - nur None (unbekannt) loest fail-closed aus."""
+        limits = GridRiskLimitsConfig(max_combined_exposure_usd=Decimal("10000"))
+        engine = GridRiskEngine(limits)
+
+        result = engine.evaluate_new_grid(
+            _params(), _snapshot(), current_price=Decimal("100"),
+            directional_exposure_usd=Decimal("0"),
+        )
+
+        assert result.approved is True

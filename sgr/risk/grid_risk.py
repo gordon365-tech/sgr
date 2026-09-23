@@ -132,7 +132,7 @@ class GridRiskEngine:
         liquidity_usd: Decimal | None = None,
         funding_rate_annualized_pct: float | None = None,
         volatility_atr_pct: float | None = None,
-        directional_exposure_usd: Decimal = Decimal("0"),
+        directional_exposure_usd: Decimal | None = None,
     ) -> GridRiskAssessment:
         """
         Prueft, ob ein neues Grid mit `parameters` eroeffnet werden darf.
@@ -140,13 +140,18 @@ class GridRiskEngine:
         sgr/execution/quantization.py Prinzip) - lehnt stattdessen ab und
         schlaegt im Warnungs-Text eine sicherere Alternative vor.
 
-        directional_exposure_usd (Phase L, 2026-09-23): aktuelle
-        Notional-Exposure der DIREKTIONALEN Strategien desselben Tenants
-        (aus PortfolioEngine, siehe GridScheduler-Aufrufstelle) - fliesst
-        NUR in Check 5b (max_combined_exposure_usd) ein, wenn dieses
-        Limit ueberhaupt konfiguriert ist (Default None = deaktiviert).
-        Default Decimal("0") = unveraendertes Verhalten fuer jeden
-        Aufrufer, der diesen Parameter nicht setzt.
+        directional_exposure_usd (Phase 9, 2026-09-24, revidiert nach
+        kritischer Pruefung): aktuelle Notional-Exposure der DIREKTIONALEN
+        Strategien desselben Tenants (aus PortfolioEngine, siehe
+        GridScheduler._directional_exposure_usd()). None (Default) bedeutet
+        AUSDRUECKLICH "nicht zuverlaessig bestimmbar", NICHT "Exposure ist
+        0" - ein frueherer Default von Decimal("0") haette bei aktiviertem
+        max_combined_exposure_usd faelschlich einen sicheren Zustand
+        vorgetaeuscht (Fail-Open-Bug), obwohl die tatsaechliche Exposure
+        schlicht unbekannt war. Siehe Check 5b unten: nur relevant, wenn
+        max_combined_exposure_usd ueberhaupt konfiguriert ist (Default
+        None = Feature deaktiviert, dieser Parameter hat dann keinen
+        Effekt).
         """
         try:
             return self._evaluate_internal(
@@ -170,7 +175,7 @@ class GridRiskEngine:
         liquidity_usd: Decimal | None,
         funding_rate_annualized_pct: float | None,
         volatility_atr_pct: float | None,
-        directional_exposure_usd: Decimal = Decimal("0"),
+        directional_exposure_usd: Decimal | None = None,
     ) -> GridRiskAssessment:
         warnings: list[str] = []
 
@@ -234,10 +239,23 @@ class GridRiskEngine:
             )
 
         # 5b. Kombinierte Kapital-Obergrenze ueber Grid- UND direktionale
-        # Exposure (Phase L) - nur aktiv, wenn max_combined_exposure_usd
+        # Exposure (Phase 9) - nur aktiv, wenn max_combined_exposure_usd
         # konfiguriert ist (opt-in, siehe Feld-Docstring). Notional-
-        # basiert, keine pauschale Zaehl-Addition.
+        # basiert, keine pauschale Zaehl-Addition. FAIL-CLOSED: wenn das
+        # Limit konfiguriert ist, aber die direktionale Exposure nicht
+        # zuverlaessig bestimmbar war (directional_exposure_usd is None),
+        # wird abgelehnt - niemals stillschweigend als 0 angenommen (siehe
+        # evaluate_new_grid() Docstring).
         if self._limits.max_combined_exposure_usd is not None:
+            if directional_exposure_usd is None:
+                return GridRiskAssessment(
+                    approved=False,
+                    reason=(
+                        "max_combined_exposure_usd ist konfiguriert, aber die direktionale "
+                        "Exposure konnte nicht zuverlaessig bestimmt werden (kein "
+                        "PortfolioEngine-Zugriff im Aufrufer) - fail-closed, kein Default 0"
+                    ),
+                )
             combined_exposure = total_exposure + directional_exposure_usd
             if combined_exposure > self._limits.max_combined_exposure_usd:
                 return GridRiskAssessment(

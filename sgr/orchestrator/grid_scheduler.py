@@ -82,6 +82,7 @@ class GridScheduler:
         tenant_id: str | None = None,
         account_eligibility_provider: Any = None,
         enabled: bool | None = None,
+        portfolio_engine: Any = None,
     ) -> None:
         self._grid_controller = grid_controller
         self._feature_store = feature_store
@@ -92,10 +93,36 @@ class GridScheduler:
             enabled if enabled is not None else os.environ.get(_ENV_FLAG, "").lower() == "true"
         )
         self._open_grid_keys: set[str] = set()
+        # Phase 9 (2026-09-24): optional, additiv - None (Default) fuehrt
+        # dazu, dass _directional_exposure_usd() None liefert ("nicht
+        # bestimmbar"), was GridRiskEngine bei aktiviertem
+        # max_combined_exposure_usd fail-closed ablehnt (siehe dortigen
+        # Docstring) - kein stiller Fallback auf 0.
+        self._portfolio_engine = portfolio_engine
 
     @property
     def enabled(self) -> bool:
         return self._enabled
+
+    def _directional_exposure_usd(self) -> Any:
+        """
+        Summe der absoluten Notional-Exposure aller aktuell offenen
+        direktionalen Positionen dieses Tenants (PortfolioEngine.positions,
+        siehe Position.notional_value). None = nicht bestimmbar (kein
+        portfolio_engine injiziert, oder ein Fehler beim Zugriff) - wird
+        vom Aufrufer NIEMALS als 0 interpretiert (siehe GridRiskEngine.
+        evaluate_new_grid() Docstring, fail-closed).
+        """
+        from decimal import Decimal
+
+        if self._portfolio_engine is None:
+            return None
+        try:
+            positions = list(self._portfolio_engine.positions)
+        except Exception as e:
+            log.warning("grid_scheduler.directional_exposure_lookup_failed", error=str(e))
+            return None
+        return sum((abs(p.notional_value) for p in positions), Decimal("0"))
 
     async def on_candle_event(self, event: Any) -> None:
         if not self._enabled:
@@ -173,7 +200,13 @@ class GridScheduler:
                 portfolio_value=Decimal("0"),
             )
             result = await self._grid_controller.open_grid(
-                decision, symbol, strategy.name, account, snapshot, candle.close
+                decision,
+                symbol,
+                strategy.name,
+                account,
+                snapshot,
+                candle.close,
+                directional_exposure_usd=self._directional_exposure_usd(),
             )
             if result.approved:
                 self._open_grid_keys.add(open_key)

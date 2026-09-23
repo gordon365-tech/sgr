@@ -174,6 +174,18 @@ class GridState(BaseModel):
 
     net_position_qty: Decimal = Decimal("0")  # aktuelle Netto-Exposure aus diesem Grid
     realized_pnl: Decimal = Decimal("0")  # Summe abgeschlossener Grid-Zyklen (Grid Capture)
+    # Mark-to-Market (2026-09-24, ersetzt vorherige 0.0-Platzhalter in
+    # record_futures_grid_extended_snapshot()): unrealized_pnl wird bei
+    # JEDEM Preis-Tick neu berechnet (siehe GridController.
+    # _update_mark_to_market()) aus den aktuell gefuellten Leveln -
+    # dasselbe Entry-Preis/Menge-Modell wie realized_pnl beim Close,
+    # nur ohne tatsaechlichen Exit. peak_value ist der bisher hoechste
+    # beobachtete Gesamtwert (realized_pnl + unrealized_pnl) seit
+    # Grid-Eroeffnung - persistiert (nicht nur In-Memory), damit ein
+    # Neustart die bisherige Drawdown-Historie nicht verliert (siehe
+    # Migration 0010).
+    unrealized_pnl: Decimal = Decimal("0")
+    peak_value: Decimal = Decimal("0")
     fees_paid: Decimal = Decimal("0")
     funding_paid: Decimal = Decimal("0")
     fills_count: int = 0

@@ -708,6 +708,13 @@ async def lifespan(app: FastAPI, role: LifespanRole = "worker") -> AsyncIterator
             feature_store,
             config.trading_mode,
             tenant_id=config.tenant_id,
+            # Phase 9: reale direktionale Exposure fuer die kombinierte
+            # Grid+Direktional-Exposure-Grenze (siehe GridRiskEngine.
+            # evaluate_new_grid()) - ohne diese Injektion wuerde
+            # max_combined_exposure_usd (falls je konfiguriert) fail-closed
+            # jedes Grid ablehnen, statt faelschlich 0 direktionale
+            # Exposure anzunehmen.
+            portfolio_engine=portfolio_engine,
         )
         app.state.grid_scheduler = grid_scheduler
         if grid_scheduler.enabled:
