@@ -720,6 +720,133 @@ class TestHedgeModeCompatibility:
 
         assert result.approved is True
 
+    async def test_live_mismatched_margin_mode_rejects_grid_open(
+        self,
+        pool: ExchangePool,
+        compliance: ComplianceEngine,
+        account,
+        adapter: MockExchangeAdapter,
+    ) -> None:
+        """Root-Cause-Fund (Live-Verification-Anweisung, Grid-Checkliste
+        'Margin Mode'): _params() (Modul-Helper) konfiguriert kein
+        explizites margin_mode -> Default ISOLATED (siehe
+        FuturesGridParameters). Ein Account, der tatsaechlich auf CROSS
+        steht, muss den Grid-Open ablehnen statt den Unterschied zu
+        ignorieren."""
+        from sgr.core.types import MarginMode
+        from sgr.exchanges.base import PositionModeInfo
+
+        async def one_way_mode() -> PositionModeInfo:
+            from datetime import UTC, datetime as dt
+
+            return PositionModeInfo(
+                exchange_id=ExchangeID.BINANCE, hedged=False, fetched_at=dt.now(tz=UTC)
+            )
+
+        async def cross_margin_mode(symbol: str) -> MarginMode:
+            return MarginMode.CROSS
+
+        adapter.get_position_mode = one_way_mode  # type: ignore[method-assign]
+        adapter.get_margin_mode = cross_margin_mode  # type: ignore[method-assign]
+        pool._adapters[(ExchangeID.BINANCE, TradingMode.LIVE)] = adapter
+        engine = ExecutionEngine(pool, TradingMode.LIVE)
+        controller = GridController(
+            engine,
+            TradingMode.LIVE,
+            tenant_id="gordon",
+            compliance_engine=compliance,
+            exchange_pool=pool,
+        )
+
+        result = await controller.open_grid(
+            _decision(), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            current_price=Decimal("50000"),
+        )
+
+        assert result.approved is False
+        assert result.compliance_status == "margin_mode_mismatch"
+
+    async def test_live_matching_margin_mode_allows_grid_open(
+        self,
+        pool: ExchangePool,
+        compliance: ComplianceEngine,
+        account,
+        adapter: MockExchangeAdapter,
+    ) -> None:
+        from sgr.core.types import MarginMode
+        from sgr.exchanges.base import PositionModeInfo
+
+        async def one_way_mode() -> PositionModeInfo:
+            from datetime import UTC, datetime as dt
+
+            return PositionModeInfo(
+                exchange_id=ExchangeID.BINANCE, hedged=False, fetched_at=dt.now(tz=UTC)
+            )
+
+        async def isolated_margin_mode(symbol: str) -> MarginMode:
+            return MarginMode.ISOLATED  # matches FuturesGridParameters default
+
+        adapter.get_position_mode = one_way_mode  # type: ignore[method-assign]
+        adapter.get_margin_mode = isolated_margin_mode  # type: ignore[method-assign]
+        pool._adapters[(ExchangeID.BINANCE, TradingMode.LIVE)] = adapter
+        engine = ExecutionEngine(pool, TradingMode.LIVE)
+        controller = GridController(
+            engine,
+            TradingMode.LIVE,
+            tenant_id="gordon",
+            compliance_engine=compliance,
+            exchange_pool=pool,
+        )
+
+        result = await controller.open_grid(
+            _decision(), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            current_price=Decimal("50000"),
+        )
+
+        assert result.approved is True
+
+    async def test_live_margin_mode_check_error_fails_open(
+        self,
+        pool: ExchangePool,
+        compliance: ComplianceEngine,
+        account,
+        adapter: MockExchangeAdapter,
+    ) -> None:
+        """Analoge Begruendung zum Hedge-Mode-Fail-Open: ein Lesefehler
+        (z.B. NotSupportedFeatureError bei Pionex) darf das Grid nicht
+        blockieren - der eigentliche Schutz ist der explizite Mismatch-
+        Fall oben, nicht die Abwesenheit einer Antwort."""
+        from sgr.exchanges.base import NotSupportedFeatureError, PositionModeInfo
+
+        async def one_way_mode() -> PositionModeInfo:
+            from datetime import UTC, datetime as dt
+
+            return PositionModeInfo(
+                exchange_id=ExchangeID.BINANCE, hedged=False, fetched_at=dt.now(tz=UTC)
+            )
+
+        async def unsupported_margin_mode(symbol: str):
+            raise NotSupportedFeatureError(ExchangeID.BINANCE.value, "fetchMarginMode")
+
+        adapter.get_position_mode = one_way_mode  # type: ignore[method-assign]
+        adapter.get_margin_mode = unsupported_margin_mode  # type: ignore[method-assign]
+        pool._adapters[(ExchangeID.BINANCE, TradingMode.LIVE)] = adapter
+        engine = ExecutionEngine(pool, TradingMode.LIVE)
+        controller = GridController(
+            engine,
+            TradingMode.LIVE,
+            tenant_id="gordon",
+            compliance_engine=compliance,
+            exchange_pool=pool,
+        )
+
+        result = await controller.open_grid(
+            _decision(), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            current_price=Decimal("50000"),
+        )
+
+        assert result.approved is True
+
     async def test_paper_mode_skips_hedge_check(
         self, controller: GridController, account
     ) -> None:

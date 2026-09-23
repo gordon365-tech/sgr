@@ -775,6 +775,79 @@ class TestAccount:
         with pytest.raises(Exception):  # noqa: B017
             await adapter.get_position_mode()
 
+    async def test_get_margin_mode_returns_cross(self, adapter, monkeypatch):
+        from sgr.core.types import MarginMode
+
+        fake = FakeCCXTExchange()
+        fake.has = {"fetchMarginMode": True}
+        fake.fetch_margin_mode = AsyncMock(return_value={"marginMode": "cross"})
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+        mode = await adapter.get_margin_mode("BTC/USDT")
+        assert mode == MarginMode.CROSS
+
+    async def test_get_margin_mode_returns_isolated(self, adapter, monkeypatch):
+        from sgr.core.types import MarginMode
+
+        fake = FakeCCXTExchange()
+        fake.has = {"fetchMarginMode": True}
+        fake.fetch_margin_mode = AsyncMock(return_value={"marginMode": "isolated"})
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+        mode = await adapter.get_margin_mode("BTC/USDT")
+        assert mode == MarginMode.ISOLATED
+
+    async def test_get_margin_mode_not_supported_raises(self, adapter, monkeypatch):
+        fake = FakeCCXTExchange()
+        fake.has = {"fetchMarginMode": False}
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+        with pytest.raises(NotSupportedFeatureError):
+            await adapter.get_margin_mode("BTC/USDT")
+
+    async def test_get_margin_mode_unknown_value_raises(self, adapter, monkeypatch):
+        from sgr.exchanges.base import ExchangeError
+
+        fake = FakeCCXTExchange()
+        fake.has = {"fetchMarginMode": True}
+        fake.fetch_margin_mode = AsyncMock(return_value={"marginMode": "something_weird"})
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+        with pytest.raises(ExchangeError):
+            await adapter.get_margin_mode("BTC/USDT")
+
+    async def test_set_margin_mode_calls_ccxt_with_correct_args(self, adapter, monkeypatch):
+        from sgr.core.types import MarginMode
+
+        fake = FakeCCXTExchange()
+        fake.has = {"setMarginMode": True}
+        fake.set_margin_mode = AsyncMock(return_value={})
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+        await adapter.set_margin_mode("BTC/USDT", MarginMode.ISOLATED)
+        fake.set_margin_mode.assert_awaited_once_with("isolated", "BTC/USDT")
+
+    async def test_set_margin_mode_not_supported_raises(self, adapter, monkeypatch):
+        from sgr.core.types import MarginMode
+
+        fake = FakeCCXTExchange()
+        fake.has = {"setMarginMode": False}
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+        with pytest.raises(NotSupportedFeatureError):
+            await adapter.set_margin_mode("BTC/USDT", MarginMode.CROSS)
+
+    async def test_set_margin_mode_maps_exchange_rejection(self, adapter, monkeypatch):
+        from sgr.core.types import MarginMode
+
+        fake = FakeCCXTExchange()
+        fake.has = {"setMarginMode": True}
+        fake.set_margin_mode = AsyncMock(side_effect=ccxt.NetworkError("x"))
+        install_fake_ccxt(monkeypatch, fake)
+        await adapter.connect()
+        with pytest.raises(ExchangeConnectionError):
+            await adapter.set_margin_mode("BTC/USDT", MarginMode.CROSS)
+
 
 # ---------------------------------------------------------------------
 # Order Management

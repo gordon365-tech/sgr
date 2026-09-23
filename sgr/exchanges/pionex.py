@@ -123,6 +123,7 @@ from sgr.core.types import (
     Candle,
     ExchangeID,
     FundingRate,
+    MarginMode,
     OrderBook,
     OrderBookLevel,
     OrderRequest,
@@ -872,6 +873,44 @@ class PionexAdapter(CCXTBaseAdapter):
             )
         except Exception as e:
             raise self._map_pionex_error(e) from e
+
+    async def get_margin_mode(self, symbol: str) -> MarginMode:
+        """
+        Protocol-Standardmethode (siehe base.py) - delegiert an die
+        bereits vorhandene, echte get_futures_margin_mode() (Aufgabe-
+        stellung Punkt 9, GET /uapi/v1/trade/isolatedMode). Wandelt den
+        rohen "CROSS"/"ISOLATED"-String in MarginMode um.
+        """
+        if not self._native_fallback:
+            return await super().get_margin_mode(symbol)
+        raw = await self.get_futures_margin_mode(symbol)
+        raw_upper = raw.upper()
+        if raw_upper == "CROSS" or raw_upper == "CROSSED":
+            return MarginMode.CROSS
+        if raw_upper == "ISOLATED":
+            return MarginMode.ISOLATED
+        raise ExchangeError(self.exchange_id.value, f"Unbekannter Margin-Modus: {raw!r}")
+
+    async def set_margin_mode(self, symbol: str, mode: MarginMode) -> None:
+        """
+        Kein verifizierter Set-Endpunkt fuer Pionex in dieser Codebase
+        vorhanden - get_futures_margin_mode() (GET /uapi/v1/trade/
+        isolatedMode) ist ausschliesslich lesend, kein entsprechender
+        POST/PUT-Endpunkt wurde je gegen die echte Pionex-API verifiziert.
+        Explizit AdapterFeatureNotImplementedError statt eines geratenen
+        Endpunkt-Pfads (siehe Aufgabenstellung: 'Wenn API-Verhalten
+        unklar ist: NICHT RATEN').
+        """
+        raise AdapterFeatureNotImplementedError(
+            self.exchange_id.value,
+            "set_margin_mode",
+            detail=(
+                "No verified set-margin-mode endpoint exists in this codebase for "
+                "Pionex - only the read-only get_futures_margin_mode() was verified "
+                "against the real API. Change margin mode manually via the Pionex "
+                "UI/API directly, then verify with get_margin_mode()."
+            ),
+        )
 
     async def get_positions(self) -> list[Position]:
         """

@@ -47,6 +47,7 @@ from sgr.core.types import (
     Candle,
     ExchangeID,
     FundingRate,
+    MarginMode,
     OrderBook,
     OrderBookLevel,
     OrderRequest,
@@ -663,6 +664,52 @@ class CCXTBaseAdapter:
                 exchange=self.exchange_id.value,
                 symbol=symbol,
                 leverage=str(leverage),
+                trading_mode=self.trading_mode.value,
+            )
+        except ExchangeError:
+            raise
+        except Exception as e:
+            raise self._map_error(e) from e
+
+    async def get_margin_mode(self, symbol: str) -> MarginMode:
+        """
+        Liest den tatsaechlichen Margin-Modus via ccxt's vereinheitlichtem
+        fetch_margin_mode() (z.B. Binance GET /fapi/v1/symbolConfig).
+        Kein Cache - analog zu get_position_mode()/get_market_status().
+        """
+        self._require_connected()
+        self._require_feature("fetchMarginMode")
+        try:
+            raw = await self._ccxt.fetch_margin_mode(symbol)
+            raw_mode = str(raw.get("marginMode", "")).lower()
+            if raw_mode == "cross":
+                return MarginMode.CROSS
+            if raw_mode == "isolated":
+                return MarginMode.ISOLATED
+            raise ExchangeError(
+                self.exchange_id.value, f"Unbekannter Margin-Modus von Exchange: {raw_mode!r}"
+            )
+        except ExchangeError:
+            raise
+        except Exception as e:
+            raise self._map_error(e) from e
+
+    async def set_margin_mode(self, symbol: str, mode: MarginMode) -> None:
+        """
+        Setzt den Margin-Modus via ccxt's vereinheitlichtem
+        set_margin_mode() (z.B. Binance POST /fapi/v1/marginType). Siehe
+        Docstring in base.py - wird bewusst NICHT automatisch vor jeder
+        Order aufgerufen, nur bei expliziter Operator-/Aufrufer-Absicht.
+        """
+        self._require_connected()
+        self._require_feature("setMarginMode")
+        try:
+            await self._ccxt.set_margin_mode(mode.value, symbol)
+            log.info(
+                "exchange.margin_mode_set",
+                exchange=self.exchange_id.value,
+                symbol=symbol,
+                mode=mode.value,
                 trading_mode=self.trading_mode.value,
             )
         except ExchangeError:

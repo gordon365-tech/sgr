@@ -249,6 +249,58 @@ class GridController:
                     error=str(e),
                 )
 
+        # 0c. Margin-Mode-Verifikation (Root-Cause-Fund, Live-Verification-
+        # Anweisung Grid-Checkliste "Margin Mode"): FuturesGridParameters.
+        # margin_mode war bisher reine Konfigurations-Metadata OHNE jede
+        # Verifikation gegen den echten Account-Zustand - kein Adapter
+        # setzte diesen Wert je tatsaechlich auf der Exchange.
+        #
+        # Bewusst READ-ONLY + Reject-bei-Abweichung, NICHT automatisch
+        # setzen (identisches Prinzip wie der Hedge-Mode-Check oben): ein
+        # automatischer Margin-Mode-Wechsel koennte bestehende Exposure
+        # auf demselben Symbol (aus einer anderen Strategie/einem anderen
+        # Grid desselben Accounts) gefaehrden - manche Exchanges verlangen
+        # dafuer sogar zwingend, dass das Symbol vollstaendig flach ist.
+        # Der Operator muss den Account-Margin-Modus VORHER manuell
+        # passend zur Grid-Konfiguration einstellen; dieser Check
+        # verifiziert nur, dass das tatsaechlich geschehen ist.
+        if self._trading_mode == TradingMode.LIVE and self._exchange_pool is not None:
+            try:
+                adapter = self._exchange_pool.get(exchange, self._trading_mode)
+                actual_mode = await adapter.get_margin_mode(symbol.ccxt_symbol)
+                if actual_mode != parameters.margin_mode:
+                    log.error(
+                        "grid_controller.margin_mode_mismatch",
+                        symbol=str(symbol),
+                        exchange=exchange.value,
+                        configured=parameters.margin_mode.value,
+                        actual=actual_mode.value,
+                    )
+                    return GridOpenResult(
+                        None,
+                        False,
+                        (
+                            f"Konfigurierter margin_mode {parameters.margin_mode.value} "
+                            f"stimmt nicht mit dem tatsaechlichen Account-Margin-Modus "
+                            f"{actual_mode.value} fuer {symbol} ueberein - kein "
+                            "automatischer Wechsel (siehe Kommentar), Operator muss "
+                            "den Account-Modus manuell anpassen"
+                        ),
+                        compliance_status="margin_mode_mismatch",
+                    )
+            except Exception as e:
+                # Analoge Begruendung wie beim Hedge-Mode-Check oben:
+                # NotSupportedFeatureError/AdapterFeatureNotImplementedError
+                # (z.B. Pionex, kein verifizierter Endpunkt) UND jeder
+                # andere Lesefehler werden nur geloggt, das Grid darf
+                # weiterlaufen - fail-closed waere hier zu aggressiv fuer
+                # Exchanges/Adapter ohne verifizierte Abfragemoeglichkeit.
+                log.debug(
+                    "grid_controller.margin_mode_check_skipped",
+                    symbol=str(symbol),
+                    error=str(e),
+                )
+
         # 1. Capability
         cap = check_capability(
             exchange,

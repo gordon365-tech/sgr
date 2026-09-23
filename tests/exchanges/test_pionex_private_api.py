@@ -807,6 +807,29 @@ class TestLeverageAndMargin:
 
         assert adapter._native_client.leverage_calls == [("BTC_USDT_PERP", "10")]
 
+    async def test_get_margin_mode_returns_cross(self, patch_client) -> None:
+        from sgr.core.types import MarginMode
+
+        adapter = await _connected_live_futures_adapter(patch_client)
+
+        mode = await adapter.get_margin_mode("BTC/USDT")
+
+        assert mode == MarginMode.CROSS
+
+    async def test_set_margin_mode_raises_not_implemented(self, patch_client) -> None:
+        """Root-Cause-Fund (Live-Verification-Anweisung, Grid-Checkliste
+        'Margin Mode'): kein verifizierter Set-Endpunkt fuer Pionex
+        existiert in dieser Codebase - explizit
+        AdapterFeatureNotImplementedError statt eines geratenen
+        Endpunkts."""
+        from sgr.core.types import MarginMode
+        from sgr.exchanges.base import AdapterFeatureNotImplementedError
+
+        adapter = await _connected_live_futures_adapter(patch_client)
+
+        with pytest.raises(AdapterFeatureNotImplementedError):
+            await adapter.set_margin_mode("BTC/USDT", MarginMode.ISOLATED)
+
 
 # ---------------------------------------------------------------------
 # 10. Capability Tests

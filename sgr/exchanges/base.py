@@ -35,6 +35,7 @@ from sgr.core.types import (
     Candle,
     ExchangeID,
     FundingRate,
+    MarginMode,
     OrderBook,
     OrderRequest,
     OrderResult,
@@ -676,6 +677,47 @@ class ExchangeAdapter(Protocol):
                 Leverage-Konzept (z.B. Pionex).
             ExchangeError: Exchange lehnt den Leverage-Wert ab (z.B.
                 ausserhalb des fuer dieses Symbol zulaessigen Bereichs).
+        """
+        ...
+
+    @abstractmethod
+    async def get_margin_mode(self, symbol: str) -> MarginMode:
+        """
+        Tatsaechlicher, aktueller Margin-Modus (CROSS/ISOLATED) dieses
+        Symbols auf der Exchange - read-only, kein Cache (analog zu
+        get_position_mode()). Root-Cause-Fund (Live-Verification-
+        Anweisung, Grid-Checkliste "Margin Mode"): FuturesGridParameters.
+        margin_mode war lange nur konfigurierte Metadata ohne jede
+        Verifikation gegen den echten Account-Zustand.
+
+        Raises:
+            NotSupportedFeatureError: Exchange/Adapter kennt kein
+                abfragbares Margin-Mode-Konzept (z.B. kein verifizierter
+                Set/Get-Endpunkt vorhanden - siehe PionexAdapter).
+            ExchangeError: andere Exchange-seitige Fehler.
+        """
+        ...
+
+    @abstractmethod
+    async def set_margin_mode(self, symbol: str, mode: MarginMode) -> None:
+        """
+        Setzt den Margin-Modus fuer ein Symbol explizit auf der Exchange.
+        Bewusst NICHT automatisch vor jeder Order aufgerufen (anders als
+        set_leverage()) - siehe GridController.open_grid() Kommentar zum
+        Hedge-Mode-Check: ein automatischer Moduswechsel koennte
+        bestehende Exposure auf demselben Symbol (aus einer anderen
+        Strategie/einem anderen Grid) gefaehrden. GridController prueft
+        stattdessen read-only via get_margin_mode() und lehnt bei
+        Abweichung ab, statt selbst zu aendern.
+
+        Raises:
+            NotSupportedFeatureError: Spot-only Exchange ohne Margin-
+                Modus-Konzept, oder kein verifizierter Set-Endpunkt
+                vorhanden (siehe PionexAdapter - dort existiert nur ein
+                gelesener, kein geschriebener Endpunkt in dieser
+                Codebase, daher wird hier NICHT geraten).
+            ExchangeError: Exchange lehnt den Wechsel ab (z.B. bestehende
+                Position/offene Orders auf diesem Symbol).
         """
         ...
 
