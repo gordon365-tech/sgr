@@ -205,6 +205,48 @@ class TestOngoingGridChecks:
 
         assert any(v.code == "stop_loss_hit" for v in violations)
 
+    def test_take_profit_hit_for_long_grid(self) -> None:
+        """Root-Cause-Fund (Live-Verification-Anweisung Grid-Checkliste):
+        FuturesGridParameters.take_profit war definiert und persistiert,
+        wurde aber nirgends ausgewertet - dieser Test beweist den Fix."""
+        engine = GridRiskEngine()
+        grid = _open_grid("100")
+        grid.parameters["take_profit"] = "110"
+
+        violations = engine.check_ongoing_grid(grid, current_price=Decimal("111"))
+
+        assert any(v.code == "take_profit_hit" for v in violations)
+        hit = next(v for v in violations if v.code == "take_profit_hit")
+        assert hit.severity == "hard"  # muss das Grid tatsaechlich schliessen
+
+    def test_take_profit_hit_for_short_grid(self) -> None:
+        engine = GridRiskEngine()
+        grid = _open_grid("100")
+        grid.direction = GridDirection.SHORT
+        grid.parameters["take_profit"] = "90"
+
+        violations = engine.check_ongoing_grid(grid, current_price=Decimal("89"))
+
+        assert any(v.code == "take_profit_hit" for v in violations)
+
+    def test_take_profit_not_hit_before_target(self) -> None:
+        engine = GridRiskEngine()
+        grid = _open_grid("100")
+        grid.parameters["take_profit"] = "110"
+
+        violations = engine.check_ongoing_grid(grid, current_price=Decimal("105"))
+
+        assert not any(v.code == "take_profit_hit" for v in violations)
+
+    def test_no_take_profit_configured_never_triggers(self) -> None:
+        engine = GridRiskEngine()
+        grid = _open_grid("100")
+        assert grid.parameters.get("take_profit") is None
+
+        violations = engine.check_ongoing_grid(grid, current_price=Decimal("999999"))
+
+        assert not any(v.code == "take_profit_hit" for v in violations)
+
     def test_funding_violation_during_runtime(self) -> None:
         limits = GridRiskLimitsConfig(max_funding_cost_pct=0.0005)
         engine = GridRiskEngine(limits)

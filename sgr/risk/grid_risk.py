@@ -458,6 +458,29 @@ class GridRiskEngine:
                     GridViolation(code="stop_loss_hit", message="Grid stop-loss erreicht")
                 )
 
+        # Take-Profit (Root-Cause-Fund, Live-Verification-Anweisung
+        # Grid-Checkliste): FuturesGridParameters.take_profit war seit
+        # jeher definiert, in der Grid-Metadata persistiert und im
+        # Report-/UI-Pfad sichtbar - wurde aber NIRGENDS tatsaechlich
+        # ausgewertet (kein entsprechender Check existierte hier, anders
+        # als stop_loss direkt darueber). Symmetrisch zum bestehenden
+        # stop_loss-Check: Preis-basiertes Gesamt-Grid-Ziel, nicht mit
+        # dem Pflicht-Feld verwechseln - "Gesamt-Grid-Ziel (Preis oder
+        # PnL-Grenze, siehe Nutzung)" im Feld-Docstring wird hier als
+        # Preis interpretiert (identische Semantik wie stop_loss).
+        take_profit = params_dict.get("take_profit")
+        if take_profit is not None:
+            direction = grid.direction
+            take_profit_dec = Decimal(str(take_profit))
+            if direction == GridDirection.LONG and current_price >= take_profit_dec:
+                violations.append(
+                    GridViolation(code="take_profit_hit", message="Grid take-profit erreicht")
+                )
+            elif direction == GridDirection.SHORT and current_price <= take_profit_dec:
+                violations.append(
+                    GridViolation(code="take_profit_hit", message="Grid take-profit erreicht")
+                )
+
         if (
             funding_rate_annualized_pct is not None
             and abs(funding_rate_annualized_pct)
