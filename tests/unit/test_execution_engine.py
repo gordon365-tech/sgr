@@ -720,8 +720,17 @@ class TestPreflightIntegration:
         mock_pool: tuple[MagicMock, AsyncMock],
         mocker: pytest_mock.MockerFixture,
     ) -> None:
+        from datetime import UTC, datetime
+
+        from sgr.risk.live_verification_profile import (
+            LiveVerificationGate,
+            LiveVerificationProfile,
+        )
+
         _pool, adapter = mock_pool
-        order = _make_order_request(order_type=OrderType.MARKET, trading_mode=TradingMode.LIVE)
+        order = _make_order_request(
+            order_type=OrderType.LIMIT, trading_mode=TradingMode.LIVE
+        ).model_copy(update={"limit_price": Decimal("50000")})
         filled = _make_order_result(order, status=OrderStatus.FILLED)
         adapter.place_order = AsyncMock(return_value=filled)
         mocker.patch("sgr.execution.engine.get_event_bus")
@@ -733,6 +742,27 @@ class TestPreflightIntegration:
             )
         )
         live_engine._preflight = fake_preflight  # type: ignore[assignment]
+        # Gegenstand dieses Tests ist ausschliesslich das Durchreichen einer
+        # bestandenen Preflight-Pruefung bis zum Exchange-Call - das seit
+        # Phase C zusaetzlich verpflichtende LiveVerificationGate wird
+        # hier bewusst mit einem grosszuegigen, bestandenen Profil versehen,
+        # damit es diesen Preflight-Test nicht verdeckt (siehe eigene,
+        # dedizierte Tests in TestLiveVerificationGateIntegration).
+        live_engine._live_verification_gate = LiveVerificationGate(
+            LiveVerificationProfile(
+                max_total_budget_usd=Decimal("100000"),
+                max_loss_usd=Decimal("100000"),
+                max_daily_loss_usd=Decimal("100000"),
+                max_concurrent_grids=10,
+                max_orders=1000,
+                max_exposure_usd=Decimal("100000"),
+                max_leverage=Decimal("10"),
+                max_position_size_usd=Decimal("100000"),
+                max_duration_minutes=600,
+                started_at=datetime.now(tz=UTC),
+                approved_by="operator:test",
+            )
+        )
 
         result = await live_engine.execute(order)
 
@@ -1100,3 +1130,199 @@ class TestMetricsRecording:
             tenant="default",
         )._value.get()
         assert after == before + 1
+
+
+
+
+class TestLiveVerificationGateIntegration:
+    """Phase C (2026-09-24, explizite Anweisung: 'Wenn LiveVerificationGate
+    nicht integriert ist, integriere es'): ExecutionEngine.execute() prueft
+    fuer JEDE LIVE-Order zusaetzlich das injizierte LiveVerificationGate,
+    NACH Preflight/Leverage/Quantization, VOR dem Exchange-Call. Fail-closed
+    ohne injizierten Gate. Kein Effekt fuer PAPER.
+
+    Preflight wird hier - analog zu TestPreflightIntegration - per DI durch
+    ein Test-Double ersetzt, das immer eligible=True liefert: Gegenstand
+    dieser Tests ist ausschliesslich das LiveVerificationGate, nicht der
+    (bereits separat getestete) PreflightValidator selbst.
+    """
+
+    @staticmethod
+    def _fake_passing_preflight(order_id: str) -> AsyncMock:
+        fake_preflight = AsyncMock()
+        fake_preflight.validate = AsyncMock(
+            return_value=PreflightResult(
+                order_id=order_id, trading_mode=TradingMode.LIVE, checks=[]
+            )
+        )
+        return fake_preflight
+
+    def _profile(self, **overrides):
+        from sgr.risk.live_verification_profile import LiveVerificationProfile
+
+        base = dict(
+            max_total_budget_usd=Decimal("1000"),
+            max_loss_usd=Decimal("100"),
+            max_daily_loss_usd=Decimal("100"),
+            max_concurrent_grids=1,
+            max_orders=10,
+            max_exposure_usd=Decimal("1000"),
+            max_leverage=Decimal("5"),
+            max_position_size_usd=Decimal("500"),
+            max_duration_minutes=60,
+            started_at=datetime.now(tz=UTC),
+            approved_by="operator:test",
+        )
+        base.update(overrides)
+        return LiveVerificationProfile(**base)
+
+    async def test_paper_order_is_unaffected_by_missing_gate(
+        self, engine: ExecutionEngine, mock_pool: tuple[MagicMock, AsyncMock]
+    ) -> None:
+        """PAPER + kein Gate injiziert (Default None) - exaktes
+        Vor-Aenderungs-Verhalten, keine Blockade."""
+        _pool, adapter = mock_pool
+        adapter.place_order = AsyncMock(return_value=_make_order_result(_make_order_request()))
+        order = _make_order_request(trading_mode=TradingMode.PAPER)
+
+        result = await engine.execute(order)
+
+        assert result.status == OrderStatus.FILLED
+
+    async def test_live_order_without_gate_is_rejected_fail_closed(
+        self, live_engine: ExecutionEngine, mock_pool: tuple[MagicMock, AsyncMock]
+    ) -> None:
+        """LIVE + kein LiveVerificationGate injiziert -> REJECTED,
+        fail-closed, kein Default-Budget."""
+        _pool, adapter = mock_pool
+        order = _make_order_request(
+            order_type=OrderType.LIMIT, trading_mode=TradingMode.LIVE
+        ).model_copy(update={"limit_price": Decimal("50000")})
+        live_engine._preflight = self._fake_passing_preflight(str(order.id))
+
+        result = await live_engine.execute(order)
+
+        assert result.status == OrderStatus.REJECTED
+        assert "erification" in result.raw_response["rejection_reason"]
+        adapter.place_order.assert_not_awaited()
+
+    async def test_live_order_within_gate_limits_proceeds(
+        self, live_engine: ExecutionEngine, mock_pool: tuple[MagicMock, AsyncMock]
+    ) -> None:
+        from sgr.risk.live_verification_profile import LiveVerificationGate
+
+        _pool, adapter = mock_pool
+        order = _make_order_request(
+            order_type=OrderType.LIMIT, trading_mode=TradingMode.LIVE
+        ).model_copy(update={"limit_price": Decimal("50000"), "quantity": Decimal("0.005")})
+        live_engine._preflight = self._fake_passing_preflight(str(order.id))
+        adapter.place_order = AsyncMock(return_value=_make_order_result(order))
+        live_engine._live_verification_gate = LiveVerificationGate(self._profile())
+
+        result = await live_engine.execute(order)
+
+        assert result.status == OrderStatus.FILLED
+        adapter.place_order.assert_awaited_once()
+
+    async def test_live_order_exceeding_position_size_limit_is_rejected(
+        self, live_engine: ExecutionEngine, mock_pool: tuple[MagicMock, AsyncMock]
+    ) -> None:
+        from sgr.risk.live_verification_profile import LiveVerificationGate
+
+        _pool, adapter = mock_pool
+        # Notional = 0.1 * 50000 = 5000
+        order = _make_order_request(
+            order_type=OrderType.LIMIT, trading_mode=TradingMode.LIVE
+        ).model_copy(update={"limit_price": Decimal("50000"), "quantity": Decimal("0.1")})
+        live_engine._preflight = self._fake_passing_preflight(str(order.id))
+        live_engine._live_verification_gate = LiveVerificationGate(
+            self._profile(max_position_size_usd=Decimal("100"))
+        )
+
+        result = await live_engine.execute(order)
+
+        assert result.status == OrderStatus.REJECTED
+        adapter.place_order.assert_not_awaited()
+
+    async def test_live_order_with_exhausted_budget_is_rejected(
+        self, live_engine: ExecutionEngine, mock_pool: tuple[MagicMock, AsyncMock]
+    ) -> None:
+        from sgr.risk.live_verification_profile import LiveVerificationGate
+
+        _pool, adapter = mock_pool
+        order = _make_order_request(
+            order_type=OrderType.LIMIT, trading_mode=TradingMode.LIVE
+        ).model_copy(update={"limit_price": Decimal("50000"), "quantity": Decimal("0.001")})
+        live_engine._preflight = self._fake_passing_preflight(str(order.id))
+        gate = LiveVerificationGate(self._profile(max_loss_usd=Decimal("10")))
+        gate.record_realized_loss(Decimal("10"))  # Budget bereits erschoepft
+        live_engine._live_verification_gate = gate
+
+        result = await live_engine.execute(order)
+
+        assert result.status == OrderStatus.REJECTED
+        adapter.place_order.assert_not_awaited()
+
+    async def test_successful_live_order_records_submission_on_gate(
+        self, live_engine: ExecutionEngine, mock_pool: tuple[MagicMock, AsyncMock]
+    ) -> None:
+        from sgr.risk.live_verification_profile import LiveVerificationGate
+
+        _pool, adapter = mock_pool
+        order = _make_order_request(
+            order_type=OrderType.LIMIT, trading_mode=TradingMode.LIVE
+        ).model_copy(update={"limit_price": Decimal("50000"), "quantity": Decimal("0.001")})
+        live_engine._preflight = self._fake_passing_preflight(str(order.id))
+        adapter.place_order = AsyncMock(return_value=_make_order_result(order))
+        gate = LiveVerificationGate(self._profile())
+        live_engine._live_verification_gate = gate
+
+        await live_engine.execute(order)
+
+        assert gate.state.orders_submitted == 1
+
+    async def test_market_order_without_limit_price_uses_ticker_fallback(
+        self, live_engine: ExecutionEngine, mock_pool: tuple[MagicMock, AsyncMock]
+    ) -> None:
+        from sgr.exchanges.base import TickerData
+        from sgr.risk.live_verification_profile import LiveVerificationGate
+
+        _pool, adapter = mock_pool
+        order = _make_order_request(
+            order_type=OrderType.MARKET, trading_mode=TradingMode.LIVE
+        ).model_copy(update={"quantity": Decimal("0.001")})
+        live_engine._preflight = self._fake_passing_preflight(str(order.id))
+        adapter.get_ticker = AsyncMock(
+            return_value=TickerData(
+                symbol="BTC/USDT",
+                bid=Decimal("49990"),
+                ask=Decimal("50010"),
+                last=Decimal("50000"),
+                volume_24h=Decimal("1000"),
+                change_24h_pct=0.0,
+                timestamp=datetime.now(tz=UTC),
+            )
+        )
+        adapter.place_order = AsyncMock(return_value=_make_order_result(order))
+        live_engine._live_verification_gate = LiveVerificationGate(self._profile())
+
+        result = await live_engine.execute(order)
+
+        assert result.status == OrderStatus.FILLED
+        adapter.get_ticker.assert_awaited()
+
+    async def test_market_order_ticker_unavailable_is_rejected_fail_closed(
+        self, live_engine: ExecutionEngine, mock_pool: tuple[MagicMock, AsyncMock]
+    ) -> None:
+        from sgr.risk.live_verification_profile import LiveVerificationGate
+
+        _pool, adapter = mock_pool
+        order = _make_order_request(order_type=OrderType.MARKET, trading_mode=TradingMode.LIVE)
+        live_engine._preflight = self._fake_passing_preflight(str(order.id))
+        adapter.get_ticker = AsyncMock(side_effect=RuntimeError("exchange unreachable"))
+        live_engine._live_verification_gate = LiveVerificationGate(self._profile())
+
+        result = await live_engine.execute(order)
+
+        assert result.status == OrderStatus.REJECTED
+        adapter.place_order.assert_not_awaited()

@@ -81,9 +81,17 @@ class ExecutionEngine:
         pool: ExchangePool,
         trading_mode: TradingMode,
         order_repository: Any = None,
+        live_verification_gate: Any = None,
     ) -> None:
         self._pool = pool
         self._trading_mode = trading_mode
+        # Operator-Budget fuer einen konkreten Live-Verifikationslauf
+        # (siehe sgr/risk/live_verification_profile.py Modul-Docstring).
+        # None (Default) = unveraendertes Verhalten fuer PAPER (dieser
+        # Check hat dort ohnehin nie einen Effekt) UND bedeutet fuer LIVE
+        # fail-closed ("kein Operator-Budget hinterlegt" wird NIEMALS als
+        # "kein Budget noetig" interpretiert, siehe execute()).
+        self._live_verification_gate = live_verification_gate
         # tenant_id fuer Kill-Switch-Scoping (siehe Audit nach Commit 5,
         # sgr/risk/kill_switch.py): get_config() statt eines zusaetzlichen
         # Konstruktor-Parameters, um die bestehende Aufrufstelle in
@@ -265,6 +273,37 @@ class ExecutionEngine:
                     reason="min_order_size",
                 )
                 return self._rejected_result(order, quantization_error)
+
+        # Live Verification Gate (Operator-Budget fuer einen konkreten
+        # Live-Verifikationslauf, siehe sgr/risk/live_verification_profile.py
+        # Modul-Docstring): NACH Quantization (order.quantity ist final),
+        # VOR dem eigentlichen Exchange-Call - die letzte Pruefung dieser
+        # Methode. No-op fuer PAPER. Fuer LIVE: fail-closed ohne
+        # injizierten Gate (kein Default-Budget).
+        from sgr.risk.live_verification_profile import check_live_verification_allowed
+
+        lv_allowed, lv_reason = await check_live_verification_allowed(
+            order, self._live_verification_gate, exchange_pool=self._pool
+        )
+        if not lv_allowed:
+            log.critical(
+                "execution_engine.blocked_by_live_verification_gate",
+                order_id=str(order.id),
+                reason=lv_reason,
+            )
+            record_order_rejected(
+                exchange=order.symbol.exchange.value,
+                symbol=str(order.symbol),
+                reason="live_verification_gate",
+            )
+            return self._rejected_result(order, lv_reason or "Live verification gate blocked")
+
+        if (
+            self._live_verification_gate is not None
+            and order.trading_mode == TradingMode.LIVE
+        ):
+            grid_id = order.metadata.get("grid_id")
+            self._live_verification_gate.record_order_submitted(grid_id=grid_id)
 
         try:
             return await self._execute_internal(order)

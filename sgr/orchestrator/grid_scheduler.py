@@ -113,8 +113,6 @@ class GridScheduler:
         vom Aufrufer NIEMALS als 0 interpretiert (siehe GridRiskEngine.
         evaluate_new_grid() Docstring, fail-closed).
         """
-        from decimal import Decimal
-
         if self._portfolio_engine is None:
             return None
         try:

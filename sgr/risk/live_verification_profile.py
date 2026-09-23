@@ -20,11 +20,29 @@ nirgends im System gesetzt wird). Dieses Modul entscheidet zusaetzlich
 noch innerhalb seiner Grenzen". Beide muessen JA sagen, bevor eine
 LIVE-Order gesendet werden darf.
 
-Noch NICHT in ExecutionEngine/GridController verdrahtet (siehe
-Abschlussbericht) - dieses Modul ist bewusst nur bereitgestellt, nicht
-automatisch aktiviert. Eine Aktivierung erfordert eine explizite,
-separate Entscheidung des Operators (welche konkreten Zahlen, welcher
-Account) - Claude legt diese Zahlen nicht selbst fest.
+Verdrahtung (2026-09-24, Revision): check_live_verification_allowed()
+wird von ExecutionEngine.execute() fuer JEDE LIVE-Order aufgerufen (nach
+Preflight/Leverage/Quantization, vor dem eigentlichen Exchange-Call) -
+siehe dortige Aufrufstelle. Der eigentliche LiveVerificationGate MUSS
+dafuer per ExecutionEngine(..., live_verification_gate=...) injiziert
+werden - OHNE Injektion (Default None) wird JEDE LIVE-Order abgelehnt
+(fail-closed: "kein Operator-Budget hinterlegt" ist keine sichere
+Annahme von "kein Budget noetig"). Fuer PAPER hat dieser Check in jedem
+Fall KEINEN Effekt (sofortiges allowed=True, identisch zu
+check_live_trading_allowed()).
+
+Claude aktiviert diese Injektion nicht selbst und setzt keine Zahlen -
+ein GridController/eine Strategie kann `LiveVerificationProfile` nicht
+ueberschreiben (die Werte kommen ausschliesslich aus dem vom Operator
+konstruierten, frozen Profile-Objekt).
+
+Noch NICHT geschlossen: die Verlust-Buchung (record_realized_loss())
+wird NICHT automatisch aus PortfolioEngine.on_order_filled() heraus
+aufgerufen (das wuerde eine zusaetzliche Aenderung an der bestehenden,
+produktiv genutzten Fill-Verarbeitung erfordern) - ein Aufrufer mit
+Zugriff auf den tatsaechlich realisierten PnL einer LIVE-Closing-Order
+muss gate.record_realized_loss(...) explizit aufrufen. Diese Luecke ist
+im Abschlussbericht als offener Punkt benannt, nicht verschwiegen.
 """
 
 from __future__ import annotations
@@ -32,8 +50,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 from sgr.core.logging import get_logger
+from sgr.core.types import OrderRequest, Side, TradingMode
 
 log = get_logger(__name__)
 
@@ -198,3 +218,76 @@ class LiveVerificationGate:
         self._state.deactivated = True
         self._state.deactivation_reason = reason
         log.critical("live_verification_gate.deactivated", reason=reason)
+
+
+async def check_live_verification_allowed(
+    order: OrderRequest,
+    gate: LiveVerificationGate | None,
+    exchange_pool: Any = None,
+) -> tuple[bool, str | None]:
+    """
+    Aufrufstelle: ExecutionEngine.execute(), NACH Preflight/Leverage/
+    Quantization (order.quantity ist final), VOR dem eigentlichen
+    Exchange-Call - siehe dortigen Kommentar. Gibt (allowed, reason)
+    zurueck, identisches Ergebnis-Format wie
+    sgr.risk.live_trading_gate.check_live_trading_allowed().
+
+    Gibt allowed=True SOFORT fuer jede PAPER-Order zurueck (dieses Gate
+    betrifft ausschliesslich TradingMode.LIVE).
+
+    Fail-closed in JEDEM Unsicherheitsfall:
+        - gate is None ("kein Operator-Budget hinterlegt")
+        - kein Preis bestimmbar (weder order.limit_price noch ein
+          Ticker-Preis ueber exchange_pool verfuegbar)
+        - jeder Fehler beim Ticker-Abruf
+
+    notional_usd wird aus order.limit_price (falls gesetzt, z.B. ein
+    RiskEngine-erzwungenes LIMIT bei hoher Slippage) oder sonst einem
+    frisch abgerufenen Ticker-Preis berechnet - EIN zusaetzlicher
+    Exchange-Read-Call, ausschliesslich fuer LIVE-Orders (fuer PAPER,
+    der heute laufenden Produktionslast, voellig folgenlos).
+    """
+    if order.trading_mode != TradingMode.LIVE:
+        return True, None
+
+    if gate is None:
+        return False, (
+            "Live trading blocked: kein LiveVerificationGate konfiguriert "
+            "(fail-closed - kein Operator-Budget hinterlegt)"
+        )
+
+    price = order.limit_price
+    if price is None:
+        if exchange_pool is None:
+            return False, (
+                "Live trading blocked: kein Preis fuer LiveVerificationGate "
+                "bestimmbar (kein Exchange-Pool verfuegbar)"
+            )
+        try:
+            adapter = exchange_pool.get(order.symbol.exchange, TradingMode.LIVE)
+            ticker = await adapter.get_ticker(order.symbol.ccxt_symbol)
+            price = ticker.ask if order.side == Side.BUY else ticker.bid
+        except Exception as e:
+            return False, (
+                f"Live trading blocked: Preis fuer LiveVerificationGate nicht "
+                f"abrufbar ({e})"
+            )
+
+    try:
+        notional_usd = order.quantity * price
+        try:
+            leverage = Decimal(str(order.metadata.get("target_leverage", "1")))
+        except (ValueError, ArithmeticError):
+            leverage = Decimal("1")
+        grid_id = order.metadata.get("grid_id")
+
+        return gate.check_order_allowed(
+            notional_usd=notional_usd, leverage=leverage, grid_id=grid_id
+        )
+    except Exception as e:
+        # Fail-closed: ein unerwarteter Fehler in der Notional-Berechnung
+        # oder im Gate selbst (z.B. ein nicht-numerischer Preis aus einem
+        # fehlerhaft konfigurierten Test-Double/Adapter) darf niemals als
+        # unbehandelte Exception aus dem Order-Pfad propagieren - er
+        # blockiert die Order stattdessen explizit.
+        return False, f"Live trading blocked: LiveVerificationGate-Auswertung fehlgeschlagen ({e})"

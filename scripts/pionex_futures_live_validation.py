@@ -96,6 +96,7 @@ import argparse
 import asyncio
 import sys
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
@@ -117,6 +118,7 @@ from sgr.exchanges.pionex import PionexAdapter
 from sgr.execution.engine import ExecutionEngine
 from sgr.execution.preflight import PreflightValidator
 from sgr.risk.kill_switch import get_kill_switch
+from sgr.risk.live_verification_profile import LiveVerificationGate, LiveVerificationProfile
 from sgr.strategy.base import StrategyParameters, ValidationStatus
 from sgr.strategy.registry import StrategyRegistry
 
@@ -433,12 +435,15 @@ def _register_test_strategy_for_live_trading_gate() -> None:
 
 
 async def _phase_d_execute_one_real_order(
-    pool: ExchangePool, order: OrderRequest, symbol: str
+    pool: ExchangePool,
+    order: OrderRequest,
+    symbol: str,
+    live_verification_gate: LiveVerificationGate,
 ) -> None:
     _register_test_strategy_for_live_trading_gate()
     await StrategyRegistry.get().activate(_TEST_STRATEGY_NAME)
 
-    engine = ExecutionEngine(pool, TradingMode.LIVE)
+    engine = ExecutionEngine(pool, TradingMode.LIVE, live_verification_gate=live_verification_gate)
 
     print("\n[PHASE4] Sende Order ueber ExecutionEngine.execute() (Production Code Path)...")
     result = await engine.execute(order)
@@ -497,6 +502,55 @@ def _print_report(report: Phase4Report) -> None:
     print("\n" + "=" * 78)
 
 
+def _build_live_verification_gate(args: argparse.Namespace) -> LiveVerificationGate | str:
+    """
+    Baut das LiveVerificationGate AUSSCHLIESSLICH aus vom Operator per CLI
+    uebergebenen Werten - keiner dieser Werte wird hier erraten,
+    defaultet oder automatisch erhoeht (siehe Aufgabenstellung Abschnitt
+    U: "keine eigenmaechtige Kapitalentscheidung"). Gibt bei fehlenden
+    Pflichtangaben einen Fehlertext (str) statt eines Gates zurueck -
+    Phase D bricht dann fail-closed ab, statt mit erratenen Limits
+    weiterzulaufen.
+
+    max_orders=2 und max_concurrent_grids=1 sind KEINE Risikowerte,
+    sondern strukturelle Konstanten dieses Skripts: Phase D sendet per
+    Konstruktion hoechstens zwei Orders (Open + reduce-only Close, siehe
+    _phase_d_execute_one_real_order) und oeffnet niemals ein Grid
+    (max_concurrent_grids=1 nur weil LiveVerificationProfile jedes Limit
+    strikt > 0 verlangt, siehe __post_init__ - der Wert wird von diesem
+    Skript nie ausgeschoepft).
+    """
+    required = {
+        "max_budget_usd": args.max_budget_usd,
+        "max_loss_usd": args.max_loss_usd,
+        "max_daily_loss_usd": args.max_daily_loss_usd,
+        "max_leverage": args.max_leverage,
+        "max_position_usd": args.max_position_usd,
+        "max_duration_minutes": args.max_duration_minutes,
+    }
+    missing = [f"--{name.replace('_', '-')}" for name, value in required.items() if value is None]
+    if missing:
+        return (
+            "Fehlende Operator-Pflichtangaben fuer Phase D (LiveVerificationGate): "
+            + ", ".join(missing)
+        )
+
+    profile = LiveVerificationProfile(
+        max_total_budget_usd=required["max_budget_usd"],
+        max_loss_usd=required["max_loss_usd"],
+        max_daily_loss_usd=required["max_daily_loss_usd"],
+        max_concurrent_grids=1,
+        max_orders=2,
+        max_exposure_usd=required["max_budget_usd"],
+        max_leverage=required["max_leverage"],
+        max_position_size_usd=required["max_position_usd"],
+        max_duration_minutes=required["max_duration_minutes"],
+        started_at=datetime.now(tz=UTC),
+        approved_by="operator-cli:pionex_futures_live_validation(--confirm-write+interactive-phrase)",
+    )
+    return LiveVerificationGate(profile)
+
+
 async def _main(args: argparse.Namespace) -> int:
     if not args.yes:
         print(_SAFETY_NOTICE)
@@ -543,7 +597,18 @@ async def _main(args: argparse.Namespace) -> int:
             print("\nBestaetigungsphrase nicht korrekt eingegeben - Phase D abgebrochen.")
             return 0
 
-        await _phase_d_execute_one_real_order(pool, order, args.symbol)
+        gate_or_error = _build_live_verification_gate(args)
+        if isinstance(gate_or_error, str):
+            print(f"\n{gate_or_error}")
+            print(
+                "Phase D abgebrochen - sgr.execution.engine.ExecutionEngine verlangt seit "
+                "der Live-Verification-Gate-Verdrahtung fuer JEDE LIVE-Order ein vom "
+                "Operator explizit befuelltes LiveVerificationProfile (fail-closed, kein "
+                "automatischer Default)."
+            )
+            return 1
+
+        await _phase_d_execute_one_real_order(pool, order, args.symbol, gate_or_error)
         return 0
     finally:
         await adapter.close()
@@ -564,6 +629,46 @@ def main() -> None:
             "Ermoeglicht Phase D (EINE echte Order) - erfordert ZUSAETZLICH eine "
             "interaktive Bestaetigungsphrase, siehe Modul-Docstring."
         ),
+    )
+    parser.add_argument(
+        "--max-budget-usd",
+        type=Decimal,
+        default=None,
+        help=(
+            "PFLICHT fuer Phase D: vom Operator freigegebenes maximales "
+            "Live-Verification-Budget in USD (LiveVerificationGate, fail-closed "
+            "ohne diesen Wert - siehe Aufgabenstellung Abschnitt U)."
+        ),
+    )
+    parser.add_argument(
+        "--max-loss-usd",
+        type=Decimal,
+        default=None,
+        help="PFLICHT fuer Phase D: vom Operator freigegebener maximaler Gesamtverlust in USD.",
+    )
+    parser.add_argument(
+        "--max-daily-loss-usd",
+        type=Decimal,
+        default=None,
+        help="PFLICHT fuer Phase D: vom Operator freigegebener maximaler Tagesverlust in USD.",
+    )
+    parser.add_argument(
+        "--max-leverage",
+        type=Decimal,
+        default=None,
+        help="PFLICHT fuer Phase D: vom Operator freigegebenes maximales Leverage.",
+    )
+    parser.add_argument(
+        "--max-position-usd",
+        type=Decimal,
+        default=None,
+        help="PFLICHT fuer Phase D: vom Operator freigegebene maximale Positionsgroesse in USD.",
+    )
+    parser.add_argument(
+        "--max-duration-minutes",
+        type=int,
+        default=None,
+        help="PFLICHT fuer Phase D: vom Operator freigegebene maximale Laufzeit des Live-Tests.",
     )
     args = parser.parse_args()
 

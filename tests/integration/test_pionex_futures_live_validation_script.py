@@ -107,6 +107,16 @@ class FakeLiveValidationClient:
             if o["status"] == "OPEN" and (symbol is None or o["symbol"] == symbol)
         ]
 
+    def get_ticker(self, symbol):
+        """Fuer PionexAdapter.get_ticker() - noetig, seit Phase D (echte
+        MARKET-Order ohne limit_price) den Preis ueber das
+        LiveVerificationGate absichern muss (Ticker-Fallback-Pfad, siehe
+        sgr/risk/live_verification_profile.py::check_live_verification_
+        allowed()). Preis konsistent mit dem sonst in dieser Fake-Klasse
+        angenommenen Marktpreis (siehe create_futures_order()/
+        get_futures_positions(), beide nutzen "60000" als Default)."""
+        return {"symbol": symbol, "close": "60000", "volume": "100", "time": 1786237680000}
+
     def get_futures_leverage(self, symbol):
         return {"symbol": symbol, "leverage": "1"}
 
@@ -206,9 +216,43 @@ def env_credentials(monkeypatch):
 
 
 def _args(**overrides) -> argparse.Namespace:
-    defaults = dict(yes=True, symbol="BTC/USDT", confirm_write=False)
+    defaults = dict(
+        yes=True,
+        symbol="BTC/USDT",
+        confirm_write=False,
+        # Operator-Pflichtangaben fuer Phase D (LiveVerificationGate) -
+        # Default None wie in main()'s argparse-Definition: kein Script-
+        # seitiger Fallback-Wert, siehe _build_live_verification_gate().
+        max_budget_usd=None,
+        max_loss_usd=None,
+        max_daily_loss_usd=None,
+        max_leverage=None,
+        max_position_usd=None,
+        max_duration_minutes=None,
+    )
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
+
+
+def _approved_live_verification_args(**overrides) -> dict:
+    """Realistische, vom 'Operator' (Testcode) explizit freigegebene
+    Phase-D-Limits - fuer Tests, die den kompletten Order-Pfad inkl.
+    LiveVerificationGate erfolgreich durchlaufen sollen."""
+    base = dict(
+        confirm_write=True,
+        max_budget_usd=Decimal("500"),
+        max_loss_usd=Decimal("200"),
+        max_daily_loss_usd=Decimal("200"),
+        max_leverage=Decimal("5"),
+        # Order in diesem Skript: 0.001 BTC zum Fake-Marktpreis 60000 =
+        # 60 USD Notional (siehe FakeLiveValidationClient) - grosszuegig
+        # ueber diesem Wert, damit der Test das Gate-PASS-Verhalten
+        # prueft, nicht versehentlich dessen Notional-Limit.
+        max_position_usd=Decimal("500"),
+        max_duration_minutes=30,
+    )
+    base.update(overrides)
+    return base
 
 
 class TestMissingCredentials:
@@ -313,7 +357,7 @@ class TestPhaseDGating:
         """
         monkeypatch.setattr("builtins.input", lambda _prompt="": "I APPROVE THIS LIVE ORDER")
 
-        exit_code = await script._main(_args(confirm_write=True))
+        exit_code = await script._main(_args(**_approved_live_verification_args()))
 
         out = capsys.readouterr().out
         assert exit_code == 0
@@ -322,3 +366,21 @@ class TestPhaseDGating:
         assert len(FakeLiveValidationClient.created_orders) == 2
         assert FakeLiveValidationClient.created_orders[0]["type"] == "MARKET_QTY"
         assert FakeLiveValidationClient.created_orders[1]["reduceOnly"] is True
+
+    async def test_both_confirmations_but_missing_operator_budget_blocks_phase_d(
+        self, patch_client, env_credentials, capsys, monkeypatch
+    ) -> None:
+        """Beweist das Fail-Closed-Verhalten des LiveVerificationGate:
+        selbst mit --confirm-write UND korrekter interaktiver Phrase
+        darf Phase D NICHT ausgefuehrt werden, solange der Operator
+        keine expliziten Budget-/Risiko-Limits uebergeben hat (siehe
+        Aufgabenstellung Abschnitt U - kein Default-Budget)."""
+        monkeypatch.setattr("builtins.input", lambda _prompt="": "I APPROVE THIS LIVE ORDER")
+
+        exit_code = await script._main(_args(confirm_write=True))
+
+        out = capsys.readouterr().out
+        assert exit_code == 1
+        assert FakeLiveValidationClient.created_orders == []
+        assert "Fehlende Operator-Pflichtangaben" in out
+        assert "--max-budget-usd" in out
