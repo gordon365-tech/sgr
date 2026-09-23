@@ -51,7 +51,7 @@ from sgr.exchanges.base import ExchangeError
 from sgr.exchanges.factory import ExchangePool
 from sgr.execution.order_safety import SafeOrderExecutor
 from sgr.execution.preflight import PreflightValidator
-from sgr.execution.quantization import quantize_and_validate
+from sgr.execution.quantization import quantize_and_validate, quantize_price
 from sgr.monitoring.trading_metrics import (
     record_duplicate_blocked,
     record_order_filled,
@@ -372,8 +372,25 @@ class ExecutionEngine:
         if reason is not None:
             return order, reason
 
+        updates: dict[str, Any] = {}
         if quantized_qty != order.quantity:
-            order = order.model_copy(update={"quantity": quantized_qty})
+            updates["quantity"] = quantized_qty
+
+        # Preis-Quantisierung (2026-09-23, siehe quantize_price()
+        # Docstring): nur fuer Orders MIT explizitem limit_price - eine
+        # MARKET-Order (order.limit_price is None) hat keinen Preis zu
+        # quantisieren, unveraendertes Verhalten fuer den heutigen
+        # Grid-Controller (submittet ausschliesslich MARKET-Orders) und
+        # jede direktionale Strategie.
+        if order.limit_price is not None:
+            quantized_price, price_reason = quantize_price(order.limit_price, order.side, limits)
+            if price_reason is not None:
+                return order, price_reason
+            if quantized_price != order.limit_price:
+                updates["limit_price"] = quantized_price
+
+        if updates:
+            order = order.model_copy(update=updates)
         return order, None
 
     async def _execute_internal(self, order: OrderRequest) -> OrderResult:
@@ -435,9 +452,16 @@ class ExecutionEngine:
         # es aus raw_response fuer close_reason. Bewusst OHNE Default -
         # fehlt der Key (normaler Entry oder ein gegenlaeufiges Strategie-
         # Signal), faellt PortfolioEngine selbst auf STRATEGY_SIGNAL zurueck.
+        # target_price/stop_price (2026-09-23, strategiegetriebener Exit):
+        # gleiches Weiterreich-Muster wie "strategy"/"exit_reason" oben -
+        # siehe RiskEngine.build_order_request() Kommentar fuer den
+        # Ursprung. PortfolioEngine._open_position() liest sie aus
+        # result.raw_response und reicht sie an PositionProtectionManager.
+        # on_position_opened() weiter.
         extra_attribution: dict[str, Any] = {"strategy": order.metadata.get("strategy", "unknown")}
-        if "exit_reason" in order.metadata:
-            extra_attribution["exit_reason"] = order.metadata["exit_reason"]
+        for key in ("exit_reason", "target_price", "stop_price", "entry_regime"):
+            if key in order.metadata:
+                extra_attribution[key] = order.metadata[key]
         result = result.model_copy(
             update={"raw_response": {**result.raw_response, **extra_attribution}}
         )
@@ -543,8 +567,9 @@ class ExecutionEngine:
                 poll_attribution: dict[str, Any] = {
                     "strategy": order.metadata.get("strategy", "unknown")
                 }
-                if "exit_reason" in order.metadata:
-                    poll_attribution["exit_reason"] = order.metadata["exit_reason"]
+                for key in ("exit_reason", "target_price", "stop_price", "entry_regime"):
+                    if key in order.metadata:
+                        poll_attribution[key] = order.metadata[key]
                 current = current.model_copy(
                     update={"raw_response": {**current.raw_response, **poll_attribution}}
                 )

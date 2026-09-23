@@ -196,7 +196,11 @@ class GridBacktestSimulator:
                 open_notional = sum(
                     (c.quantity * bar.close for c in cells if c.is_open), Decimal("0")
                 )
-                funding_cost = open_notional * self._config.assumed_funding_rate_per_interval
+                if self._config.funding_rate_provider is not None:
+                    funding_rate = self._config.funding_rate_provider(bar.timestamp)
+                else:
+                    funding_rate = self._config.assumed_funding_rate_per_interval
+                funding_cost = open_notional * funding_rate
                 total_funding += funding_cost
                 realized_pnl -= funding_cost
 

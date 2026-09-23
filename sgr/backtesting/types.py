@@ -69,6 +69,16 @@ class BacktestConfig:
     max_portfolio_heat: float = 0.70
     max_drawdown_limit: float = 0.15
 
+    # Exit-Parameter (vormals hart codiert in BacktestSimulator._check_exits(),
+    # 2026-09-23 auf Anweisung parametrisiert - siehe dortigen Docstring fuer
+    # die vollstaendige Prioritaetsreihenfolge (Regime -> ATR-Stop -> Target
+    # -> Zeit-Fallback), die durch diese Config-Felder jetzt sweep-faehig
+    # ist, ohne den Simulator-Code selbst aendern zu muessen. Defaults sind
+    # exakt die bisherigen Konstanten - unveraendertes Verhalten fuer jeden
+    # bestehenden Call-Site, der diese Felder nicht explizit setzt.
+    atr_stop_multiplier: Decimal = Decimal("2.5")
+    max_holding_bars: int = 20
+
     # Walk-Forward
     walk_forward_splits: int = 0  # 0 = kein Walk-Forward
 

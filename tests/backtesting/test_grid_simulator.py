@@ -159,6 +159,47 @@ class TestFundingAccounting:
 
         assert result.total_funding_paid == 0
 
+    def test_funding_rate_provider_overrides_constant_assumption(self) -> None:
+        """Phase O (2026-09-23): ein injizierter funding_rate_provider
+        (timestamp -> Decimal) ersetzt assumed_funding_rate_per_interval
+        vollstaendig - Vorbereitung fuer eine kuenftige echte historische
+        Funding-Zeitreihe, ohne hier einen Datensatz zu erfinden."""
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        candles = [_candle(start, 100, 100, 100, 100)]
+        candles.append(_candle(start + timedelta(hours=1), 100, 100, 94, 95))
+        for i in range(2, 42):
+            candles.append(_candle(start + timedelta(hours=i), 95, 96, 94, 95))
+
+        calls: list[datetime] = []
+
+        def provider(ts: datetime) -> Decimal:
+            calls.append(ts)
+            return Decimal("0.01")  # deutlich hoeher als der Default-Assumed-Wert
+
+        config_default = GridBacktestConfig(
+            symbol="BTC/USDT",
+            timeframe="1h",
+            strategy_name="test",
+            parameters=_params(),
+            funding_interval_hours=8,
+            assumed_funding_rate_per_interval=Decimal("0.0001"),
+        )
+        result_default = GridBacktestSimulator(config_default).run(candles)
+
+        config_provider = GridBacktestConfig(
+            symbol="BTC/USDT",
+            timeframe="1h",
+            strategy_name="test",
+            parameters=_params(),
+            funding_interval_hours=8,
+            assumed_funding_rate_per_interval=Decimal("0.0001"),
+            funding_rate_provider=provider,
+        )
+        result_provider = GridBacktestSimulator(config_provider).run(candles)
+
+        assert len(calls) > 0  # Provider wurde tatsaechlich aufgerufen
+        assert result_provider.total_funding_paid > result_default.total_funding_paid
+
 
 class TestStopLossAndTakeProfit:
     def test_stop_loss_force_closes_grid(self) -> None:

@@ -195,6 +195,12 @@ class PositionModel(Base):
     # gleiche Wahl wie side/trading_mode oben, keine DB-seitige Enum-
     # Migration bei zukuenftigen neuen Gruenden noetig.
     close_reason: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    # Entry-Regime (Migration 0008, siehe sgr/core/types.py Position.
+    # entry_regime und PositionProtectionWatchdog._check_regime_exit()).
+    # NULL = kein Entry-Regime bekannt (Legacy-Position oder Regime-Exit
+    # nicht relevant fuer diese Strategie) - Regime-Exit bleibt inaktiv,
+    # kein Backfill noetig/gewollt (identisches Prinzip wie Migration 0006).
+    entry_regime: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
     __table_args__ = (
         Index("ix_positions_open", "is_open", "trading_mode"),
@@ -556,6 +562,29 @@ class GridModel(Base):
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     close_reason: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # Level-Zustand (Migration 0008, siehe sgr/core/grid_types.py::
+    # GridLevelState und GridController.restore_from_persistence()).
+    # Serialisierte list[GridLevelState] (index/price/side/is_filled/
+    # quantity/last_order_id/cycle_count/last_filled_at je Level) - vor
+    # dieser Migration wurde dieser Zustand NIE persistiert, ein
+    # Neustart mit aktivem Grid verlor ihn vollstaendig (dokumentierte
+    # Luecke im Strategiebericht). '[]' Default fuer bereits bestehende
+    # Zeilen (aktuell 0, siehe Analysebericht) - kein Backfill moeglich,
+    # da der In-Memory-Zustand nach einem Neustart ohnehin nicht mehr
+    # existiert.
+    levels: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    # Crossing-Erkennungs-Anker (Migration 0009, siehe GridState.last_price
+    # Docstring in sgr/core/grid_types.py und GridController.on_price_tick()).
+    # NULL nach Recovery ist sicher (siehe restore_from_persistence()
+    # Docstring: on_price_tick() loest dann fuer KEIN Level faelschlich
+    # aus, bis der naechste echte Preis-Tick eine neue Baseline setzt) -
+    # trotzdem persistiert, um diesen einen "toten" Tick nach einem
+    # Neustart zu vermeiden, wo es die Daten dafuer gibt.
+    last_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(precision=28, scale=8), nullable=True
+    )
 
     __table_args__ = (
         Index("ix_futures_grids_status", "status", "trading_mode"),

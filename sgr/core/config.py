@@ -179,6 +179,20 @@ class RiskLimitsConfig(BaseSettings):
     paper_taker_fee_pct: float = Field(default=0.0005, ge=0.0, le=0.01)
     paper_slippage_pct: float = Field(default=0.0005, ge=0.0, le=0.01)
 
+    # Maker-Fee (2026-09-23, Phase I - Grid-Paper-Limit-Order-Semantik):
+    # bisher gab es in der Paper-Simulation NUR eine Taker-Fee, weil
+    # Market-Orders strukturell immer Taker sind (siehe
+    # CCXTBaseAdapter._simulate_order()). Ein Futures-Grid-Level-Fill
+    # (siehe GridController._fill_level(): eine per Preis-Crossing
+    # ausgeloeste Order, die wirtschaftlich einer ruhenden, gefuellten
+    # Limit-Order entspricht) ist dagegen typischerweise ein Maker-Fill -
+    # realistische Binance-USDT-M-Futures-Maker-Fee liegt bei ca.
+    # 0.02% (VIP0), niedriger als die Taker-Fee. Nur verwendet, wenn
+    # order.metadata["grid_fill_type"] == "level_cross" (siehe dort) -
+    # unveraendertes Taker-Verhalten fuer JEDE andere Order (direktional
+    # UND Grid-Force-Exits).
+    paper_maker_fee_pct: float = Field(default=0.0002, ge=0.0, le=0.01)
+
 
 class ExchangeCredentials(BaseSettings):
     """

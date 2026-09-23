@@ -89,10 +89,31 @@ class SymbolKillSwitch:
         # Optional: Repository für Persistenz. None = rein in-memory,
         # additiv wie bei StrategyRegistry.inject_repository().
         self._repo: Any = None
+        # Deaktivierungs-Hooks (2026-09-23, Phase G - Grid-Architekturbericht):
+        # SymbolKillSwitch selbst kennt weder GridController noch
+        # ExecutionEngine (identisches Entkopplungsprinzip wie KillSwitch/
+        # PositionLiquidator, siehe dortigen Modul-Docstring "circular dep
+        # vermeiden"). Ein registrierter Hook wird bei jeder deactivate()
+        # best-effort aufgerufen (symbol_key, reason) - GridController.
+        # close_all_grids_for_symbol() ist der einzige aktuelle Konsument
+        # (siehe Aufrufstelle in sgr/api/main.py), aber der Mechanismus
+        # selbst ist generisch/additiv, kein Grid-Spezialfall im Kern.
+        self._on_deactivated_hooks: list[Any] = []
 
     def inject_repository(self, repository: Any) -> None:
         """Injiziert ein Repository für Persistenz. Additiv, optional."""
         self._repo = repository
+
+    def register_deactivation_hook(self, hook: Any) -> None:
+        """
+        Registriert eine async Callback (symbol_key: str, reason: str) ->
+        None, die bei JEDER deactivate() best-effort aufgerufen wird -
+        NACH dem In-Memory-State-Change und der Persistenz, damit ein
+        Hook-Fehler den eigentlichen Deaktivierungs-Vorgang nicht
+        beeintraechtigt (identisches Fail-Safe-Prinzip wie ueberall sonst
+        in dieser Klasse).
+        """
+        self._on_deactivated_hooks.append(hook)
 
     # ------------------------------------------------------------------
     # Query (synchron, hot path)
@@ -157,6 +178,16 @@ class SymbolKillSwitch:
             success=True,
         )
         await self._persist(symbol_key, False, reason)
+
+        for hook in self._on_deactivated_hooks:
+            try:
+                await hook(symbol_key, reason)
+            except Exception as e:
+                log.error(
+                    "symbol_kill_switch.deactivation_hook_failed",
+                    symbol_key=symbol_key,
+                    error=str(e),
+                )
 
     async def activate(self, symbol_key: str, activated_by: str = "system") -> None:
         """

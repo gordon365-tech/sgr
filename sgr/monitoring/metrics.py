@@ -288,6 +288,61 @@ class SGRMetrics:
             "sgr.futures_grid.regime_score", "GridSuitabilityScore.composite fuer aktuelles Regime"
         )
 
+        # Erweiterte Grid-Metriken (2026-09-23, Phase Q - Architekturbericht
+        # "Futures-Grid-Strategie fuer SGR" Abschnitt K): schliesst die dort
+        # identifizierten Luecken gegenueber der angeforderten Metrik-Liste.
+        # Gleiches Label-Schema/Muster wie die bestehenden futures_grid_*-
+        # Instrumente oben.
+        self.futures_grid_levels_active = gauge(
+            "sgr.futures_grid.levels_active", "Anzahl aktuell gefuellter Grid-Level"
+        )
+        self.futures_grid_levels_total = gauge(
+            "sgr.futures_grid.levels_total", "Gesamtzahl konfigurierter Grid-Level"
+        )
+        self.futures_grid_cycles_total = counter(
+            "sgr.futures_grid.cycles",
+            "Anzahl abgeschlossener Grid-Zyklen (Open+Close eines Levels)",
+        )
+        self.futures_grid_unrealized_pnl = gauge(
+            "sgr.futures_grid.unrealized_pnl_usd", "Unrealisierter PnL der aktuellen Grid-Exposure"
+        )
+        self.futures_grid_drawdown = gauge(
+            "sgr.futures_grid.drawdown_pct",
+            "Aktueller Drawdown dieses Grids relativ zu seinem Peak",
+        )
+        self.futures_grid_avg_profit_per_cycle = gauge(
+            "sgr.futures_grid.avg_profit_per_cycle_usd", "Durchschnittlicher Profit pro Grid-Zyklus"
+        )
+        self.futures_grid_fees_total = gauge(
+            "sgr.futures_grid.fees_usd", "Kumulierte Fees dieses Grids"
+        )
+        self.futures_grid_utilization = gauge(
+            "sgr.futures_grid.utilization",
+            "Anteil aktuell gefuellter Level an der Gesamtzahl konfigurierter Level (0-1)",
+        )
+        self.futures_grid_recovery_events = counter(
+            "sgr.futures_grid.recovery_events", "Erfolgreich wiederhergestellte Grids nach Neustart"
+        )
+        self.futures_grid_recovery_failures = counter(
+            "sgr.futures_grid.recovery_failures",
+            "Grids, die bei Recovery NICHT wiederhergestellt werden konnten (fail-closed)",
+        )
+        self.futures_grid_errors = counter(
+            "sgr.futures_grid.errors", "Fehlgeschlagene Grid-Operationen (Fill/Persist/Close)"
+        )
+        self.futures_grid_kill_switch_events = counter(
+            "sgr.futures_grid.kill_switch_events",
+            "Grid-Schliessungen ausgeloest durch Symbol- oder globalen Kill-Switch",
+        )
+        self.futures_grid_cost_guard_rejects = counter(
+            "sgr.futures_grid.cost_guard_rejects",
+            "Von GridRiskEngine._check_cost_guard() abgelehnte Grid-Eroeffnungen",
+        )
+        self.futures_grid_rate_limit_events = counter(
+            "sgr.futures_grid.rate_limit_events",
+            "Durch GridRateLimiter verzoegerte/abgelehnte Grid-API-Calls",
+        )
+
         # Market Data Metrics
         self.candles_received = counter(
             "sgr.market_data.candles_received", "OHLCV candles received"
@@ -521,6 +576,96 @@ def record_futures_grid_fill(exchange: str, symbol: str, strategy: str, directio
     m.futures_grid_fills.add(
         1, {"exchange": exchange, "symbol": symbol, "strategy": strategy, "direction": direction}
     )
+
+
+def record_futures_grid_extended_snapshot(
+    exchange: str,
+    symbol: str,
+    strategy: str,
+    direction: str,
+    trading_mode: str,
+    levels_active: int,
+    levels_total: int,
+    unrealized_pnl_usd: float,
+    drawdown_pct: float,
+    avg_profit_per_cycle_usd: float,
+    fees_usd: float,
+) -> None:
+    """
+    Ergaenzt record_futures_grid_snapshot() um die in Phase Q neu
+    hinzugefuegten Gauges (2026-09-23). Getrennte Funktion statt
+    Erweiterung der bestehenden Signatur - vermeidet, jeden bestehenden
+    Aufrufer von record_futures_grid_snapshot() anzufassen (additiv,
+    Null-Regressionsrisiko).
+    """
+    m = get_metrics()
+    labels = {
+        "exchange": exchange,
+        "symbol": symbol,
+        "strategy": strategy,
+        "direction": direction,
+        "trading_mode": trading_mode,
+    }
+    m.futures_grid_levels_active.set(float(levels_active), labels)
+    m.futures_grid_levels_total.set(float(levels_total), labels)
+    m.futures_grid_unrealized_pnl.set(unrealized_pnl_usd, labels)
+    m.futures_grid_drawdown.set(drawdown_pct, labels)
+    m.futures_grid_avg_profit_per_cycle.set(avg_profit_per_cycle_usd, labels)
+    m.futures_grid_fees_total.set(fees_usd, labels)
+    m.futures_grid_utilization.set(
+        (levels_active / levels_total) if levels_total > 0 else 0.0, labels
+    )
+
+
+def record_futures_grid_cycle(exchange: str, symbol: str, strategy: str, direction: str) -> None:
+    """Ein Grid-Zyklus (Open+Close desselben Levels) wurde abgeschlossen -
+    siehe GridController._fill_level() (opening=False-Zweig)."""
+    m = get_metrics()
+    m.futures_grid_cycles_total.add(
+        1, {"exchange": exchange, "symbol": symbol, "strategy": strategy, "direction": direction}
+    )
+
+
+def record_futures_grid_recovery(
+    exchange: str, symbol: str, trading_mode: str, success: bool
+) -> None:
+    """Siehe GridController.restore_from_persistence()/_restore_one_grid()."""
+    m = get_metrics()
+    labels = {"exchange": exchange, "symbol": symbol, "trading_mode": trading_mode}
+    if success:
+        m.futures_grid_recovery_events.add(1, labels)
+    else:
+        m.futures_grid_recovery_failures.add(1, labels)
+
+
+def record_futures_grid_error(exchange: str, symbol: str, operation: str) -> None:
+    """Siehe GridController._fill_level()/_persist()/close_grid() Fehlerpfade."""
+    m = get_metrics()
+    m.futures_grid_errors.add(1, {"exchange": exchange, "symbol": symbol, "operation": operation})
+
+
+def record_futures_grid_kill_switch_event(exchange: str, symbol: str, scope: str) -> None:
+    """scope: 'symbol' oder 'global' - siehe GridController.
+    close_all_grids_for_symbol()/PositionLiquidator._close_all_grids()."""
+    m = get_metrics()
+    m.futures_grid_kill_switch_events.add(
+        1, {"exchange": exchange, "symbol": symbol, "scope": scope}
+    )
+
+
+def record_futures_grid_cost_guard_reject(exchange: str, symbol: str, strategy: str) -> None:
+    """Siehe GridRiskEngine._check_cost_guard()."""
+    m = get_metrics()
+    m.futures_grid_cost_guard_rejects.add(
+        1, {"exchange": exchange, "symbol": symbol, "strategy": strategy}
+    )
+
+
+def record_futures_grid_rate_limit_event(exchange: str, tenant_id: str, outcome: str) -> None:
+    """outcome: 'delayed' oder 'rejected' - siehe
+    sgr/execution/grid_rate_limiter.py::GridRateLimiter."""
+    m = get_metrics()
+    m.futures_grid_rate_limit_events.add(1, {"exchange": exchange, "outcome": outcome})
 
 
 def record_asset_universe_snapshot(entries: list[Any]) -> None:

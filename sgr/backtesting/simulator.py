@@ -592,13 +592,18 @@ class BacktestSimulator:
                der Stop greift (siehe Schritt 10 Diagnose: 70.6% der
                ADX-Grauzone-Stop-Trades zeigten einen deutlichen
                ADX-Anstieg in den ersten 10 Bars nach Entry).
-            2. ATR-Stop: 2.5x ATR unter Entry (Long) / über Entry (Short)
-               - Risikoschutz geht vor Gewinnmitnahme oder Zeitablauf.
+            2. ATR-Stop: config.atr_stop_multiplier x ATR unter Entry (Long)
+               / über Entry (Short) - Risikoschutz geht vor Gewinnmitnahme
+               oder Zeitablauf. Multiplikator konfigurierbar (Default 2.5,
+               siehe BacktestConfig.atr_stop_multiplier), vormals hart
+               codiert.
             3. Target erreicht: strategie-eigenes target_price aus
                signal.metadata (siehe SimulatedPosition.target_price
                Docstring) - nur falls die Strategie eines geliefert hat.
-            4. Zeit-Exit: Max 20 Bars gehalten (passiver Fallback, wenn
-               weder Stop noch Ziel erreicht wurden).
+            4. Zeit-Exit: Max config.max_holding_bars Bars gehalten
+               (passiver Fallback, wenn weder Stop noch Ziel erreicht
+               wurden). Konfigurierbar (Default 20, siehe
+               BacktestConfig.max_holding_bars), vormals hart codiert.
         """
         for symbol_str, pos in list(self._positions.items()):
             if symbol_str != current_bar.symbol.ccxt_symbol:
@@ -632,7 +637,7 @@ class BacktestSimulator:
                 atr = Decimal(str(atr_arr[-1])) if not np.isnan(atr_arr[-1]) else None
 
                 if atr:
-                    stop_distance = atr * Decimal("2.5")
+                    stop_distance = atr * self._config.atr_stop_multiplier
                     if pos.side == "long" and close < pos.entry_price - stop_distance:
                         exit_triggered = True
                         exit_reason = "atr_stop"
@@ -651,9 +656,9 @@ class BacktestSimulator:
                     exit_triggered = True
                     exit_reason = "target_reached"
 
-            # 4. Zeit-Exit: max 20 Bars (nur falls nichts von oben
-            # bereits getriggert hat)
-            if not exit_triggered and bars_held >= 20:
+            # 4. Zeit-Exit: max self._config.max_holding_bars Bars (nur
+            # falls nichts von oben bereits getriggert hat)
+            if not exit_triggered and bars_held >= self._config.max_holding_bars:
                 exit_triggered = True
                 exit_reason = "time_exit"
 

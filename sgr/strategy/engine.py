@@ -154,6 +154,17 @@ class StrategyEngine:
                 confidence=regime_confidence,
             )
 
+        # Best-effort: macht das gerade klassifizierte Regime fuer
+        # Konsumenten AUSSERHALB des Signal-Pfads abrufbar (2026-09-23,
+        # Live-Regime-Exit - siehe FeatureStore.save_regime() Docstring).
+        # Ein Fehler hier darf die eigentliche Signal-Generierung nicht
+        # blockieren (identisches Fail-Safe-Muster wie die
+        # record_market_regime()-Metrik direkt darunter).
+        try:
+            await self._feature_store.save_regime(symbol_key, timeframe, regime)
+        except Exception as e:
+            log.debug("strategy_engine.save_regime_failed", error=str(e))
+
         try:
             record_strategy_evaluation(symbol_key)
             record_market_regime(symbol_key, regime.value, REGIME_RANK.get(regime, 0))

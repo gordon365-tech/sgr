@@ -85,12 +85,14 @@ from sgr.core.config import get_config
 from sgr.core.logging import get_logger
 from sgr.core.types import (
     ExitReason,
+    MarketRegime,
     OrderRequest,
     OrderStatus,
     OrderType,
     Position,
     PositionSide,
     Side,
+    TradingMode,
 )
 
 log = get_logger(__name__)
@@ -104,9 +106,26 @@ class PositionProtectionManager:
     Rein rechnend/persistierend - platziert selbst KEINE Exchange-Order
     (siehe Modul-Docstring fuer die Begruendung) - die tatsaechliche
     Durchsetzung/der Exit passiert im PositionProtectionWatchdog.
+
+    Exit-Quelle (2026-09-23, explizite operative Anweisung - schliesst die
+    von der Analyse identifizierte Luecke, dass mean_reversion_v1/
+    breakout_v1 bereits ATR-basierte target_price/stop_price berechnen,
+    diese aber bisher nie den PositionProtectionManager erreichten):
+      1. Strategie-gelieferte Werte (order_metadata["target_price"]/
+         ["stop_price"], via RiskEngine.build_order_request() ->
+         ExecutionEngine -> result.raw_response -> PortfolioEngine
+         durchgereicht) - falls vorhanden UND plausibel, siehe
+         _extract_strategy_prices().
+      2. Sonst: globaler RiskLimitsConfig-Fallback (stop_loss_pct/
+         take_profit_pct) - unveraendertes Verhalten fuer
+         trend_following_v1/momentum_v1/volatility_adjusted_momentum_v1,
+         die keine Metadata liefern.
+    In beiden Faellen greift danach der Kosten-Guard (_apply_cost_guard()).
     """
 
-    async def on_position_opened(self, position: Position) -> Position | None:
+    async def on_position_opened(
+        self, position: Position, order_metadata: dict[str, Any] | None = None
+    ) -> Position | None:
         limits = get_config().risk_limits
 
         if limits.protection_cutover_at is None:
@@ -122,17 +141,32 @@ class PositionProtectionManager:
             return None
 
         entry = position.entry_price
-        sl_pct = Decimal(str(limits.stop_loss_pct))
-        tp_pct = Decimal(str(limits.take_profit_pct))
 
-        if position.side == PositionSide.LONG:
-            stop_loss_price = entry * (Decimal("1") - sl_pct)
-            take_profit_price = entry * (Decimal("1") + tp_pct)
+        strategy_target, strategy_stop = self._extract_strategy_prices(
+            order_metadata, position.side, entry
+        )
+
+        if strategy_target is not None and strategy_stop is not None:
+            take_profit_price = strategy_target
+            stop_loss_price = strategy_stop
+            exit_source = "strategy_metadata"
         else:
-            stop_loss_price = entry * (Decimal("1") + sl_pct)
-            take_profit_price = entry * (Decimal("1") - tp_pct)
+            sl_pct = Decimal(str(limits.stop_loss_pct))
+            tp_pct = Decimal(str(limits.take_profit_pct))
+            if position.side == PositionSide.LONG:
+                stop_loss_price = entry * (Decimal("1") - sl_pct)
+                take_profit_price = entry * (Decimal("1") + tp_pct)
+            else:
+                stop_loss_price = entry * (Decimal("1") + sl_pct)
+                take_profit_price = entry * (Decimal("1") - tp_pct)
+            exit_source = "config_fallback"
+
+        take_profit_price, cost_guard_applied = self._apply_cost_guard(
+            entry, take_profit_price, position.side, limits
+        )
 
         max_holding_until = position.opened_at + timedelta(minutes=limits.max_holding_minutes)
+        entry_regime = self._extract_entry_regime(order_metadata)
 
         log.info(
             "position_protection.attached",
@@ -142,6 +176,9 @@ class PositionProtectionManager:
             stop_loss_price=str(stop_loss_price),
             take_profit_price=str(take_profit_price),
             max_holding_until=max_holding_until.isoformat(),
+            exit_source=exit_source,
+            cost_guard_applied=cost_guard_applied,
+            entry_regime=entry_regime.value if entry_regime else None,
         )
 
         return position.model_copy(
@@ -149,8 +186,128 @@ class PositionProtectionManager:
                 "stop_loss_price": stop_loss_price,
                 "take_profit_price": take_profit_price,
                 "max_holding_until": max_holding_until,
+                "entry_regime": entry_regime,
             }
         )
+
+    @staticmethod
+    def _extract_entry_regime(order_metadata: dict[str, Any] | None) -> MarketRegime | None:
+        """
+        Liest das beim Entry klassifizierte Regime aus order_metadata
+        (siehe RiskEngine.build_order_request(): signal.regime wird dort
+        IMMER gesetzt, da Signal.regime ein Pflichtfeld ist - anders als
+        target_price/stop_price ist hier also kein "Strategie liefert es
+        manchmal nicht"-Fall zu behandeln, nur der generelle Fall
+        "order_metadata fehlt komplett" oder ein ungueltiger Wert
+        (defensiv, z.B. bei einem manuell/per Test konstruierten
+        order_metadata ohne dieses Feld - fail-safe: None statt Exception,
+        Regime-Exit bleibt dann fuer diese Position inaktiv, siehe
+        PositionProtectionWatchdog._check_regime_exit()).
+        """
+        if not order_metadata:
+            return None
+        raw = order_metadata.get("entry_regime")
+        if not raw:
+            return None
+        try:
+            return MarketRegime(raw)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _extract_strategy_prices(
+        order_metadata: dict[str, Any] | None,
+        side: PositionSide,
+        entry: Decimal,
+    ) -> tuple[Decimal | None, Decimal | None]:
+        """
+        Liest target_price/stop_price aus order_metadata (result.raw_response
+        der Entry-Order), falls von der Strategie geliefert (aktuell
+        mean_reversion_v1/breakout_v1, beide ATR-basiert). Andere
+        Strategien liefern nichts -> (None, None), Aufrufer faellt auf den
+        globalen RiskLimitsConfig-Fallback zurueck.
+
+        Nur akzeptiert, wenn BEIDE Werte vorhanden, positiv UND
+        richtungskonsistent sind (Long: stop < entry < target; Short:
+        target < entry < stop) - ein einzelner kaputter/unplausibler Wert
+        (z.B. der bekannte round(...,2)-Rundungsfehler bei Mikro-Preis-
+        Symbolen in mean_reversion_v1/breakout_v1, der target_price/
+        stop_price auf 0.0 rundet) darf nicht zu einem Stop bei Preis 0
+        oder einem Target auf der falschen Seite des Entries fuehren. Bei
+        jeder Unplausibilitaet: beide verwerfen, kompletter Fallback auf
+        die globale Config statt nur einem der beiden Werte zu vertrauen.
+        """
+        if not order_metadata:
+            return None, None
+        raw_target = order_metadata.get("target_price")
+        raw_stop = order_metadata.get("stop_price")
+        if not raw_target or not raw_stop:
+            return None, None
+        try:
+            target = Decimal(str(raw_target))
+            stop = Decimal(str(raw_stop))
+        except (ValueError, ArithmeticError):
+            return None, None
+        if target <= 0 or stop <= 0:
+            return None, None
+        if side == PositionSide.LONG:
+            if not (stop < entry < target):
+                return None, None
+        else:
+            if not (target < entry < stop):
+                return None, None
+        return target, stop
+
+    @staticmethod
+    def _apply_cost_guard(
+        entry: Decimal,
+        take_profit_price: Decimal,
+        side: PositionSide,
+        limits: Any,
+    ) -> tuple[Decimal, bool]:
+        """
+        Kosten-Guard (explizite operative Anweisung 2026-09-23): ein TP
+        darf nicht so eng sein, dass ein tatsaechlich ERREICHTES TP nach
+        den im Environment konfigurierten Kosten (RiskLimitsConfig.
+        paper_taker_fee_pct + paper_slippage_pct, je Seite - KEINE hart
+        codierten Binance/Pionex-Werte) trotzdem einen Nettoverlust
+        ergibt. Empirisch bestaetigt (eigener Sweep gegen echte
+        historische Daten, siehe Analysebericht): bei TP < Round-Trip-
+        Kosten lag die Win-Rate bei 0% ueber jede getestete SL-Distanz,
+        selbst wenn das TP-Level real getroffen wurde.
+
+        Bewusst KEIN fester globaler TP-Wert (0,20%/0,25%/0,50% etc.) -
+        stattdessen wird nur die minimale oekonomisch sinnvolle Distanz
+        erzwungen: ein zu enges TP wird auf genau die Kostenschwelle
+        angehoben, das Ziel selbst (strategiegetrieben oder Fallback)
+        bleibt ansonsten unveraendert. Bei den aktuellen Produktions-
+        Defaults (0,05%+0,05% je Seite = 0,20% Round-Trip,
+        take_profit_pct=2%) greift dieser Guard nicht - unveraendertes
+        Verhalten fuer die aktuelle Gordon/Sumo-Konfiguration.
+
+        Hinweis/dokumentierte Grenze: paper_taker_fee_pct/
+        paper_slippage_pct sind aktuell die einzigen in RiskLimitsConfig
+        konfigurierten Kostenschaetzwerte im System (fuer PAPER benannt,
+        aber es existiert kein separates LIVE-Pendant) - fuer LIVE-Trading
+        ist das eine Naeherung, kein exakter Exchange-Wert. Kein
+        spekulativer LIVE-spezifischer Kostenmechanismus wurde hier neu
+        erfunden; das ist eine bewusst dokumentierte Luecke, kein
+        stillschweigender Kompromiss.
+        """
+        round_trip_cost_pct = Decimal(
+            str(2 * (limits.paper_taker_fee_pct + limits.paper_slippage_pct))
+        )
+        min_distance = entry * round_trip_cost_pct
+
+        if side == PositionSide.LONG:
+            distance = take_profit_price - entry
+            if distance < min_distance:
+                return entry + min_distance, True
+        else:
+            distance = entry - take_profit_price
+            if distance < min_distance:
+                return entry - min_distance, True
+        return take_profit_price, False
 
     async def on_position_closed(self, position: Position, close_reason: str) -> None:
         """
@@ -176,6 +333,13 @@ class PositionProtectionWatchdog:
         await watchdog.start()
         ...
         await watchdog.stop()
+
+    PAPER-Stress-Test Auto-Recovery (2026-09-22, explizite operative
+    Anweisung fuer eine aggressive PAPER-Validierungsphase): optionales,
+    additives Feature ueber enable_paper_stress_auto_recovery() - siehe
+    dortigen Docstring. Standardmaessig deaktiviert (self._kill_switch
+    bleibt None), unveraendertes Verhalten fuer alle bestehenden
+    Call-Sites/Tests, die diese Methode nicht aufrufen.
     """
 
     def __init__(
@@ -183,11 +347,93 @@ class PositionProtectionWatchdog:
         portfolio_engine: Any,
         execution_engine: Any,
         interval_seconds: float = 60.0,
+        feature_store: Any = None,
+        regime_check_timeframe: str = "1h",
     ) -> None:
         self._portfolio = portfolio_engine
         self._execution = execution_engine
         self._interval_seconds = interval_seconds
         self._task: Any = None
+        # Live-Regime-Exit (2026-09-23): optional, additiv. feature_store=
+        # None (Default) haelt _check_regime_exit() als reinen No-Op -
+        # identisches Verhalten zu vorher fuer jeden bestehenden Aufrufer/
+        # Test, der diesen Parameter nicht setzt. regime_check_timeframe
+        # ist bewusst EIN globaler Wert (kein pro-Position-Timeframe, das
+        # existiert im Position-Domain-Typ nicht) - deckt sich mit dem
+        # de-facto-Standard-Timeframe (1h) fuer die meisten aktiven
+        # Feeds (siehe LIVE_MARKET_DATA_SYMBOLS in sgr/api/main.py) und
+        # ist explizit konfigurierbar fuer abweichende Deployments.
+        self._feature_store = feature_store
+        self._regime_check_timeframe = regime_check_timeframe
+
+        # PAPER-Stress-Test Auto-Recovery (additiv, siehe
+        # enable_paper_stress_auto_recovery()). _kill_switch bleibt None,
+        # solange das Feature nicht explizit aktiviert wird.
+        self._kill_switch: Any = None
+        self._auto_recovery_tenant_id: str | None = None
+        # Idempotenz (Anforderung 13): merkt sich, fuer welchen Trigger
+        # (identifiziert durch dessen triggered_at-Zeitstempel) bereits
+        # automatisch zurueckgesetzt wurde - verhindert doppelte reset()-
+        # Aufrufe/Log-Eintraege bei ueberlappenden Watchdog-Ticks, auch
+        # wenn KillSwitch.reset() selbst schon idempotent ist (frueher
+        # Return bei is_active=False).
+        self._last_auto_recovered_trigger_at: str | None = None
+        # Grobe Zaehlung "seit dem letzten Auto-Recovery geschlossene
+        # Positionen" fuer das Audit-Log (Anforderung 14) - bewusst kein
+        # praeziser Zusammenhang mit EINEM spezifischen Trigger noetig,
+        # da dieser Watchdog ohnehin sequenziell und pro Tenant isoliert
+        # arbeitet (ein Tenant-Prozess hat immer nur einen aktiven Trigger
+        # gleichzeitig).
+        self._positions_closed_since_recovery = 0
+
+    def enable_paper_stress_auto_recovery(
+        self,
+        kill_switch: Any,
+        trading_mode: TradingMode,
+        tenant_id: str | None,
+    ) -> None:
+        """
+        Aktiviert automatisches Kill-Switch-Reset NUR fuer eine
+        aggressive PAPER-Trading-Stress-Testphase (explizite operative
+        Anweisung, 2026-09-22) - schliesst die Luecke, dass der Kill
+        Switch nach max_open_positions permanent haengen bleibt und
+        dadurch jede weitere Signal-Batch nach dem ersten Zyklus
+        blockiert, obwohl alle ausloesenden Positionen laengst
+        geschlossen sind.
+
+        Bewusst KEIN Aenderung an KillSwitch selbst (dessen Trigger-
+        Verhalten, Redis-Persistenz, Pub/Sub-Sync und Tenant-Scoping
+        bleiben exakt wie zuvor, siehe sgr/risk/kill_switch.py) - dieser
+        Watchdog ruft nach jedem regulaeren Tick nur zusaetzlich dessen
+        bereits bestehende reset()-Methode auf, wenn:
+          1. der Kill Switch aktiv ist, UND
+          2. der Tenant aktuell 0 offene Positionen haelt (alle
+             Positionen der ausloesenden Batch sind bereits ueber den
+             normalen SL/TP/Max-Holding-Pfad oben geschlossen), UND
+          3. fuer GENAU DIESEN Trigger noch kein Auto-Recovery
+             stattgefunden hat (Idempotenz).
+
+        Hard-Refuse fuer LIVE (Anforderung 9): trading_mode wird explizit
+        geprueft, nicht nur vom Aufrufer vorausgesetzt - ein
+        Konfigurationsfehler (versehentlich fuer einen LIVE-Worker
+        aufgerufen) darf dieses Feature niemals aktivieren, komplett
+        unabhaengig davon, wie der Aufrufer (main.py) selbst entscheidet.
+        """
+        if trading_mode != TradingMode.PAPER:
+            log.error(
+                "position_protection_watchdog.paper_stress_auto_recovery_refused_non_paper",
+                trading_mode=trading_mode.value,
+                tenant_id=tenant_id,
+            )
+            return
+
+        self._kill_switch = kill_switch
+        self._auto_recovery_tenant_id = tenant_id
+        log.warning(
+            "position_protection_watchdog.paper_stress_auto_recovery_enabled",
+            tenant_id=tenant_id,
+            trading_mode=trading_mode.value,
+        )
 
     async def start(self) -> None:
         if self._task is not None:
@@ -219,8 +465,69 @@ class PositionProtectionWatchdog:
                         error=str(e),
                         exc_info=True,
                     )
+                if self._kill_switch is not None:
+                    try:
+                        await self._maybe_paper_stress_auto_recover()
+                    except Exception as e:
+                        log.error(
+                            "position_protection_watchdog.paper_stress_auto_recovery_tick_failed",
+                            error=str(e),
+                            exc_info=True,
+                        )
         except asyncio.CancelledError:
             raise
+
+    async def _maybe_paper_stress_auto_recover(self) -> None:
+        """
+        Ein einzelner Auto-Recovery-Check (siehe
+        enable_paper_stress_auto_recovery() Docstring). Oeffentlich
+        erreichbar ueber check_positions_once() hinaus fuer Tests
+        (direkter Aufruf ohne den Sleep-Loop nachzubilden, identisches
+        Muster wie check_positions_once() selbst).
+
+        Laeuft immer NACH check_positions_once() in _run_loop() (siehe
+        oben) - zum Zeitpunkt dieses Aufrufs sind alle SL/TP/Max-Holding-
+        Exits dieses Ticks bereits vollstaendig abgeschlossen (sequenziell,
+        kein asyncio.gather - siehe check_positions_once() Docstring),
+        die Positionsanzahl hier ist daher konsistent, kein Race.
+        """
+        ks = self._kill_switch
+        if ks is None or not ks.is_active:
+            return
+
+        if self._portfolio.positions:
+            # Noch offene Positionen aus der ausloesenden Batch (oder
+            # einer neueren) - NICHT zuruecksetzen (Anforderung 5).
+            return
+
+        state = ks.state
+        trigger_key = state.triggered_at.isoformat() if state.triggered_at else None
+        if trigger_key is not None and trigger_key == self._last_auto_recovered_trigger_at:
+            # Idempotenz (Anforderung 13): dieser exakte Trigger wurde
+            # bereits automatisch zurueckgesetzt - kein zweiter
+            # reset()-Aufruf/Log-Eintrag.
+            return
+
+        previous_reason = state.reason
+        previous_triggered_at = state.triggered_at
+        positions_closed = self._positions_closed_since_recovery
+
+        await ks.reset(reset_by="paper_stress_auto_recovery")
+
+        self._last_auto_recovered_trigger_at = trigger_key
+        self._positions_closed_since_recovery = 0
+
+        log.warning(
+            "position_protection_watchdog.paper_stress_auto_recovery_reset",
+            tenant_id=self._auto_recovery_tenant_id,
+            previous_reason=previous_reason,
+            previous_triggered_at=(
+                previous_triggered_at.isoformat() if previous_triggered_at else None
+            ),
+            positions_closed=positions_closed,
+            reset_at=datetime.now(tz=UTC).isoformat(),
+            reset_reason="paper_stress_auto_recovery",
+        )
 
     async def check_positions_once(self) -> None:
         """
@@ -260,17 +567,40 @@ class PositionProtectionWatchdog:
                 )
 
     async def _check_one_position(self, position: Position, now: datetime) -> None:
-        exit_reason: ExitReason | None = None
+        """
+        Explizite Exit-Prioritaet (2026-09-23, explizite operative
+        Anweisung - portiert die bereits im BacktestSimulator vorhandene
+        Reihenfolge, siehe dortiger _check_exits()-Docstring, in den
+        Live/Paper-Pfad, statt sie neu zu erfinden):
 
-        max_holding_until = position.max_holding_until
-        if max_holding_until is not None:
-            if max_holding_until.tzinfo is None:
-                max_holding_until = max_holding_until.replace(tzinfo=UTC)
-            if now >= max_holding_until:
-                exit_reason = ExitReason.MAX_HOLDING_TIME
+            1. Take Profit
+            2. Stop Loss
+            3. Regime-Exit (nur fuer dafuer vorgesehene Strategien/
+               Positionen - entry_regime == RANGING - siehe
+               _check_regime_exit() Docstring; seit 2026-09-23 live
+               implementiert ueber Position.entry_regime + FeatureStore.
+               get_latest_regime())
+            4. ATR/Trailing-Exit - deckt sich hier vollstaendig mit dem
+               Stop-Loss-Check in Schritt 2: wenn eine Strategie einen
+               ATR-basierten stop_price liefert (siehe
+               PositionProtectionManager._extract_strategy_prices()), IST
+               das bereits der in Schritt 2 gepruefte stop_loss_price -
+               kein separater dritter Preis-Check noetig.
+            5. Max-Holding-Time - AUSSCHLIESSLICH als letzter Fallback,
+               nicht mehr das dominante Exit-Verhalten (siehe
+               Analysebericht: im heutigen Stress-Test verliess praktisch
+               jede Position ueber diesen Pfad, nie ueber SL/TP - genau
+               das Gegenteil des gewuenschten Verhaltens).
 
+        Erster Treffer gewinnt, wie im Simulator.
+        """
+        exit_reason = self._check_take_profit(position)
         if exit_reason is None:
-            exit_reason = self._check_price_thresholds(position)
+            exit_reason = self._check_stop_loss(position)
+        if exit_reason is None:
+            exit_reason = await self._check_regime_exit(position)
+        if exit_reason is None:
+            exit_reason = self._check_max_holding_time(position, now)
 
         if exit_reason is None:
             return
@@ -278,18 +608,107 @@ class PositionProtectionWatchdog:
         await self._close_position(position, exit_reason)
 
     @staticmethod
-    def _check_price_thresholds(position: Position) -> ExitReason | None:
+    def _check_take_profit(position: Position) -> ExitReason | None:
         price = position.current_price
+        if position.take_profit_price is None:
+            return None
         if position.side == PositionSide.LONG:
-            if position.stop_loss_price is not None and price <= position.stop_loss_price:
-                return ExitReason.STOP_LOSS
-            if position.take_profit_price is not None and price >= position.take_profit_price:
+            if price >= position.take_profit_price:
                 return ExitReason.TAKE_PROFIT
         else:
-            if position.stop_loss_price is not None and price >= position.stop_loss_price:
-                return ExitReason.STOP_LOSS
-            if position.take_profit_price is not None and price <= position.take_profit_price:
+            if price <= position.take_profit_price:
                 return ExitReason.TAKE_PROFIT
+        return None
+
+    @staticmethod
+    def _check_stop_loss(position: Position) -> ExitReason | None:
+        price = position.current_price
+        if position.stop_loss_price is None:
+            return None
+        if position.side == PositionSide.LONG:
+            if price <= position.stop_loss_price:
+                return ExitReason.STOP_LOSS
+        else:
+            if price >= position.stop_loss_price:
+                return ExitReason.STOP_LOSS
+        return None
+
+    async def _check_regime_exit(self, position: Position) -> ExitReason | None:
+        """
+        Live-Regime-Exit (2026-09-23, schliesst die zuvor dokumentierte
+        Luecke: "Entry-Regime nicht gespeichert" + "kein Zugriff auf ein
+        aktuelles Regime" - siehe Position.entry_regime, Migration 0008,
+        und FeatureStore.save_regime()/get_latest_regime()).
+
+        Portiert exakt das Backtest-Vorbild (BacktestSimulator._check_exits():
+        Exit, wenn eine im RANGING-Regime eroeffnete Position nicht mehr
+        im RANGING-Regime ist) - KEINE neue Regime-Logik, nur derselbe
+        Vergleich gegen bereits existierende, bereits an anderer Stelle
+        berechnete Werte (Position.entry_regime, FeatureStore.
+        get_latest_regime()).
+
+        Nur fuer Strategien/Positionen relevant, bei denen Regime-Exit
+        fachlich Sinn ergibt (Mean-Reversion/Ranging-basiert, siehe
+        Analysebericht) - operationalisiert als "entry_regime ==
+        RANGING". Fuer trend_following_v1/momentum_v1/
+        volatility_adjusted_momentum_v1 (kein RANGING-Entry) ist dieser
+        Check dadurch strukturell ein No-Op, ohne eine explizite
+        Strategie-Namensliste pflegen zu muessen.
+
+        Fail-safe/keine stille Fallback-Logik: fehlen feature_store,
+        entry_regime oder ein aktuell bekanntes Regime, wird KEIN Exit
+        ausgeloest (nicht: "als ob unveraendert" vorgetaeuscht) - eine
+        fehlende Information darf niemals einen Exit erzwingen. Jeder
+        dieser Faelle ist explizit sichtbar (Log), nicht stillschweigend
+        verschluckt.
+        """
+        if self._feature_store is None:
+            return None
+        if position.entry_regime is None:
+            return None
+        if position.entry_regime != MarketRegime.RANGING:
+            return None
+
+        symbol_key = f"{position.symbol.exchange.value}:{position.symbol.ccxt_symbol}"
+        try:
+            current_regime = await self._feature_store.get_latest_regime(
+                symbol_key, self._regime_check_timeframe
+            )
+        except Exception as e:
+            log.warning(
+                "position_protection_watchdog.regime_exit_lookup_failed",
+                symbol=str(position.symbol),
+                error=str(e),
+            )
+            return None
+
+        if current_regime is None or current_regime == MarketRegime.UNKNOWN:
+            log.debug(
+                "position_protection_watchdog.regime_exit_no_current_regime",
+                symbol=str(position.symbol),
+            )
+            return None
+
+        if current_regime != MarketRegime.RANGING:
+            log.info(
+                "position_protection_watchdog.regime_exit_triggered",
+                symbol=str(position.symbol),
+                entry_regime=position.entry_regime.value,
+                current_regime=current_regime.value,
+            )
+            return ExitReason.REGIME_CHANGE
+
+        return None
+
+    @staticmethod
+    def _check_max_holding_time(position: Position, now: datetime) -> ExitReason | None:
+        max_holding_until = position.max_holding_until
+        if max_holding_until is None:
+            return None
+        if max_holding_until.tzinfo is None:
+            max_holding_until = max_holding_until.replace(tzinfo=UTC)
+        if now >= max_holding_until:
+            return ExitReason.MAX_HOLDING_TIME
         return None
 
     async def _close_position(self, position: Position, exit_reason: ExitReason) -> None:
@@ -349,3 +768,8 @@ class PositionProtectionWatchdog:
         # wird ausschliesslich direkt aufgerufen.
         if result.status == OrderStatus.FILLED:
             await self._portfolio.on_order_filled(result)
+            if self._kill_switch is not None:
+                # Nur fuer das Auto-Recovery-Audit-Log gezaehlt (siehe
+                # enable_paper_stress_auto_recovery()) - kein Effekt,
+                # wenn das Feature nicht aktiviert ist.
+                self._positions_closed_since_recovery += 1

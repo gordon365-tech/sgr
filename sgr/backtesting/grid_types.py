@@ -14,7 +14,9 @@ berechnen. Kein Parallel-Code fuer Sharpe/Sortino/Drawdown.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 
 from sgr.core.grid_types import FuturesGridParameters
@@ -42,6 +44,20 @@ class GridBacktestConfig:
     # echter historischer Funding-Raten.
     assumed_funding_rate_per_interval: Decimal = Decimal("0.0001")
     funding_interval_hours: int = 8
+
+    # Optionaler Hook fuer echte historische Funding-Raten (2026-09-23,
+    # Phase O - explizite Anweisung: "erweitere die Architektur so, dass
+    # historische Funding-Daten spaeter eingespeist werden koennen. Keinen
+    # erfundenen historischen Datensatz erzeugen"). Wenn gesetzt, ersetzt
+    # diese Funktion (timestamp -> Rate fuer DIESES Intervall)
+    # assumed_funding_rate_per_interval fuer jedes Funding-Intervall im
+    # Backtest - siehe GridBacktestSimulator.run(). None (Default) = exakt
+    # das bisherige, konstante Verhalten, unveraendert. Es wird HIER kein
+    # Datensatz mitgeliefert/erfunden - ein Aufrufer mit Zugriff auf eine
+    # echte Funding-Rate-Zeitreihe (z.B. eine kuenftige separate Tabelle)
+    # kann diesen Hook fuellen, ohne den Simulator selbst aendern zu
+    # muessen.
+    funding_rate_provider: Callable[[datetime], Decimal] | None = None
 
     # Breakout-Schutz: wird der Preis um mehr als diesen Faktor der
     # urspruenglichen Range-Breite ausserhalb der Grid-Range gehandelt,

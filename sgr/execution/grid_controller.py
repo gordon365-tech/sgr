@@ -56,7 +56,9 @@ from sgr.core.grid_types import (
 )
 from sgr.core.logging import get_logger
 from sgr.core.types import (
+    ExchangeID,
     GridDirection,
+    GridSpacingMode,
     GridStatus,
     OrderRequest,
     OrderStatus,
@@ -71,6 +73,18 @@ from sgr.execution.engine import ExecutionEngine
 from sgr.risk.grid_risk import GridPortfolioSnapshot, GridRiskEngine, get_grid_risk_engine
 
 log = get_logger(__name__)
+
+# Fill-Typ-Attribution (2026-09-23, Paper-Limit-Order-Semantik - siehe
+# CCXTBaseAdapter._simulate_order()): ein "level_cross"-Fill entspricht
+# einer ruhenden Limit-Order, die durch Preis-Crossing ausgeloest wurde
+# (siehe on_price_tick()) - wirtschaftlich ein Maker-Fill. Ein
+# "force_exit"-Fill (close_grid() bei Risk-Violation/Kill-Switch) ist ein
+# dringlicher Markt-Exit - wirtschaftlich ein Taker-Fill. Diese Strings
+# sind die vertragliche Schnittstelle zu CCXTBaseAdapter._simulate_order()
+# (dort per order.metadata["grid_fill_type"] gelesen) - nicht aendern,
+# ohne beide Seiten synchron zu halten.
+GRID_FILL_TYPE_LEVEL_CROSS = "level_cross"
+GRID_FILL_TYPE_FORCE_EXIT = "force_exit"
 
 
 class GridOpenResult:
@@ -102,6 +116,10 @@ class GridController:
         grid_risk_engine: GridRiskEngine | None = None,
         compliance_engine: ComplianceEngine | None = None,
         grid_repository: Any = None,
+        order_repository: Any = None,
+        symbol_kill_switch: Any = None,
+        exchange_pool: Any = None,
+        rate_limiter: Any = None,
     ) -> None:
         self._execution = execution_engine
         self._trading_mode = trading_mode
@@ -109,6 +127,28 @@ class GridController:
         self._grid_risk = grid_risk_engine or get_grid_risk_engine()
         self._compliance = compliance_engine or get_compliance_engine()
         self._grid_repo = grid_repository
+        # Alle drei optional/additiv, Default None = identisches Verhalten
+        # zu vorher fuer jeden bestehenden Aufrufer/Test:
+        #   order_repository: Recovery-Konsistenzpruefung (siehe
+        #       restore_from_persistence()) - Terminal-Status der im
+        #       Fill-Ledger referenzierten Orders.
+        #   symbol_kill_switch: blockt neue Grid-Level-Oeffnungen fuer
+        #       deaktivierte Symbole (siehe _symbol_blocked()) UND wird
+        #       als Deaktivierungs-Hook registriert (siehe
+        #       close_all_grids_for_symbol(), Aufrufstelle in
+        #       sgr/api/main.py).
+        #   exchange_pool: NUR fuer read-only Kontroll-Calls (Position-
+        #       Mode-Check, offene Exchange-Orders bei Recovery) - JEDE
+        #       tatsaechliche Order laeuft weiterhin ausschliesslich durch
+        #       self._execution (siehe Modul-Docstring "KEINE FAKE-
+        #       SHORTCUT-EXECUTION" - dieses Prinzip bleibt unveraendert).
+        self._order_repo = order_repository
+        self._symbol_kill_switch = symbol_kill_switch
+        self._exchange_pool = exchange_pool
+        # Phase J: optional, additiv - None (Default) = Rate-Limiter
+        # deaktiviert, identisches Verhalten zu vorher (siehe
+        # sgr/execution/grid_rate_limiter.py Modul-Docstring).
+        self._rate_limiter = rate_limiter
         # In-Memory-Registry aller vom Controller verwalteten Grids
         # (Prozess-lokal - Persistenz best-effort via _grid_repo, analog
         # zu PortfolioEngine._state._positions).
@@ -129,15 +169,77 @@ class GridController:
         liquidity_usd: Decimal | None = None,
         funding_rate_annualized_pct: float | None = None,
         volatility_atr_pct: float | None = None,
+        directional_exposure_usd: Decimal = Decimal("0"),
     ) -> GridOpenResult:
         if decision.direction == GridDirection.NEUTRAL or decision.parameters is None:
             return GridOpenResult(
                 None, False, "GridDecision.direction ist NEUTRAL - kein Grid vorgeschlagen."
             )
 
+        # 0. Symbol-Kill-Switch (2026-09-23, Phase G): identische
+        # Semantik wie der bereits bestehende Check in
+        # TradingOrchestrator.run_cycle() fuer direktionale Strategien -
+        # ein deaktiviertes Symbol darf kein neues Grid eroeffnen.
+        if self._symbol_blocked(symbol):
+            log.warning("grid_controller.symbol_kill_switch_blocked_open", symbol=str(symbol))
+            return GridOpenResult(
+                None,
+                False,
+                f"Symbol {symbol} ist per Symbol-Kill-Switch deaktiviert",
+                compliance_status="symbol_kill_switch_active",
+            )
+
         parameters = decision.parameters
         exchange = symbol.exchange
         product_type = ProductType.FUTURES_GRID
+
+        # 0b. Hedge-/Position-Mode-Kompatibilitaet (2026-09-23, Phase K):
+        # dieser Controller setzt niemals ein explizites positionSide auf
+        # der OrderRequest (siehe _fill_level()) - er wurde ausschliesslich
+        # gegen One-Way-Mode verifiziert. Ein Account im Hedge-Mode wuerde
+        # mit dieser Order-Semantik auf Binance mit einem Fehler
+        # abgelehnt bzw. auf einer Exchange, die stillschweigend eine
+        # Standard-Seite annimmt, zu falsch zugeordneten Positionen
+        # fuehren - beides nicht akzeptabel. Read-only Check (kein
+        # automatischer Moduswechsel, siehe Modul-Docstring "KEINE
+        # FAKE-SHORTCUT-EXECUTION" - ein Wechsel wuerde ausserdem
+        # bestehende Gordon-/Sumo-Positionen auf demselben Account
+        # gefaehrden koennen). NUR fuer LIVE relevant - PAPER simuliert
+        # keinen echten Account-Modus.
+        if self._trading_mode == TradingMode.LIVE and self._exchange_pool is not None:
+            try:
+                adapter = self._exchange_pool.get(exchange, self._trading_mode)
+                mode_info = await adapter.get_position_mode()
+                if mode_info.hedged:
+                    log.error(
+                        "grid_controller.hedge_mode_not_supported",
+                        symbol=str(symbol),
+                        exchange=exchange.value,
+                    )
+                    return GridOpenResult(
+                        None,
+                        False,
+                        (
+                            f"Account fuer {exchange.value} ist im Hedge-Mode - "
+                            "GridController ist nur fuer One-Way-Mode verifiziert "
+                            "(kein automatischer Moduswechsel, siehe Aufgabenstellung)"
+                        ),
+                        compliance_status="hedge_mode_unsupported",
+                    )
+            except Exception as e:
+                # NotSupportedFeatureError (Exchange kennt kein Hedge/
+                # One-Way-Konzept, z.B. Pionex) UND jeder andere Fehler
+                # werden identisch behandelt: fail-closed fuer LIVE waere
+                # hier zu aggressiv (viele Exchanges kennen das Konzept
+                # schlicht nicht) - stattdessen nur geloggt, das Grid darf
+                # weiterlaufen. Der eigentliche Schutz ist der explizite
+                # hedged=True-Fall oben, nicht die Abwesenheit einer
+                # Antwort.
+                log.debug(
+                    "grid_controller.position_mode_check_skipped",
+                    symbol=str(symbol),
+                    error=str(e),
+                )
 
         # 1. Capability
         cap = check_capability(
@@ -183,9 +285,28 @@ class GridController:
             liquidity_usd=liquidity_usd,
             funding_rate_annualized_pct=funding_rate_annualized_pct,
             volatility_atr_pct=volatility_atr_pct,
+            directional_exposure_usd=directional_exposure_usd,
         )
         if not risk_assessment.approved:
             log.warning("grid_controller.risk_rejected", reason=risk_assessment.reason)
+            reason_text = risk_assessment.reason or ""
+            if "Kostenschwelle" in reason_text or "Funding" in reason_text:
+                # Diskriminiert den Cost-Guard-Ablehnungsgrund (Phase F)
+                # per Text-Marker, da GridRiskEngine._evaluate_internal()
+                # bewusst symbol-/strategie-agnostisch bleibt (identisches
+                # Signatur-Prinzip wie sgr.risk.position_sizer.PositionSizer) -
+                # die Metrik-Label (exchange/symbol/strategy) sind hier am
+                # GridController, nicht in der Risk Engine, verfuegbar.
+                try:
+                    from sgr.monitoring.metrics import record_futures_grid_cost_guard_reject
+
+                    record_futures_grid_cost_guard_reject(
+                        exchange=exchange.value,
+                        symbol=symbol.ccxt_symbol,
+                        strategy=strategy_name,
+                    )
+                except Exception as e:
+                    log.debug("grid_controller.cost_guard_metric_failed", error=str(e))
             return GridOpenResult(None, False, risk_assessment.reason or "Risk rejected")
 
         grid = self._build_grid_state(decision, symbol, strategy_name, parameters)
@@ -202,6 +323,67 @@ class GridController:
             leverage=str(parameters.leverage),
         )
         return GridOpenResult(grid, True, "")
+
+    def _symbol_blocked(self, symbol: Symbol) -> bool:
+        """True wenn der Symbol-Kill-Switch fuer dieses Symbol aktiv ist
+        (siehe sgr/risk/symbol_kill_switch.py) - identisches Key-Format
+        wie TradingOrchestrator.on_candle_event() (f"{exchange}:{ccxt_symbol}")."""
+        if self._symbol_kill_switch is None:
+            return False
+        symbol_key = f"{symbol.exchange.value}:{symbol.ccxt_symbol}"
+        return not self._symbol_kill_switch.is_active(symbol_key)
+
+    async def close_all_grids_for_symbol(self, symbol_key: str, reason: str) -> list[GridState]:
+        """
+        Deaktivierungs-Hook fuer SymbolKillSwitch (siehe
+        SymbolKillSwitch.register_deactivation_hook(), Aufrufstelle in
+        sgr/api/main.py). Schliesst ALLE aktiven Grids auf diesem Symbol
+        vollstaendig (alle gefuellten Level via Reduce-Only-Orders,
+        identisch zu close_grid()) - Phase G, Punkt 3 ("offene Grid-
+        Exposure gemaess bestehendem Kill-Switch-Verhalten behandeln").
+
+        "Ruhende Grid Orders canceln" (Punkt 2 der Aufgabenstellung)
+        entfaellt strukturell: dieser Controller haelt aktuell KEINE
+        ruhenden Exchange-Orders (siehe Modul-Docstring - Level werden
+        erst bei Crossing als MARKET-Order gesendet) - es gibt nichts zu
+        stornieren, das nicht ohnehin bereits abgeschlossen ist.
+
+        Idempotent: close_grid() selbst ist idempotent (no-op fuer ein
+        bereits nicht-aktives Grid) - mehrfache Aufrufe (z.B. bei
+        wiederholter Deaktivierung) sind sicher.
+        """
+        closed: list[GridState] = []
+        for grid in list(self._grids.values()):
+            if not grid.is_active:
+                continue
+            grid_symbol_key = f"{grid.exchange.value}:{grid.symbol.ccxt_symbol}"
+            if grid_symbol_key != symbol_key:
+                continue
+            price = grid.last_price
+            if price is None:
+                log.error(
+                    "grid_controller.close_on_symbol_kill_switch_no_price",
+                    grid_id=str(grid.id),
+                    symbol_key=symbol_key,
+                )
+                continue
+            closed_grid = await self.close_grid(str(grid.id), f"symbol_kill_switch:{reason}", price)
+            closed.append(closed_grid)
+            log.warning(
+                "grid_controller.closed_on_symbol_kill_switch",
+                grid_id=str(grid.id),
+                symbol_key=symbol_key,
+                reason=reason,
+            )
+            try:
+                from sgr.monitoring.metrics import record_futures_grid_kill_switch_event
+
+                record_futures_grid_kill_switch_event(
+                    exchange=grid.exchange.value, symbol=grid.symbol.ccxt_symbol, scope="symbol"
+                )
+            except Exception as e:
+                log.debug("grid_controller.kill_switch_metric_failed", error=str(e))
+        return closed
 
     def _build_grid_state(
         self,
@@ -299,6 +481,15 @@ class GridController:
         is_long = grid.direction == GridDirection.LONG
         levels = sorted(grid.levels, key=lambda lv: lv.index)
 
+        # Symbol-Kill-Switch (Phase G, Punkt 1 "keine neue Grid-Order
+        # mehr"): blockt NUR das Oeffnen neuer Level. Bereits gefuellte
+        # Level duerfen weiterhin schliessen (de-risking bleibt erlaubt -
+        # identisches Prinzip wie bypass_kill_switch bei
+        # PositionProtectionWatchdog/PositionLiquidator: eine Order, die
+        # Exposure REDUZIERT, darf nicht durch denselben Mechanismus
+        # blockiert werden, der sie eigentlich ausloesen soll).
+        new_opens_blocked = self._symbol_blocked(grid.symbol)
+
         # Cell-Modell (identisch zu sgr.backtesting.grid_simulator):
         # Cell i liegt zwischen levels[i] und levels[i+1]. Der
         # Fuellzustand ("is_filled") wird auf dem EINTRITTS-Level der
@@ -310,7 +501,7 @@ class GridController:
             entry_price = entry_state.price
             exit_price = levels[i + 1].price if is_long else levels[i].price
 
-            if not entry_state.is_filled and _crossed(entry_price):
+            if not entry_state.is_filled and _crossed(entry_price) and not new_opens_blocked:
                 opening_direction_ok = moving_down if is_long else moving_up
                 if opening_direction_ok:
                     await self._fill_level(grid, entry_state, entry_price, opening=True)
@@ -326,8 +517,47 @@ class GridController:
         return grid
 
     async def _fill_level(
-        self, grid: GridState, level: GridLevelState, current_price: Decimal, *, opening: bool
+        self,
+        grid: GridState,
+        level: GridLevelState,
+        current_price: Decimal,
+        *,
+        opening: bool,
+        fill_type: str = GRID_FILL_TYPE_LEVEL_CROSS,
     ) -> None:
+        """
+        All-or-Nothing-Fill-Semantik (Phase P, 2026-09-23, explizite
+        Anweisung: "AON sauber als explizite Grid-Limitation kapseln"):
+        ein Level-Fill wird IMMER vollstaendig oder gar nicht verarbeitet.
+        `GridLevelState.quantity` ist ein einzelner Decimal-Wert (kein
+        "teilweise gefuellt, Rest ausstehend"-Zustand modelliert) - jede
+        Order, deren OrderResult.status NICHT exakt FILLED ist (siehe
+        Check unten, insbesondere PARTIALLY_FILLED), fuehrt zu einem
+        VOLLSTAENDIGEN No-Op: kein Level-Zustand, kein net_position_qty,
+        kein Fill-Ledger-Eintrag, KEIN Teilzustand wird geschrieben. Diese
+        Entscheidung gilt konsistent ueber alle Schichten:
+            - Risk (GridRiskEngine): rechnet ausschliesslich mit der vollen
+              parameters.position_size pro Level, keine Teilmengen.
+            - Recovery (restore_from_persistence()): der Fill-Ledger
+              enthaelt ausschliesslich vollstaendige Fills (siehe oben -
+              ein PARTIALLY_FILLED-Ergebnis erzeugt gar keinen
+              Ledger-Eintrag), Replay kennt daher strukturell keine
+              Teil-Fills.
+            - Accounting (grid.net_position_qty/realized_pnl): wird
+              ausschliesslich bei einem vollstaendigen Fill aktualisiert.
+            - Backtest (GridBacktestSimulator): simuliert ebenfalls
+              All-or-Nothing pro Level (dokumentierte Vereinfachung, siehe
+              dortigen Docstring - keine partiellen Cell-Fills).
+            - Paper (CCXTBaseAdapter._simulate_order()): liefert fuer
+              MARKET-Orders strukturell immer FILLED oder einen Fehler,
+              nie PARTIALLY_FILLED - Paper kann diesen Zustand aktuell gar
+              nicht erzeugen.
+        Ein echtes Partial-Fill-Handling wuerde eine grundlegend andere
+        GridLevelState-Modellierung erfordern (verbleibende Restmenge pro
+        Level, mehrere Teil-Orders pro Level-Zyklus) - bewusst NICHT in
+        diesem Schritt eingefuehrt, um keinen Zustand vorzutaeuschen, den
+        Risk/Recovery/Accounting/Backtest nicht konsistent verstehen.
+        """
         is_long = grid.direction == GridDirection.LONG
 
         if opening:
@@ -365,8 +595,35 @@ class GridController:
                 "grid_id": str(grid.id),
                 "grid_level_index": level.index,
                 "target_leverage": grid.parameters.get("leverage", "1"),
+                # Phase I (Paper-Limit-Order-Semantik): ein "level_cross"-
+                # Fill ist wirtschaftlich ein Maker-Fill (die Order haette
+                # als ruhende Limit-Order genau an diesem Preis gefuellt -
+                # siehe Modul-Docstring), ein "force_exit"-Fill (Risk-
+                # Violation/Kill-Switch/Grid-Close) ist ein dringlicher
+                # Taker-Exit. CCXTBaseAdapter._simulate_order() liest
+                # dieses Feld, um die passende Paper-Fee anzuwenden.
+                "grid_fill_type": fill_type,
             },
         )
+
+        # Phase J: Rate-Limit-Budget-Check VOR jedem Order-Submit (siehe
+        # sgr/execution/grid_rate_limiter.py Modul-Docstring - proaktive
+        # Vorstufe, kein Ersatz fuer die bestehende ccxt-Retry-/Ban-Logik).
+        # Budget erschoepft -> kein Submit, kein Retry-Sturm, dieser eine
+        # Fill-Versuch entfaellt fuer diesen Preis-Tick (der naechste
+        # Tick/Scheduler-Zyklus versucht es erneut - identisches
+        # Fail-Safe-Prinzip wie ein fehlender Preis).
+        if self._rate_limiter is not None:
+            allowed = await self._rate_limiter.acquire(
+                grid.exchange.value, self._tenant_id, "order_submit"
+            )
+            if not allowed:
+                log.warning(
+                    "grid_controller.level_fill_rate_limited",
+                    grid_id=str(grid.id),
+                    level_index=level.index,
+                )
+                return
 
         result = await self._execution.execute(order)
         if result.status != OrderStatus.FILLED:
@@ -378,9 +635,41 @@ class GridController:
             )
             return
 
+        now = datetime.now(tz=UTC)
+
+        # Fill-Ledger-Eintrag VOR der aggregierten State-Mutation (Phase
+        # B/C, Crash-Recovery): siehe GridRepository.get_fills() Docstring
+        # - der Ledger ist dadurch die autoritativere Quelle bei einem
+        # Absturz zwischen diesem Schreibvorgang und dem _persist(grid)
+        # am Ende dieser Methode. Best-effort wie jede andere Persistenz
+        # in dieser Klasse - ein Fehler hier darf den bereits erfolgten,
+        # echten Exchange-Fill nicht rueckgaengig machen, nur die
+        # Ledger-Eintragung entfaellt (Recovery faellt dann auf den
+        # GridModel.levels-Snapshot zurueck, siehe restore_from_persistence()).
+        if self._grid_repo is not None:
+            try:
+                await self._grid_repo.record_level_fill(
+                    grid_id=str(grid.id),
+                    level_index=level.index,
+                    price=current_price,
+                    side=side.value,
+                    quantity=qty,
+                    is_opening=opening,
+                    filled_at=now,
+                    order_id=str(order.id),
+                    cycle_pnl=None,  # unten nachgetragen, falls closing
+                )
+            except Exception as e:
+                log.error(
+                    "grid_controller.record_level_fill_failed",
+                    grid_id=str(grid.id),
+                    level_index=level.index,
+                    error=str(e),
+                )
+
         level.is_filled = opening
         level.last_order_id = result.exchange_order_id
-        level.last_filled_at = datetime.now(tz=UTC)
+        level.last_filled_at = now
         if opening:
             level.cycle_count += 1
             level.quantity = qty
@@ -401,6 +690,17 @@ class GridController:
             grid.realized_pnl += cycle_pnl
             level.quantity = Decimal("0")
 
+        # Sofortiger Persist NACH JEDEM einzelnen Fill (Phase B/C-Fix,
+        # 2026-09-23): vorher wurde grid.levels erst am ENDE von
+        # on_price_tick()/close_grid() persistiert, obwohl _fill_level()
+        # dazwischen bereits echte Exchange-Orders ausloest - ein Absturz
+        # zwischen zwei Fills innerhalb desselben Ticks haette den
+        # bereits real ausgefuehrten Fill beim naechsten Neustart
+        # verloren (GridModel.levels haette den alten Zustand gezeigt).
+        # Der Ledger-Eintrag oben deckt denselben Fall zusaetzlich ab,
+        # falls sogar DIESER Persist noch scheitert.
+        await self._persist(grid)
+
         log.info(
             "grid_controller.level_filled",
             grid_id=str(grid.id),
@@ -408,10 +708,14 @@ class GridController:
             opening=opening,
             price=str(current_price),
             qty=str(qty),
+            fill_type=fill_type,
         )
 
         try:
-            from sgr.monitoring.metrics import record_futures_grid_fill
+            from sgr.monitoring.metrics import (
+                record_futures_grid_extended_snapshot,
+                record_futures_grid_fill,
+            )
 
             record_futures_grid_fill(
                 exchange=grid.exchange.value,
@@ -419,23 +723,64 @@ class GridController:
                 strategy=grid.strategy_name,
                 direction=grid.direction.value,
             )
+            if not opening:
+                from sgr.monitoring.metrics import record_futures_grid_cycle
+
+                record_futures_grid_cycle(
+                    exchange=grid.exchange.value,
+                    symbol=grid.symbol.ccxt_symbol,
+                    strategy=grid.strategy_name,
+                    direction=grid.direction.value,
+                )
+            levels_active = sum(1 for lv in grid.levels if lv.is_filled)
+            levels_total = len(grid.levels)
+            closed_cycles = sum(lv.cycle_count for lv in grid.levels) - levels_active
+            avg_profit_per_cycle = (
+                float(grid.realized_pnl) / closed_cycles if closed_cycles > 0 else 0.0
+            )
+            record_futures_grid_extended_snapshot(
+                exchange=grid.exchange.value,
+                symbol=grid.symbol.ccxt_symbol,
+                strategy=grid.strategy_name,
+                direction=grid.direction.value,
+                trading_mode=grid.trading_mode.value,
+                levels_active=levels_active,
+                levels_total=levels_total,
+                # unrealized_pnl_usd/drawdown_pct: kein Mark-to-Market-Preis bzw. keine
+                # Peak-Value-Historie fuer Grids gefuehrt (siehe Abschlussbericht).
+                unrealized_pnl_usd=0.0,
+                drawdown_pct=0.0,
+                avg_profit_per_cycle_usd=avg_profit_per_cycle,
+                fees_usd=float(grid.fees_paid),
+            )
         except Exception as e:
             log.debug("grid_controller.fill_metric_failed", error=str(e))
+            try:
+                from sgr.monitoring.metrics import record_futures_grid_error
+
+                record_futures_grid_error(
+                    exchange=grid.exchange.value, symbol=grid.symbol.ccxt_symbol, operation="fill"
+                )
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Lifecycle: close
     # ------------------------------------------------------------------
 
-    async def close_grid(self, grid_id: str, reason: str, current_price: Decimal) -> GridState:
+    async def close_grid(
+        self, grid_id: str, reason: str, current_price: Decimal, *, force: bool = True
+    ) -> GridState:
         grid = self._require_grid(grid_id)
         if not grid.is_active:
             return grid
 
+        fill_type = GRID_FILL_TYPE_FORCE_EXIT if force else GRID_FILL_TYPE_LEVEL_CROSS
         grid.status = GridStatus.CLOSING
         for level in grid.levels:
             if not level.is_filled:
                 continue
-            await self._fill_level(grid, level, current_price, opening=False)
+            await self._fill_level(grid, level, current_price, opening=False, fill_type=fill_type)
 
         grid.status = GridStatus.CLOSED
         grid.closed_at = datetime.now(tz=UTC)
@@ -495,6 +840,241 @@ class GridController:
     # ------------------------------------------------------------------
     # Queries / persistence
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Crash Recovery (Phase C)
+    # ------------------------------------------------------------------
+
+    async def restore_from_persistence(self) -> list[GridState]:
+        """
+        Grid-Crash-Recovery nach einem Worker-Neustart. Analoges Muster zu
+        PortfolioEngine.restore_from_persistence()/RecoveryManager.
+        recover_after_crash(), aber grid-spezifisch, weil der einzige
+        bisher bestehende Live-Order-Pfad dieses Controllers ausschliesslich
+        MARKET-Orders bei erkanntem Preis-Crossing sendet (siehe
+        Modul-Docstring) - es gibt aktuell KEINE ruhenden Exchange-Orders
+        zu rekonzilieren (das waere erst fuer eine kuenftige Live-
+        Implementierung mit echten Limit-Orders relevant, siehe
+        "offene Punkte" im Strategiebericht). Die tatsaechlich vorhandene,
+        wiederherzustellende Information ist der Level-FUELLSTATUS.
+
+        Zustands-Herkunft, in Prioritaet:
+        1. Fill-Ledger (GridRepository.get_fills(), append-only, VOR jeder
+           GridModel-Aktualisierung geschrieben - siehe _fill_level()) -
+           die autoritative Quelle. Level-Array wird komplett NEU aus
+           den persistierten Grid-Parametern aufgebaut (identische
+           compute_levels()-Berechnung wie bei der Eroeffnung) und dann
+           durch chronologisches Replay des Ledgers auf den tatsaechlich
+           bekannten Fuellstatus gebracht - NICHT aus dem levels-JSONB-
+           Snapshot uebernommen, der zwischen dem letzten Fill und dem
+           Absturz stale sein kann (siehe _fill_level()-Kommentar zur
+           Persist-Reihenfolge).
+        2. Order-Status-Kreuzcheck (nur wenn order_repository injiziert):
+           jeder Ledger-Eintrag mit order_id wird gegen den tatsaechlichen
+           OrderRepository-Status geprueft. Nicht "filled" oder gar nicht
+           gefunden -> unklarer Zustand -> GESAMTES Grid wird NICHT
+           wiederhergestellt (fail-closed, kein Teilzustand).
+
+        Es wird bei Recovery NIEMALS eine neue Order platziert (weder
+        fehlende Gegenorders werden "nachgeholt" noch irgendetwas
+        storniert) - Levels, die laut Ledger offen sind, bleiben einfach
+        korrekt als is_filled=True markiert und werden beim naechsten
+        echten on_price_tick()-Aufruf ganz normal weiterverarbeitet (die
+        "fehlende Gegenorder" IST der naechste Crossing-Tick, kein
+        separater Rekonstruktionsschritt - siehe Klassen-Docstring).
+        Bestehende Idempotenz (order.id als Client-Order-ID, siehe
+        sgr/execution/order_safety.py) bleibt dadurch vollstaendig
+        unangetastet und wird nicht dupliziert.
+
+        Grids mit unklarem Zustand werden NICHT in self._grids
+        aufgenommen (bleiben in der DB unveraendert im zuletzt bekannten
+        Status stehen) - sie erfordern manuelle Pruefung, kein
+        automatisches Resubmit/Cancel.
+        """
+        if self._grid_repo is None:
+            log.warning("grid_controller.restore_skipped_no_repository")
+            return []
+
+        try:
+            rows = await self._grid_repo.get_open_grids(
+                self._trading_mode, user_id=self._tenant_id
+            )
+        except Exception as e:
+            log.error("grid_controller.restore_load_open_grids_failed", error=str(e))
+            return []
+
+        restored: list[GridState] = []
+        inconsistent = 0
+        for row in rows:
+            try:
+                grid = await self._restore_one_grid(row)
+            except Exception as e:
+                log.error(
+                    "grid_controller.restore_one_grid_unexpected_error",
+                    grid_id=row.get("id"),
+                    error=str(e),
+                    exc_info=True,
+                )
+                grid = None
+            try:
+                from sgr.monitoring.metrics import record_futures_grid_recovery
+
+                record_futures_grid_recovery(
+                    exchange=str(row.get("exchange")),
+                    symbol=str(row.get("symbol")),
+                    trading_mode=self._trading_mode.value,
+                    success=grid is not None,
+                )
+            except Exception as metric_err:
+                log.debug("grid_controller.recovery_metric_failed", error=str(metric_err))
+            if grid is None:
+                inconsistent += 1
+                continue
+            self._grids[str(grid.id)] = grid
+            restored.append(grid)
+
+        log.info(
+            "grid_controller.restore_completed",
+            candidates=len(rows),
+            restored=len(restored),
+            inconsistent=inconsistent,
+        )
+        return restored
+
+    async def _restore_one_grid(self, row: dict[str, Any]) -> GridState | None:
+        grid = self._grid_state_from_row(row)
+
+        try:
+            fills = await self._grid_repo.get_fills(str(row["id"]))
+        except Exception as e:
+            log.error(
+                "grid_controller.restore_fills_load_failed", grid_id=row["id"], error=str(e)
+            )
+            return None  # fail-closed: ohne Ledger-Zugriff keine sichere Rekonstruktion
+
+        levels_by_index = {lv.index: lv for lv in grid.levels}
+        for fill in fills:
+            idx = fill["level_index"]
+            level = levels_by_index.get(idx)
+            if level is None:
+                log.error(
+                    "grid_controller.restore_fill_references_unknown_level",
+                    grid_id=row["id"],
+                    level_index=idx,
+                )
+                return None  # fail-closed: Ledger widerspricht der Parameter-Struktur
+
+            order_id = fill.get("order_id")
+            if order_id is not None and self._order_repo is not None:
+                order_status = await self._lookup_order_status(str(order_id))
+                if order_status != "filled":
+                    log.error(
+                        "grid_controller.restore_inconsistent_order_status",
+                        grid_id=row["id"],
+                        level_index=idx,
+                        order_id=str(order_id),
+                        status=order_status,
+                    )
+                    return None  # fail-closed: unklarer Order-Ausgang, kein Raten
+
+            if fill["is_opening"]:
+                level.is_filled = True
+                level.quantity = fill["quantity"]
+                level.cycle_count += 1
+            else:
+                level.is_filled = False
+                level.quantity = Decimal("0")
+            level.last_order_id = str(order_id) if order_id else level.last_order_id
+            level.last_filled_at = fill["filled_at"]
+
+        grid.levels = sorted(levels_by_index.values(), key=lambda lv: lv.index)
+
+        log.info(
+            "grid_controller.grid_restored",
+            grid_id=row["id"],
+            symbol=row["symbol"],
+            levels_filled=sum(1 for lv in grid.levels if lv.is_filled),
+            levels_total=len(grid.levels),
+            fills_replayed=len(fills),
+        )
+        return grid
+
+    async def _lookup_order_status(self, order_id: str) -> str | None:
+        """Best-effort DB-Status-Lookup (kein Exchange-Call) - fail-safe
+        None bei jedem Fehler, vom Aufrufer als 'unklar' behandelt."""
+        if self._order_repo is None:
+            return None
+        try:
+            row = await self._order_repo.get_by_id(order_id)
+        except Exception as e:
+            log.error("grid_controller.order_status_lookup_failed", order_id=order_id, error=str(e))
+            return None
+        if row is None:
+            return None
+        status = row.get("status")
+        return str(status) if status is not None else None
+
+    def _grid_state_from_row(self, row: dict[str, Any]) -> GridState:
+        """
+        Rekonstruiert die GridState-Rahmendaten (Metadaten, Aggregatwerte,
+        Parameter) aus einer GridRepository-Zeile. levels wird bewusst
+        FRISCH aus den persistierten Parametern aufgebaut (compute_levels(),
+        identisch zur urspruenglichen Eroeffnung in _build_grid_state()),
+        NICHT aus dem levels-JSONB-Snapshot direkt uebernommen - der
+        Ledger-Replay in _restore_one_grid() ist die einzige autoritative
+        Quelle fuer den tatsaechlichen Fuellstatus (siehe dortigen
+        Docstring).
+        """
+        base, _, quote = str(row["symbol"]).partition("/")
+        exchange = ExchangeID(row["exchange"])
+        symbol = Symbol(base=base, quote=quote, exchange=exchange)
+        parameters_dict = row.get("parameters") or {}
+        direction = GridDirection(row["direction"])
+
+        levels_prices = self._compute_levels_from_parameters(parameters_dict, direction)
+        is_long = direction == GridDirection.LONG
+        levels = [
+            GridLevelState(index=i, price=price, side="buy" if is_long else "sell")
+            for i, price in enumerate(levels_prices)
+        ]
+
+        return GridState(
+            id=row["id"],
+            tenant_id=row.get("user_id"),
+            exchange=exchange,
+            symbol=symbol,
+            strategy_name=row["strategy_name"],
+            trading_mode=TradingMode(row["trading_mode"]),
+            direction=direction,
+            status=GridStatus(row["status"]),
+            parameters=parameters_dict,
+            levels=levels,
+            net_position_qty=Decimal(str(row.get("net_position_qty") or "0")),
+            realized_pnl=Decimal(str(row.get("realized_pnl") or "0")),
+            fees_paid=Decimal(str(row.get("fees_paid") or "0")),
+            funding_paid=Decimal(str(row.get("funding_paid") or "0")),
+            fills_count=int(row.get("fills_count") or 0),
+            last_price=(
+                Decimal(str(row["last_price"])) if row.get("last_price") is not None else None
+            ),
+            opened_at=row["opened_at"],
+            closed_at=row.get("closed_at"),
+            close_reason=row.get("close_reason"),
+        )
+
+    @staticmethod
+    def _compute_levels_from_parameters(
+        parameters_dict: dict[str, Any], direction: GridDirection
+    ) -> list[Decimal]:
+        params = FuturesGridParameters(
+            grid_lower_price=Decimal(str(parameters_dict["grid_lower_price"])),
+            grid_upper_price=Decimal(str(parameters_dict["grid_upper_price"])),
+            grid_count=int(parameters_dict["grid_count"]),
+            long_or_short=direction,
+            leverage=Decimal(str(parameters_dict.get("leverage", "1"))),
+            grid_mode=GridSpacingMode(parameters_dict.get("grid_mode", "arithmetic")),
+        )
+        return params.compute_levels()
 
     def get_grid(self, grid_id: str) -> GridState | None:
         return self._grids.get(grid_id)

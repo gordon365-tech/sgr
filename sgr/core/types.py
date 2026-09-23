@@ -137,6 +137,7 @@ class ExitReason(StrEnum):
 
     STOP_LOSS = "stop_loss"
     TAKE_PROFIT = "take_profit"
+    REGIME_CHANGE = "regime_change"
     MAX_HOLDING_TIME = "max_holding_time"
     STRATEGY_SIGNAL = "strategy_signal"  # normales, gegenlaeufiges Signal
     KILL_SWITCH = "kill_switch"
@@ -417,6 +418,17 @@ class Position(BaseModel):
     max_holding_until: datetime | None = None
     sl_order_id: str | None = None
     tp_order_id: str | None = None
+
+    # Regime, das beim Entry der Strategie zugrunde lag (Migration 0008,
+    # siehe sgr/risk/position_protection.py PositionProtectionWatchdog.
+    # _check_regime_exit()). None = kein Entry-Regime bekannt (Legacy-
+    # Position vor diesem Feature, oder Strategie ohne Regime-Exit-
+    # Relevanz) - Regime-Exit bleibt fuer diese Position inaktiv, kein
+    # falscher Default. WICHTIG fuer jeden Aufrufer, der ein Position-
+    # Objekt neu konstruiert (siehe stop_loss_price-Kommentar oben):
+    # dieses Feld muss ebenso uebernommen werden, sonst geht es beim
+    # naechsten Preis-Tick verloren.
+    entry_regime: MarketRegime | None = None
 
     @property
     def notional_value(self) -> Decimal:

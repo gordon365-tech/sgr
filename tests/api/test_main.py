@@ -884,19 +884,39 @@ class TestLifespanTenantId:
                 new=AsyncMock(return_value={"apiKey": "k", "secret": "s"}),
             ):
                 async with lifespan(app):
-                    # bus.subscribe() wird zweimal aufgerufen (CandleEvent
-                    # fuer den Orchestrator, KillSwitchEvent fuer den
-                    # PositionLiquidator - siehe sgr/risk/position_liquidator.py).
-                    # Dieser Test prueft gezielt die CandleEvent-Subscription.
+                    # bus.subscribe() wird fuer CandleEvent ZWEIMAL aufgerufen
+                    # (Orchestrator UND, seit 2026-09-23, GridScheduler - siehe
+                    # sgr/orchestrator/grid_scheduler.py Modul-Docstring: eigene
+                    # Consumer-Group, damit der [per Default deaktivierte]
+                    # Grid-Scheduler den direktionalen Zyklus nie blockiert)
+                    # plus KillSwitchEvent fuer den PositionLiquidator. Dieser
+                    # Test prueft gezielt die Orchestrator-CandleEvent-Subscription.
                     from sgr.core.types import CandleEvent
 
                     candle_calls = [
                         c for c in mocks["bus"].subscribe.call_args_list if c.args[0] is CandleEvent
                     ]
-                    assert len(candle_calls) == 1
-                    call = candle_calls[0]
+                    assert len(candle_calls) == 2
+                    orchestrator_calls = [
+                        c
+                        for c in candle_calls
+                        if c.kwargs["consumer_group"].startswith("orchestrator:")
+                    ]
+                    assert len(orchestrator_calls) == 1
+                    call = orchestrator_calls[0]
                     assert call.kwargs["consumer_group"] == "orchestrator:a47d994d-gordon"
                     assert call.kwargs["consumer_name"] == "orchestrator-a47d994d-gordon-1"
+
+                    grid_scheduler_calls = [
+                        c
+                        for c in candle_calls
+                        if c.kwargs["consumer_group"].startswith("grid_scheduler:")
+                    ]
+                    assert len(grid_scheduler_calls) == 1
+                    assert (
+                        grid_scheduler_calls[0].kwargs["consumer_group"]
+                        == "grid_scheduler:a47d994d-gordon"
+                    )
         finally:
             for p in patchers:
                 p.stop()
@@ -919,7 +939,16 @@ class TestLifespanTenantId:
             p.start()
         try:
             async with lifespan(app):
-                call = mocks["bus"].subscribe.call_args
+                from sgr.core.types import CandleEvent
+
+                orchestrator_calls = [
+                    c
+                    for c in mocks["bus"].subscribe.call_args_list
+                    if c.args[0] is CandleEvent
+                    and c.kwargs["consumer_group"].startswith("orchestrator:")
+                ]
+                assert len(orchestrator_calls) == 1
+                call = orchestrator_calls[0]
                 assert call.kwargs["consumer_group"] == "orchestrator:default"
                 assert call.kwargs["consumer_name"] == "orchestrator-default-1"
         finally:

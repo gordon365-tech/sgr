@@ -521,6 +521,7 @@ class PositionRepository:
             "sl_order_id": r.sl_order_id,
             "tp_order_id": r.tp_order_id,
             "close_reason": r.close_reason,
+            "entry_regime": r.entry_regime,
         }
 
 
@@ -1397,6 +1398,29 @@ class GridRepository:
                 "fills_count": grid.fills_count,
                 "closed_at": grid.closed_at,
                 "close_reason": grid.close_reason,
+                "last_price": grid.last_price,
+                # Level-Zustand (Migration 0008, siehe GridController.
+                # restore_from_persistence()): JSON-safe manuell serialisiert
+                # (str() fuer Decimal/isoformat() fuer datetime) - gleiche
+                # Konvention wie GridController._build_grid_state()'s
+                # parameters-dict oben, NICHT model_dump(mode="json")
+                # (dessen Decimal-Kodierung ist hier nicht die etablierte
+                # Konvention dieses Moduls).
+                "levels": [
+                    {
+                        "index": level.index,
+                        "price": str(level.price),
+                        "side": level.side,
+                        "is_filled": level.is_filled,
+                        "cycle_count": level.cycle_count,
+                        "last_order_id": level.last_order_id,
+                        "last_filled_at": (
+                            level.last_filled_at.isoformat() if level.last_filled_at else None
+                        ),
+                        "quantity": str(level.quantity),
+                    }
+                    for level in grid.levels
+                ],
             }
 
             if existing is not None:
@@ -1440,6 +1464,40 @@ class GridRepository:
             )
             await session.flush()
         return fill_id
+
+    async def get_fills(self, grid_id: str) -> list[dict[str, Any]]:
+        """
+        Alle Fill-Ledger-Eintraege eines Grids, chronologisch aufsteigend
+        (siehe record_level_fill() - append-only). Basis fuer
+        GridController.restore_from_persistence(): der Ledger wird VOR
+        der aggregierten GridState-Aktualisierung geschrieben (siehe
+        GridController._fill_level()) und ist dadurch die autoritativere,
+        potenziell aktuellere Quelle als der GridModel.levels-Snapshot,
+        falls ein Absturz zwischen beiden Schreibvorgaengen lag.
+        """
+        async with get_session() as session:
+            stmt = (
+                select(GridOrderModel)
+                .where(GridOrderModel.grid_id == grid_id)
+                .order_by(GridOrderModel.filled_at)
+            )
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+            return [
+                {
+                    "id": row.id,
+                    "grid_id": row.grid_id,
+                    "order_id": row.order_id,
+                    "level_index": row.level_index,
+                    "price": row.price,
+                    "side": row.side,
+                    "quantity": row.quantity,
+                    "is_opening": row.is_opening,
+                    "cycle_pnl": row.cycle_pnl,
+                    "filled_at": row.filled_at,
+                }
+                for row in rows
+            ]
 
     async def get_open_grids(
         self, trading_mode: TradingMode, user_id: str | None = None
@@ -1485,6 +1543,8 @@ class GridRepository:
             "opened_at": row.opened_at,
             "closed_at": row.closed_at,
             "close_reason": row.close_reason,
+            "levels": row.levels,
+            "last_price": row.last_price,
         }
 
 

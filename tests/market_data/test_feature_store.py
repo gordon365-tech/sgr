@@ -305,6 +305,68 @@ class TestInvalidate:
 
 
 # ---------------------------------------------------------------------
+# save_regime / get_latest_regime (Live-Regime-Exit, 2026-09-23)
+# ---------------------------------------------------------------------
+
+
+class TestRegimeCache:
+    async def test_save_regime_sets_dedicated_key_with_ttl(self) -> None:
+        from sgr.core.types import MarketRegime
+
+        store = FeatureStore()
+        mock_redis = AsyncMock()
+        store._redis = mock_redis
+
+        await store.save_regime("binance:BTC/USDT", "1h", MarketRegime.RANGING)
+
+        mock_redis.set.assert_awaited_once_with(
+            "regime:latest:binance:BTC/USDT:1h", "ranging", ex=6 * 60 * 60
+        )
+
+    async def test_get_latest_regime_hit(self) -> None:
+        from sgr.core.types import MarketRegime
+
+        store = FeatureStore()
+        mock_redis = AsyncMock()
+        mock_redis.get.return_value = b"ranging"
+        store._redis = mock_redis
+
+        result = await store.get_latest_regime("binance:BTC/USDT", "1h")
+
+        assert result == MarketRegime.RANGING
+
+    async def test_get_latest_regime_miss_returns_none(self) -> None:
+        store = FeatureStore()
+        mock_redis = AsyncMock()
+        mock_redis.get.return_value = None
+        store._redis = mock_redis
+
+        result = await store.get_latest_regime("binance:BTC/USDT", "1h")
+
+        assert result is None
+
+    async def test_get_latest_regime_invalid_value_returns_none(self) -> None:
+        store = FeatureStore()
+        mock_redis = AsyncMock()
+        mock_redis.get.return_value = b"not_a_real_regime"
+        store._redis = mock_redis
+
+        result = await store.get_latest_regime("binance:BTC/USDT", "1h")
+
+        assert result is None
+
+    async def test_get_latest_regime_redis_error_returns_none(self) -> None:
+        store = FeatureStore()
+        mock_redis = AsyncMock()
+        mock_redis.get.side_effect = RuntimeError("connection lost")
+        store._redis = mock_redis
+
+        result = await store.get_latest_regime("binance:BTC/USDT", "1h")
+
+        assert result is None
+
+
+# ---------------------------------------------------------------------
 # Singleton
 # ---------------------------------------------------------------------
 

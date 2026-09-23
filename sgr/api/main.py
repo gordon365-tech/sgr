@@ -617,9 +617,108 @@ async def lifespan(app: FastAPI, role: LifespanRole = "worker") -> AsyncIterator
         protection_watchdog = PositionProtectionWatchdog(
             portfolio_engine=portfolio_engine,
             execution_engine=execution_engine,
+            feature_store=feature_store,
         )
         await protection_watchdog.start()
         app.state.position_protection_watchdog = protection_watchdog
+
+        # PAPER-Stress-Test Auto-Recovery (2026-09-22, explizite operative
+        # Anweisung): schliesst die Luecke, dass der Kill Switch nach
+        # max_open_positions permanent haengen bleibt, obwohl alle
+        # ausloesenden Positionen laengst wieder geschlossen sind - siehe
+        # PositionProtectionWatchdog.enable_paper_stress_auto_recovery()
+        # Docstring fuer die vollstaendige Begruendung und die Live-Sperre
+        # dort. Opt-in ueber PAPER_STRESS_AUTO_RECOVERY_ENABLED env var
+        # (Default: deaktiviert - unveraendertes Verhalten fuer jedes
+        # bestehende Deployment, das diese Variable nicht setzt).
+        import os
+
+        if (
+            os.environ.get("PAPER_STRESS_AUTO_RECOVERY_ENABLED", "").lower() == "true"
+            and config.trading_mode == TradingMode.PAPER
+        ):
+            from sgr.risk.kill_switch import get_kill_switch
+
+            protection_watchdog.enable_paper_stress_auto_recovery(
+                kill_switch=get_kill_switch(config.trading_mode, tenant_id=config.tenant_id),
+                trading_mode=config.trading_mode,
+                tenant_id=config.tenant_id,
+            )
+
+        # 8b-iv. Futures Grid: Controller + Crash Recovery + Symbol-Kill-
+        # Switch-Anbindung + Scheduler (2026-09-23, schliesst die im
+        # Strategiebericht/Architekturbericht dokumentierten offenen
+        # Punkte "kein Live-Scheduler"/"keine Crash-Recovery" - siehe
+        # sgr/execution/grid_controller.py und
+        # sgr/orchestrator/grid_scheduler.py Modul-Docstrings fuer die
+        # vollstaendige Begruendung).
+        #
+        # WICHTIG: GRID_SCHEDULER_ENABLED ist per Default NICHT gesetzt ->
+        # GridScheduler.on_candle_event() ist ein sofortiger No-Op, egal
+        # ob eine Grid-Strategie is_active=True ist. Weder Gordon noch
+        # Sumo aktivieren dadurch automatisch ein Grid - das bleibt eine
+        # separate, spaeter explizit zu treffende operative Entscheidung.
+        # GridController.restore_from_persistence() UND die Symbol-Kill-
+        # Switch-Hook-Registrierung laufen dagegen IMMER (rein lesend/
+        # defensiv, kein Trading-Effekt fuer sich allein).
+        from sgr.core.repositories import GridRepository
+        from sgr.execution.grid_controller import GridController
+        from sgr.execution.grid_rate_limiter import GridRateLimiter
+        from sgr.orchestrator.grid_scheduler import GridScheduler
+        from sgr.risk.symbol_kill_switch import get_symbol_kill_switch
+
+        grid_repository = GridRepository()
+        # Phase J: wiederverwendet dieselbe Redis-Verbindung wie
+        # FeatureStore/KillSwitch (siehe grid_rate_limiter.py Modul-
+        # Docstring - keine zweite Redis-Client-Infrastruktur). None-Client
+        # (Redis noch nicht verbunden) -> Limiter faellt fail-open zurueck,
+        # kein Startup-Blocker.
+        grid_rate_limiter = GridRateLimiter(feature_store.redis_client)
+        grid_controller = GridController(
+            execution_engine,
+            config.trading_mode,
+            tenant_id=config.tenant_id,
+            grid_repository=grid_repository,
+            order_repository=repos.orders,
+            symbol_kill_switch=get_symbol_kill_switch(tenant_id=config.tenant_id),
+            exchange_pool=pool,
+            rate_limiter=grid_rate_limiter,
+        )
+        try:
+            restored_grids = await grid_controller.restore_from_persistence()
+            log.info("sgr.api.grid_recovery_completed", restored=len(restored_grids))
+        except Exception as e:
+            log.error("sgr.api.grid_recovery_failed", error=str(e), exc_info=True)
+        app.state.grid_controller = grid_controller
+
+        get_symbol_kill_switch(tenant_id=config.tenant_id).register_deactivation_hook(
+            grid_controller.close_all_grids_for_symbol
+        )
+
+        # Phase H (GATE 3): PositionLiquidator wurde oben (8b-ii) VOR dem
+        # GridController konstruiert - spaete Injektion, identisches
+        # Muster wie portfolio_engine.set_protection_hooks() weiter unten.
+        # Ohne dies wuerde ein globaler Kill Switch mit
+        # close_positions=True aktive Grid-Exposure nicht schliessen
+        # (siehe sgr/risk/position_liquidator.py Modul-Docstring).
+        liquidator.set_grid_controller(grid_controller)
+
+        grid_scheduler = GridScheduler(
+            grid_controller,
+            feature_store,
+            config.trading_mode,
+            tenant_id=config.tenant_id,
+        )
+        app.state.grid_scheduler = grid_scheduler
+        if grid_scheduler.enabled:
+            log.warning(
+                "sgr.api.grid_scheduler_enabled",
+                tenant_id=config.tenant_id,
+                note="GRID_SCHEDULER_ENABLED=true - Grid-Strategien koennen jetzt live/paper "
+                "eroeffnen",
+            )
+        else:
+            log.info("sgr.api.grid_scheduler_disabled_by_default")
 
         # 8c. Reconciliation Engine (Phase 7B)
         # Nur in LIVE aussagekräftig (siehe sgr/reconciliation/engine.py
@@ -698,6 +797,18 @@ async def lifespan(app: FastAPI, role: LifespanRole = "worker") -> AsyncIterator
                 orchestrator.on_candle_event,
                 consumer_group=f"orchestrator:{tenant_suffix}",
                 consumer_name=f"orchestrator-{tenant_suffix}-1",
+            )
+            # Grid-Scheduler: EIGENE Consumer-Group (siehe grid_scheduler.py
+            # Modul-Docstring) - beide Konsumenten sehen JEDES CandleEvent
+            # unabhaengig voneinander (Redis-Streams-Semantik, identisch
+            # zum bereits etablierten Gordon/Sumo-Pattern oben), damit der
+            # (per Default deaktivierte) Grid-Scheduler den direktionalen
+            # Orchestrator-Zyklus niemals verzoegert/blockiert (GATE 15).
+            bus.subscribe(
+                CandleEvent,
+                grid_scheduler.on_candle_event,
+                consumer_group=f"grid_scheduler:{tenant_suffix}",
+                consumer_name=f"grid_scheduler-{tenant_suffix}-1",
             )
         app.state.market_data_engine = md_engine
 

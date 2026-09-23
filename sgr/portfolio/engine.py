@@ -144,15 +144,19 @@ class PortfolioEngine:
         # position_protection.py::PositionProtectionManager - das ist der
         # einzige vorgesehene Aufrufer). None = unveraendertes Verhalten.
         #
-        # on_position_opened(position: Position) -> Position | None:
+        # on_position_opened(position: Position, order_metadata: dict | None)
+        #   -> Position | None:
         #   wird direkt (kein Event Bus - siehe Docstring-Hinweis unten)
         #   aufgerufen, NACHDEM eine neue Position gespeichert/persistiert
-        #   wurde. Ein Rueckgabewert != None ERSETZT die gespeicherte
-        #   Position (z.B. mit gesetzten stop_loss_price/take_profit_price/
-        #   max_holding_until/sl_order_id/tp_order_id) und wird erneut
-        #   persistiert - PortfolioEngine bleibt dadurch alleiniger
-        #   Schreibpunkt fuer _state._positions/DB, statt dass der Hook
-        #   selbst mutiert.
+        #   wurde. order_metadata ist result.raw_response der ausloesenden
+        #   Order (seit 2026-09-23, optional target_price/stop_price - siehe
+        #   ExecutionEngine.execute() Kommentar) - additiv, alle bisherigen
+        #   1-Argument-Aufrufer/Tests bleiben gueltig. Ein Rueckgabewert
+        #   != None ERSETZT die gespeicherte Position (z.B. mit gesetzten
+        #   stop_loss_price/take_profit_price/max_holding_until/
+        #   sl_order_id/tp_order_id) und wird erneut persistiert -
+        #   PortfolioEngine bleibt dadurch alleiniger Schreibpunkt fuer
+        #   _state._positions/DB, statt dass der Hook selbst mutiert.
         #
         # on_position_closed(position: Position, close_reason: str) -> None:
         #   wird aufgerufen, NACHDEM eine Position VOLLSTAENDIG geschlossen
@@ -320,7 +324,12 @@ class PortfolioEngine:
         # entfaellt fuer diese eine Position.
         if self._on_position_opened is not None:
             try:
-                updated = await self._on_position_opened(position)
+                # result.raw_response traegt seit 2026-09-23 optional
+                # target_price/stop_price (siehe ExecutionEngine.execute()
+                # Kommentar) - PositionProtectionManager.on_position_opened()
+                # nutzt sie, um strategiegetriebene Exit-Preise statt des
+                # globalen Flat-%-Fallbacks zu setzen, sofern vorhanden.
+                updated = await self._on_position_opened(position, result.raw_response)
                 if updated is not None:
                     self._state._positions[symbol_key] = updated
                     await self._persist_position_upsert(updated)
@@ -455,6 +464,7 @@ class PortfolioEngine:
                     max_holding_until=existing.max_holding_until,
                     sl_order_id=existing.sl_order_id,
                     tp_order_id=existing.tp_order_id,
+                    entry_regime=existing.entry_regime,
                 )
                 self._state._positions[symbol_key] = updated
                 if existing.side == PositionSide.LONG:
@@ -641,6 +651,7 @@ class PortfolioEngine:
                 max_holding_until=position.max_holding_until,
                 sl_order_id=position.sl_order_id,
                 tp_order_id=position.tp_order_id,
+                entry_regime=position.entry_regime,
             )
             self._state._positions[symbol_key] = updated
             updated_positions.append(updated)
@@ -770,10 +781,13 @@ class PortfolioEngine:
     @staticmethod
     def _position_from_row(row: dict[str, Any]) -> Position:
         """Rekonstruiert Position (Domain) aus PositionRepository-Row (dict)."""
-        from sgr.core.types import ExchangeID
+        from sgr.core.types import ExchangeID, MarketRegime
 
         base, _, quote = row["symbol"].partition("/")
         symbol = Symbol(base=base, quote=quote, exchange=ExchangeID(row["exchange"]))
+
+        raw_entry_regime = row.get("entry_regime")
+        entry_regime = MarketRegime(raw_entry_regime) if raw_entry_regime else None
 
         return Position(
             id=row["id"],
@@ -793,6 +807,7 @@ class PortfolioEngine:
             max_holding_until=row.get("max_holding_until"),
             sl_order_id=row.get("sl_order_id"),
             tp_order_id=row.get("tp_order_id"),
+            entry_regime=entry_regime,
         )
 
     async def _persist_position_upsert(self, position: Position) -> None:
@@ -826,6 +841,9 @@ class PortfolioEngine:
                     "max_holding_until": position.max_holding_until,
                     "sl_order_id": position.sl_order_id,
                     "tp_order_id": position.tp_order_id,
+                    "entry_regime": (
+                        position.entry_regime.value if position.entry_regime else None
+                    ),
                 }
             )
         except Exception as e:

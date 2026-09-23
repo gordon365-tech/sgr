@@ -32,6 +32,7 @@ import redis.asyncio as aioredis
 
 from sgr.core.config import get_config
 from sgr.core.logging import get_logger
+from sgr.core.types import MarketRegime
 from sgr.market_data.types import FeatureSet
 
 log = get_logger(__name__)
@@ -223,6 +224,62 @@ class FeatureStore:
                 result[sk] = None
 
         return result
+
+    # ------------------------------------------------------------------
+    # Latest classified regime (2026-09-23, Live-Regime-Exit)
+    # ------------------------------------------------------------------
+    #
+    # Eigener, schlanker Key-Namespace ("regime:latest:...") statt
+    # Wiederverwendung von save()/get_latest(): StrategyEngine.process()
+    # klassifiziert bei JEDEM Candle-Zyklus ein Regime (siehe dortigen
+    # classify_regime()-Aufruf), schrieb dieses Ergebnis aber bisher
+    # ausschliesslich in eine lokale MarketContext-Kopie - nirgendwo
+    # sonst im System war "das zuletzt bekannte Regime pro Symbol"
+    # abrufbar (bestaetigte Luecke aus der Grid-Architekturanalyse,
+    # identisch fuer den Live-Regime-Exit der Position Protection
+    # relevant). Ein zusaetzlicher Aufruf von save() haette die
+    # bestehende FeatureSet-Pub/Sub-Semantik ("feature_update"-Channel,
+    # von MarketDataEngine als Producer gedacht) dupliziert/verdoppelt -
+    # dieser dedizierte, deutlich kleinere Key umgeht das Risiko
+    # komplett (kein Pub/Sub, kein Einfluss auf bestehende Consumer),
+    # nutzt aber dieselbe Redis-Verbindung/TTL-Tabelle wie der Rest
+    # dieser Klasse (keine neue Infrastruktur, siehe Aufgabenstellung
+    # "keine neue unnoetige Regime-Engine erfinden").
+    async def save_regime(self, symbol_key: str, timeframe: str, regime: MarketRegime) -> None:
+        redis = self._require_connected()
+        ttl = _TTL_BY_TIMEFRAME.get(timeframe, _DEFAULT_TTL)
+        key = f"regime:latest:{symbol_key}:{timeframe}"
+        await redis.set(key, regime.value, ex=ttl)
+
+    async def get_latest_regime(self, symbol_key: str, timeframe: str) -> MarketRegime | None:
+        """
+        Liefert das zuletzt via save_regime() geschriebene Regime, oder
+        None wenn noch keins geschrieben wurde (z.B. direkt nach einem
+        Neustart, bevor der erste Candle fuer dieses Symbol/Timeframe
+        verarbeitet wurde) ODER bei einem Redis-Fehler. Der Aufrufer
+        (PositionProtectionWatchdog._check_regime_exit()) behandelt
+        beide Faelle identisch: kein Exit ausloesen, NICHT als "Regime
+        unveraendert" interpretieren - fehlende Daten duerfen niemals
+        einen Exit erzwingen oder vortaeuschen, dass alles unveraendert
+        ist (siehe Aufgabenstellung "keine stille Fallback-Logik bei
+        inkonsistentem Zustand" - hier: sichtbar geloggt, nicht satt
+        verschluckt, aber konservativ kein Trigger).
+        """
+        redis = self._require_connected()
+        key = f"regime:latest:{symbol_key}:{timeframe}"
+        try:
+            raw = await redis.get(key)
+        except Exception as e:
+            log.warning("feature_store.get_latest_regime_failed", key=key, error=str(e))
+            return None
+        if raw is None:
+            return None
+        try:
+            value = raw.decode() if isinstance(raw, bytes) else raw
+            return MarketRegime(value)
+        except ValueError:
+            log.warning("feature_store.get_latest_regime_invalid_value", key=key, value=raw)
+            return None
 
     async def invalidate(self, symbol_key: str, timeframe: str) -> None:
         """Löscht gecachtes Feature (z.B. nach Datenfehler)."""

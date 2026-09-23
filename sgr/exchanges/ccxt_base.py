@@ -365,6 +365,7 @@ class CCXTBaseAdapter:
                 limits = market.get("limits") or {}
                 amount_limits = limits.get("amount") or {}
                 cost_limits = limits.get("cost") or {}
+                price_limits = limits.get("price") or {}
 
                 symbol_limits = SymbolLimits(
                     amount_precision=self._safe_precision_places(precision.get("amount")),
@@ -372,6 +373,8 @@ class CCXTBaseAdapter:
                     min_amount=self._safe_decimal(amount_limits.get("min")),
                     max_amount=self._safe_decimal(amount_limits.get("max")),
                     min_notional=self._safe_decimal(cost_limits.get("min")),
+                    min_price=self._safe_decimal(price_limits.get("min")),
+                    max_price=self._safe_decimal(price_limits.get("max")),
                 )
                 result[symbol] = symbol_limits
 
@@ -850,12 +853,23 @@ class CCXTBaseAdapter:
                 detail=f"paper fill simulation: no ticker and no limit_price for {order.symbol}",
             )
 
-        # Zentral konfigurierbare Taker-Fee (RiskLimitsConfig.paper_taker_fee_pct)
-        # statt zuvor hartkodierter 0.1% (Spot-Default) - Market Orders sind
-        # strukturell immer Taker (Paper platziert aktuell keine Limit-
-        # Orders, die als Maker fuellen koennten - siehe TODO in
-        # Modul-Docstring der RiskLimitsConfig-Felder).
-        fee_rate = Decimal(str(get_config().risk_limits.paper_taker_fee_pct))
+        # Zentral konfigurierbare Taker-/Maker-Fee (RiskLimitsConfig.
+        # paper_taker_fee_pct/paper_maker_fee_pct) statt zuvor hartkodierter
+        # 0.1% (Spot-Default). Market-Orders sind fuer JEDE direktionale
+        # Strategie strukturell immer Taker. Fuer Futures-Grid-Level-Fills
+        # (order.metadata["grid_fill_type"] == "level_cross", siehe
+        # GridController._fill_level() Docstring - Phase I, 2026-09-23)
+        # wird stattdessen die Maker-Fee angewendet: ein per Preis-Crossing
+        # ausgeloester Grid-Fill entspricht wirtschaftlich einer bereits
+        # ruhenden, jetzt gefuellten Limit-Order, nicht einem aggressiven
+        # Market-Order-Take. Ein "force_exit"-Grid-Fill (Risk-Violation/
+        # Kill-Switch/manueller Close) bleibt bewusst Taker - das ist ein
+        # dringlicher, nicht-ruhender Exit.
+        is_grid_maker_fill = order.metadata.get("grid_fill_type") == "level_cross"
+        risk_limits = get_config().risk_limits
+        fee_rate = Decimal(
+            str(risk_limits.paper_maker_fee_pct if is_grid_maker_fill else risk_limits.paper_taker_fee_pct)
+        )
         fees = order.quantity * fill_price * fee_rate
 
         now = datetime.now(tz=UTC)

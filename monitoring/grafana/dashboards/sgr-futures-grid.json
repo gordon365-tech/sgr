@@ -1,5 +1,7 @@
 {
-  "annotations": { "list": [] },
+  "annotations": {
+    "list": []
+  },
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
@@ -9,12 +11,19 @@
   "refresh": "30s",
   "schemaVersion": 39,
   "style": "dark",
-  "tags": ["sgr", "futures-grid"],
+  "tags": [
+    "sgr",
+    "futures-grid"
+  ],
   "templating": {
     "list": [
       {
         "allValue": ".*",
-        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
         "datasource": "Prometheus",
         "definition": "label_values(sgr_futures_grid_active, exchange)",
         "hide": 0,
@@ -23,7 +32,10 @@
         "multi": true,
         "name": "exchange",
         "options": [],
-        "query": { "query": "label_values(sgr_futures_grid_active, exchange)", "refId": "exchange-variable" },
+        "query": {
+          "query": "label_values(sgr_futures_grid_active, exchange)",
+          "refId": "exchange-variable"
+        },
         "refresh": 2,
         "regex": "",
         "skipUrlSync": false,
@@ -32,7 +44,11 @@
       },
       {
         "allValue": ".*",
-        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
         "datasource": "Prometheus",
         "definition": "label_values(sgr_futures_grid_active, symbol)",
         "hide": 0,
@@ -41,7 +57,10 @@
         "multi": true,
         "name": "symbol",
         "options": [],
-        "query": { "query": "label_values(sgr_futures_grid_active, symbol)", "refId": "symbol-variable" },
+        "query": {
+          "query": "label_values(sgr_futures_grid_active, symbol)",
+          "refId": "symbol-variable"
+        },
         "refresh": 2,
         "regex": "",
         "skipUrlSync": false,
@@ -50,7 +69,11 @@
       },
       {
         "allValue": ".*",
-        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
         "datasource": "Prometheus",
         "definition": "label_values(sgr_futures_grid_active, strategy)",
         "hide": 0,
@@ -59,7 +82,10 @@
         "multi": true,
         "name": "strategy",
         "options": [],
-        "query": { "query": "label_values(sgr_futures_grid_active, strategy)", "refId": "strategy-variable" },
+        "query": {
+          "query": "label_values(sgr_futures_grid_active, strategy)",
+          "refId": "strategy-variable"
+        },
         "refresh": 2,
         "regex": "",
         "skipUrlSync": false,
@@ -67,15 +93,27 @@
         "type": "query"
       },
       {
-        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
         "hide": 0,
         "includeAll": true,
         "label": "Tenant",
         "multi": true,
         "name": "tenant",
         "options": [
-          { "selected": false, "text": "Gordon", "value": "a47d994d-35cc-4619-83bb-86fd0cb48447" },
-          { "selected": false, "text": "Sumo", "value": "144f7bb0-113d-4c66-b5d3-7a34ab1d551a" }
+          {
+            "selected": false,
+            "text": "Gordon",
+            "value": "a47d994d-35cc-4619-83bb-86fd0cb48447"
+          },
+          {
+            "selected": false,
+            "text": "Sumo",
+            "value": "144f7bb0-113d-4c66-b5d3-7a34ab1d551a"
+          }
         ],
         "query": "Gordon : a47d994d-35cc-4619-83bb-86fd0cb48447, Sumo : 144f7bb0-113d-4c66-b5d3-7a34ab1d551a",
         "skipUrlSync": false,
@@ -83,7 +121,10 @@
       }
     ]
   },
-  "time": { "from": "now-24h", "to": "now" },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "utc",
   "title": "SGR - Futures Grid",
@@ -94,7 +135,12 @@
     {
       "collapsed": false,
       "datasource": "Prometheus",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
       "id": 1,
       "panels": [],
       "title": "Overview - Exchange / Product / Strategy / Tenant",
@@ -105,7 +151,12 @@
       "type": "stat",
       "title": "Active Grids",
       "datasource": "Prometheus",
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
       "targets": [
         {
           "expr": "sum(sgr_futures_grid_active{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"})",
@@ -118,7 +169,12 @@
       "type": "stat",
       "title": "Total Grid Exposure (USD)",
       "datasource": "Prometheus",
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 1
+      },
       "targets": [
         {
           "expr": "sum(sgr_futures_grid_exposure_usd{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"})",
@@ -131,7 +187,12 @@
       "type": "stat",
       "title": "Total Grid PnL (USD)",
       "datasource": "Prometheus",
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 1
+      },
       "targets": [
         {
           "expr": "sum(sgr_futures_grid_pnl_usd{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"})",
@@ -144,7 +205,12 @@
       "type": "stat",
       "title": "Total Funding Cost (USD)",
       "datasource": "Prometheus",
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
       "targets": [
         {
           "expr": "sum(sgr_futures_grid_funding_cost_usd{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"})",
@@ -155,7 +221,12 @@
     {
       "collapsed": false,
       "datasource": "Prometheus",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
       "id": 10,
       "panels": [],
       "title": "Per-Grid Breakdown (Exchange / Product / Strategy / Tenant)",
@@ -166,7 +237,12 @@
       "type": "table",
       "title": "Active Grids - Exchange / Symbol / Strategy / Tenant",
       "datasource": "Prometheus",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 6 },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
       "targets": [
         {
           "expr": "sgr_futures_grid_active{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"} == 1",
@@ -181,7 +257,12 @@
       "type": "timeseries",
       "title": "Grid Exposure over Time",
       "datasource": "Prometheus",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
       "targets": [
         {
           "expr": "sgr_futures_grid_exposure_usd{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"}",
@@ -194,7 +275,12 @@
       "type": "timeseries",
       "title": "Grid Realized PnL over Time",
       "datasource": "Prometheus",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
       "targets": [
         {
           "expr": "sgr_futures_grid_pnl_usd{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"}",
@@ -205,7 +291,12 @@
     {
       "collapsed": false,
       "datasource": "Prometheus",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 22
+      },
       "id": 20,
       "panels": [],
       "title": "Risk",
@@ -216,7 +307,12 @@
       "type": "timeseries",
       "title": "Liquidation Distance (%)",
       "datasource": "Prometheus",
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 23 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 23
+      },
       "targets": [
         {
           "expr": "sgr_futures_grid_liquidation_distance_pct{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"}",
@@ -228,9 +324,18 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "red", "value": null },
-              { "color": "yellow", "value": 0.15 },
-              { "color": "green", "value": 0.3 }
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.15
+              },
+              {
+                "color": "green",
+                "value": 0.3
+              }
             ]
           }
         }
@@ -241,7 +346,12 @@
       "type": "timeseries",
       "title": "Funding Cost Accumulation (USD)",
       "datasource": "Prometheus",
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 23 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 23
+      },
       "targets": [
         {
           "expr": "sgr_futures_grid_funding_cost_usd{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"}",
@@ -254,7 +364,12 @@
       "type": "timeseries",
       "title": "Open Grid Orders",
       "datasource": "Prometheus",
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 23 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 23
+      },
       "targets": [
         {
           "expr": "sgr_futures_grid_orders{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"}",
@@ -265,7 +380,12 @@
     {
       "collapsed": false,
       "datasource": "Prometheus",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 31
+      },
       "id": 30,
       "panels": [],
       "title": "Edge & Regime Suitability",
@@ -276,7 +396,12 @@
       "type": "timeseries",
       "title": "Grid Edge Score (0-1)",
       "datasource": "Prometheus",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
       "targets": [
         {
           "expr": "sgr_futures_grid_edge{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"}",
@@ -289,7 +414,12 @@
       "type": "timeseries",
       "title": "Grid Suitability / Regime Score (0-1)",
       "datasource": "Prometheus",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
       "targets": [
         {
           "expr": "sgr_futures_grid_regime_score{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"}",
@@ -302,11 +432,246 @@
       "type": "timeseries",
       "title": "Grid Fills (rate)",
       "datasource": "Prometheus",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 40 },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 40
+      },
       "targets": [
         {
           "expr": "sum(rate(sgr_futures_grid_fills_total{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"}[5m])) by (exchange, symbol, strategy, tenant)",
           "legendFormat": "{{exchange}}/{{symbol}}/{{strategy}}/{{tenant}}"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "datasource": "Prometheus",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 48
+      },
+      "id": 34,
+      "panels": [],
+      "title": "Phase Q - Extended Grid Metrics (2026-09-23)",
+      "type": "row"
+    },
+    {
+      "id": 35,
+      "type": "stat",
+      "title": "Levels Active",
+      "datasource": "Prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 49
+      },
+      "targets": [
+        {
+          "expr": "sum(sgr_futures_grid_levels_active{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"})",
+          "legendFormat": "Levels Active"
+        }
+      ]
+    },
+    {
+      "id": 36,
+      "type": "stat",
+      "title": "Levels Total",
+      "datasource": "Prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 49
+      },
+      "targets": [
+        {
+          "expr": "sum(sgr_futures_grid_levels_total{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"})",
+          "legendFormat": "Levels Total"
+        }
+      ]
+    },
+    {
+      "id": 37,
+      "type": "stat",
+      "title": "Grid Utilization",
+      "datasource": "Prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 49
+      },
+      "targets": [
+        {
+          "expr": "avg(sgr_futures_grid_utilization{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"})",
+          "legendFormat": "Grid Utilization"
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "type": "stat",
+      "title": "Grid Cycles (rate)",
+      "datasource": "Prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 49
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(sgr_futures_grid_cycles_total{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"}[5m]))",
+          "legendFormat": "Grid Cycles (rate)"
+        }
+      ]
+    },
+    {
+      "id": 39,
+      "type": "stat",
+      "title": "Avg Profit / Cycle (USD)",
+      "datasource": "Prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 53
+      },
+      "targets": [
+        {
+          "expr": "avg(sgr_futures_grid_avg_profit_per_cycle_usd{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"})",
+          "legendFormat": "Avg Profit / Cycle (USD)"
+        }
+      ]
+    },
+    {
+      "id": 40,
+      "type": "stat",
+      "title": "Grid Fees (USD)",
+      "datasource": "Prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 53
+      },
+      "targets": [
+        {
+          "expr": "sum(sgr_futures_grid_fees_usd{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"})",
+          "legendFormat": "Grid Fees (USD)"
+        }
+      ]
+    },
+    {
+      "id": 41,
+      "type": "stat",
+      "title": "Grid Recovery Events",
+      "datasource": "Prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 53
+      },
+      "targets": [
+        {
+          "expr": "sum(sgr_futures_grid_recovery_events_total{exchange=~\"$exchange\", symbol=~\"$symbol\", tenant=~\"$tenant\"})",
+          "legendFormat": "Grid Recovery Events"
+        }
+      ]
+    },
+    {
+      "id": 42,
+      "type": "stat",
+      "title": "Grid Recovery Failures",
+      "datasource": "Prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 53
+      },
+      "targets": [
+        {
+          "expr": "sum(sgr_futures_grid_recovery_failures_total{exchange=~\"$exchange\", symbol=~\"$symbol\", tenant=~\"$tenant\"})",
+          "legendFormat": "Grid Recovery Failures"
+        }
+      ]
+    },
+    {
+      "id": 43,
+      "type": "stat",
+      "title": "Grid Errors (rate)",
+      "datasource": "Prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 57
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(sgr_futures_grid_errors_total{exchange=~\"$exchange\", symbol=~\"$symbol\", tenant=~\"$tenant\"}[5m]))",
+          "legendFormat": "Grid Errors (rate)"
+        }
+      ]
+    },
+    {
+      "id": 44,
+      "type": "stat",
+      "title": "Grid Kill-Switch Events",
+      "datasource": "Prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 57
+      },
+      "targets": [
+        {
+          "expr": "sum(sgr_futures_grid_kill_switch_events_total{exchange=~\"$exchange\", symbol=~\"$symbol\", tenant=~\"$tenant\"})",
+          "legendFormat": "Grid Kill-Switch Events"
+        }
+      ]
+    },
+    {
+      "id": 45,
+      "type": "stat",
+      "title": "Grid Cost-Guard Rejects",
+      "datasource": "Prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 57
+      },
+      "targets": [
+        {
+          "expr": "sum(sgr_futures_grid_cost_guard_rejects_total{exchange=~\"$exchange\", symbol=~\"$symbol\", strategy=~\"$strategy\", tenant=~\"$tenant\"})",
+          "legendFormat": "Grid Cost-Guard Rejects"
+        }
+      ]
+    },
+    {
+      "id": 46,
+      "type": "stat",
+      "title": "Grid Rate-Limit Events",
+      "datasource": "Prometheus",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 57
+      },
+      "targets": [
+        {
+          "expr": "sum(sgr_futures_grid_rate_limit_events_total{exchange=~\"$exchange\", tenant=~\"$tenant\"})",
+          "legendFormat": "Grid Rate-Limit Events"
         }
       ]
     }

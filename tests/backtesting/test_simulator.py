@@ -448,6 +448,62 @@ class TestCheckExits:
         # eine Position durch Zeit-Exit oder ATR-Stop geschlossen wurde.
         assert sim._closed_trades[0].metadata.get("exit_reason") == "time_exit"
 
+    async def test_check_exits_time_exit_respects_configured_max_holding_bars(self):
+        """2026-09-23: max_holding_bars war zuvor hart auf 20 codiert,
+        jetzt ueber BacktestConfig.max_holding_bars parametrisierbar -
+        dieser Test waere mit dem alten hart codierten Wert (20) falsch
+        gewesen (5 Bars haetten nie einen time_exit ausgeloest)."""
+        sim = BacktestSimulator(make_config(max_holding_bars=5))
+        pos = SimulatedPosition(
+            symbol=SYMBOL_STR,
+            side="long",
+            quantity=Decimal("1"),
+            entry_price=Decimal("100"),
+            entry_time=datetime.now(tz=UTC),
+            strategy="s",
+            signal_confidence=0.9,
+            regime=MarketRegime.TRENDING_UP,
+        )
+        pos.entry_bar_index = 0
+        sim._positions[SYMBOL_STR] = pos
+        candles = make_candles(10, start_price=100.0)
+        # bar_idx=5 -> bars_held = 5 -> time_exit triggert bei max_holding_bars=5,
+        # waere beim alten hart codierten Wert (20) noch NICHT ausgeloest worden.
+        await sim._check_exits(5, candles[5], candles[:6])
+        assert SYMBOL_STR not in sim._positions
+        assert sim._closed_trades[0].metadata.get("exit_reason") == "time_exit"
+
+    async def test_check_exits_atr_stop_respects_configured_multiplier(self):
+        """2026-09-23: atr_stop_multiplier war zuvor hart auf 2.5 codiert,
+        jetzt konfigurierbar. Ein deutlich engerer Multiplikator (0.5)
+        muss bei einem Preisrueckgang triggern, der beim alten 2.5x-Wert
+        noch keinen Stop ausgeloest haette."""
+        sim = BacktestSimulator(make_config(atr_stop_multiplier=Decimal("0.5")))
+        candles = make_candles(20, start_price=100.0, drift=0.0)
+        # Moderater Rueckgang - reicht fuer 0.5x ATR, nicht fuer 2.5x ATR.
+        mild_drop_bar = candles[-1].model_copy(
+            update={"close": Decimal("97"), "low": Decimal("96")}
+        )
+        candles[-1] = mild_drop_bar
+
+        pos = SimulatedPosition(
+            symbol=SYMBOL_STR,
+            side="long",
+            quantity=Decimal("1"),
+            entry_price=Decimal("100"),
+            entry_time=datetime.now(tz=UTC),
+            strategy="s",
+            signal_confidence=0.9,
+            regime=MarketRegime.TRENDING_UP,
+        )
+        pos.entry_bar_index = 0
+        sim._positions[SYMBOL_STR] = pos
+
+        await sim._check_exits(10, mild_drop_bar, candles)
+
+        assert SYMBOL_STR not in sim._positions
+        assert sim._closed_trades[0].metadata.get("exit_reason") == "atr_stop"
+
     async def test_check_exits_atr_stop_long(self):
         sim = BacktestSimulator(make_config())
         # Build a volatile-then-crashing series so ATR stop triggers before

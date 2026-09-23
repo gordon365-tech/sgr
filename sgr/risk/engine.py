@@ -811,5 +811,40 @@ class RiskEngine:
             # Strategien (z.B. trend_following_v1 UND mean_reversion_v1 per
             # STRATEGY_FORCE_ACTIVATE) in DB/Portfolio nicht mehr
             # unterscheidbar, welche Strategie welchen Trade verursacht hat.
-            metadata={"strategy": signal.strategy_name},
+            #
+            # target_price/stop_price (2026-09-23, strategiegetriebener
+            # Exit): mean_reversion_v1/breakout_v1 berechnen diese Werte
+            # bereits in signal.metadata (ATR-basiert), wurden bisher aber
+            # nie weitergereicht - PositionProtectionManager kannte sie
+            # nicht. Gleiches Weiterreich-Muster wie "strategy" oben:
+            # RiskEngine ist der letzte Ort, an dem signal.metadata noch
+            # bekannt ist, bevor daraus eine OrderRequest wird. Nur bei
+            # tatsaechlich vorhandenem, "truthy" Wert uebernommen (schuetzt
+            # nebenbei gegen den bekannten round(...,2)-Bug bei
+            # Mikro-Preis-Symbolen in mean_reversion_v1/breakout_v1, der
+            # target_price/stop_price fuer sehr guenstige Symbole auf 0.0
+            # rundet - ein falsy Wert wird hier wie "nicht geliefert"
+            # behandelt, PositionProtectionManager faellt dann korrekt auf
+            # den globalen Flat-%-Fallback zurueck statt einen Stop bei
+            # Preis 0 zu setzen).
+            metadata={
+                "strategy": signal.strategy_name,
+                # entry_regime (2026-09-23, Live-Regime-Exit): Signal.regime
+                # ist ein Pflichtfeld (nie None), im Unterschied zu
+                # target_price/stop_price also immer vorhanden - siehe
+                # PositionProtectionManager._extract_entry_regime() fuer die
+                # Verwendung. Kein truthy-Filter noetig (kein Analogon zum
+                # round(...,2)-Bug hier, MarketRegime ist ein Enum).
+                "entry_regime": signal.regime.value,
+                **(
+                    {"target_price": signal.metadata["target_price"]}
+                    if signal.metadata.get("target_price")
+                    else {}
+                ),
+                **(
+                    {"stop_price": signal.metadata["stop_price"]}
+                    if signal.metadata.get("stop_price")
+                    else {}
+                ),
+            },
         )

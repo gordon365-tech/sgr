@@ -217,3 +217,178 @@ class TestClosingOrders:
 
         assert execution.execute.await_count == 2
         portfolio.on_order_filled.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Phase H (GATE 3): Grid-Awareness - echter GridController, kein Mock
+# ---------------------------------------------------------------------------
+
+
+class TestGridAwareLiquidation:
+    """Echter Integrationstest: oeffnet ein reales Grid ueber einen echten
+    GridController (ExecutionEngine + MockExchangeAdapter), fuellt ein
+    Level, loest dann einen Kill Switch mit close_positions=True aus und
+    verifiziert, dass PositionLiquidator das Grid VOLLSTAENDIG schliesst
+    und Flatness erreicht - GATE 3."""
+
+    async def _setup(self):
+        from sgr.compliance.engine import ComplianceEngine
+        from sgr.compliance.types import AccountEligibility, ProductAvailabilityRule
+        from sgr.core.grid_types import FuturesGridParameters, GridDecision
+        from sgr.core.types import ExchangeID as EID, GridDirection, ProductType
+        from sgr.exchanges.factory import ExchangePool
+        from sgr.execution.engine import ExecutionEngine
+        from sgr.execution.grid_controller import GridController
+        from sgr.risk.grid_risk import GridPortfolioSnapshot
+        from tests.mocks.mock_exchange import MockExchangeAdapter
+
+        adapter = MockExchangeAdapter(trading_mode=TradingMode.PAPER)
+        await adapter.connect()
+        pool = ExchangePool()
+        pool._adapters[(EID.BINANCE, TradingMode.PAPER)] = adapter
+
+        compliance = ComplianceEngine()
+        compliance.register_rule(
+            ProductAvailabilityRule(
+                exchange=EID.BINANCE, product_type=ProductType.FUTURES_GRID,
+                jurisdictions_allowed=["DE"],
+            )
+        )
+        account = AccountEligibility(
+            tenant_id=GORDON,
+            jurisdiction="DE",
+            kyc_verified=True,
+            futures_trading_enabled=True,
+            risk_disclosure_acknowledged=True,
+            enabled_product_types=["futures_grid"],
+        )
+
+        execution = ExecutionEngine(pool, TradingMode.PAPER)
+        grid_controller = GridController(
+            execution, TradingMode.PAPER, tenant_id=GORDON, compliance_engine=compliance
+        )
+
+        params = FuturesGridParameters(
+            grid_lower_price=Decimal("49000"),
+            grid_upper_price=Decimal("51000"),
+            grid_count=5,
+            long_or_short=GridDirection.LONG,
+            leverage=Decimal("2"),
+            position_size=Decimal("50"),
+            max_notional=Decimal("250"),
+        )
+        decision = GridDecision(
+            direction=GridDirection.LONG, parameters=params, confidence=0.7, reasons=["test"]
+        )
+        symbol = _symbol()
+        open_result = await grid_controller.open_grid(
+            decision, symbol, "futures_grid_long_v1", account,
+            GridPortfolioSnapshot(open_grids=[], portfolio_value=Decimal("10000")),
+            current_price=Decimal("50000"),
+        )
+        assert open_result.approved is True
+
+        # Level bei 49500 fuellen (Preisabfall).
+        adapter.ticker_price = Decimal("49500")
+        grid = await grid_controller.on_price_tick(str(open_result.grid.id), Decimal("49500"))
+        assert any(lv.is_filled for lv in grid.levels)
+
+        return grid_controller, grid, execution
+
+    async def test_kill_switch_with_close_positions_closes_active_grid_flat(self) -> None:
+        grid_controller, grid, execution = await self._setup()
+
+        portfolio = MagicMock()
+        portfolio.positions = []  # keine normalen Positionen betroffen
+        liquidator = PositionLiquidator(
+            portfolio_engine=portfolio,
+            execution_engine=execution,
+            tenant_id=GORDON,
+            grid_controller=grid_controller,
+        )
+
+        await liquidator.on_kill_switch_event(_event(tenant_id=GORDON))
+
+        closed = grid_controller.get_grid(str(grid.id))
+        assert closed.status.value == "closed"
+        assert abs(closed.net_position_qty) < Decimal("0.00000001")  # Flatness verifiziert
+
+    async def test_grid_controller_not_injected_is_safe_noop(self) -> None:
+        """Ohne set_grid_controller() (Default None) bleibt das exakte
+        Vor-Aenderungs-Verhalten erhalten - kein Fehler, kein Effekt."""
+        portfolio = MagicMock()
+        portfolio.positions = []
+        execution = MagicMock()
+        liquidator = PositionLiquidator(
+            portfolio_engine=portfolio, execution_engine=execution, tenant_id=GORDON
+        )
+
+        await liquidator.on_kill_switch_event(_event(tenant_id=GORDON))  # darf nicht crashen
+
+    async def test_late_injection_via_set_grid_controller(self) -> None:
+        """set_grid_controller() (die spaete Injektion, wie in
+        sgr/api/main.py verwendet) wirkt korrekt."""
+        grid_controller, grid, execution = await self._setup()
+
+        portfolio = MagicMock()
+        portfolio.positions = []
+        liquidator = PositionLiquidator(
+            portfolio_engine=portfolio, execution_engine=execution, tenant_id=GORDON
+        )
+        liquidator.set_grid_controller(grid_controller)
+
+        await liquidator.on_kill_switch_event(_event(tenant_id=GORDON))
+
+        assert grid_controller.get_grid(str(grid.id)).status.value == "closed"
+
+    async def test_close_positions_false_leaves_grid_untouched(self) -> None:
+        grid_controller, grid, execution = await self._setup()
+
+        portfolio = MagicMock()
+        portfolio.positions = []
+        liquidator = PositionLiquidator(
+            portfolio_engine=portfolio,
+            execution_engine=execution,
+            tenant_id=GORDON,
+            grid_controller=grid_controller,
+        )
+
+        await liquidator.on_kill_switch_event(_event(tenant_id=GORDON, close_positions=False))
+
+        assert grid_controller.get_grid(str(grid.id)).status.value == "active"
+
+    async def test_foreign_tenant_event_leaves_grid_untouched(self) -> None:
+        grid_controller, grid, execution = await self._setup()
+
+        portfolio = MagicMock()
+        portfolio.positions = []
+        liquidator = PositionLiquidator(
+            portfolio_engine=portfolio,
+            execution_engine=execution,
+            tenant_id=GORDON,
+            grid_controller=grid_controller,
+        )
+
+        await liquidator.on_kill_switch_event(_event(tenant_id=SUMO))
+
+        assert grid_controller.get_grid(str(grid.id)).status.value == "active"
+
+    async def test_no_active_grids_is_safe_noop(self) -> None:
+        from sgr.exchanges.factory import ExchangePool
+        from sgr.execution.engine import ExecutionEngine
+        from sgr.execution.grid_controller import GridController
+
+        pool = ExchangePool()
+        execution = ExecutionEngine(pool, TradingMode.PAPER)
+        grid_controller = GridController(execution, TradingMode.PAPER, tenant_id=GORDON)
+
+        portfolio = MagicMock()
+        portfolio.positions = []
+        liquidator = PositionLiquidator(
+            portfolio_engine=portfolio,
+            execution_engine=execution,
+            tenant_id=GORDON,
+            grid_controller=grid_controller,
+        )
+
+        await liquidator.on_kill_switch_event(_event(tenant_id=GORDON))  # darf nicht crashen

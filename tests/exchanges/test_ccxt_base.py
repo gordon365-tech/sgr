@@ -934,6 +934,59 @@ class TestOrderManagement:
         buy_result = await adapter.place_order(buy_req)
         assert buy_result.raw_response["side"] == "buy"
 
+    async def test_simulate_order_grid_level_cross_uses_maker_fee(self, adapter, monkeypatch):
+        """Phase I (2026-09-23): ein Grid-Level-Fill (order.metadata
+        ["grid_fill_type"] == "level_cross") entspricht wirtschaftlich
+        einer ruhenden, jetzt gefuellten Limit-Order - Paper-Simulation
+        muss dafuer paper_maker_fee_pct statt paper_taker_fee_pct
+        verwenden."""
+        install_fake_ccxt(monkeypatch)
+        await adapter.connect()
+        req = make_order_request(
+            trading_mode=TradingMode.PAPER,
+            metadata={"grid_fill_type": "level_cross"},
+        )
+        result = await adapter.place_order(req)
+
+        from sgr.core.config import get_config
+
+        expected_fee_rate = Decimal(str(get_config().risk_limits.paper_maker_fee_pct))
+        expected_fees = req.quantity * result.average_fill_price * expected_fee_rate
+        assert result.fees == expected_fees
+
+    async def test_simulate_order_grid_force_exit_uses_taker_fee(self, adapter, monkeypatch):
+        """Ein 'force_exit'-Grid-Fill (Risk-Violation/Kill-Switch/manueller
+        Close) bleibt bewusst Taker - dringlicher, nicht-ruhender Exit."""
+        install_fake_ccxt(monkeypatch)
+        await adapter.connect()
+        req = make_order_request(
+            trading_mode=TradingMode.PAPER,
+            metadata={"grid_fill_type": "force_exit"},
+        )
+        result = await adapter.place_order(req)
+
+        from sgr.core.config import get_config
+
+        expected_fee_rate = Decimal(str(get_config().risk_limits.paper_taker_fee_pct))
+        expected_fees = req.quantity * result.average_fill_price * expected_fee_rate
+        assert result.fees == expected_fees
+
+    async def test_simulate_order_without_grid_metadata_uses_taker_fee(
+        self, adapter, monkeypatch
+    ):
+        """Unveraendertes Verhalten fuer jede direktionale, nicht-Grid-
+        Order (kein grid_fill_type in metadata) - Regressionsschutz."""
+        install_fake_ccxt(monkeypatch)
+        await adapter.connect()
+        req = make_order_request(trading_mode=TradingMode.PAPER)
+        result = await adapter.place_order(req)
+
+        from sgr.core.config import get_config
+
+        expected_fee_rate = Decimal(str(get_config().risk_limits.paper_taker_fee_pct))
+        expected_fees = req.quantity * result.average_fill_price * expected_fee_rate
+        assert result.fees == expected_fees
+
     async def test_simulate_order_ticker_failure_uses_limit_price_fallback(
         self, adapter, monkeypatch
     ):

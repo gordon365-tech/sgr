@@ -115,7 +115,15 @@ class SymbolLimits:
     uebersprungen, nicht automatisch bestanden oder abgelehnt).
     """
 
-    __slots__ = ("amount_precision", "price_precision", "min_amount", "max_amount", "min_notional")
+    __slots__ = (
+        "amount_precision",
+        "price_precision",
+        "min_amount",
+        "max_amount",
+        "min_notional",
+        "min_price",
+        "max_price",
+    )
 
     def __init__(
         self,
@@ -124,12 +132,20 @@ class SymbolLimits:
         min_amount: Decimal | None = None,
         max_amount: Decimal | None = None,
         min_notional: Decimal | None = None,
+        min_price: Decimal | None = None,
+        max_price: Decimal | None = None,
     ) -> None:
         self.amount_precision = amount_precision
         self.price_precision = price_precision
         self.min_amount = min_amount
         self.max_amount = max_amount
         self.min_notional = min_notional
+        # PRICE_FILTER min/max (2026-09-23, Grid-Preis-Quantisierung -
+        # siehe sgr/execution/quantization.py::quantize_price()). Optional
+        # wie alle anderen Felder hier - nicht jede Exchange/jedes Symbol
+        # liefert ccxt limits.price.min/max.
+        self.min_price = min_price
+        self.max_price = max_price
 
 
 class MarketStatus:
