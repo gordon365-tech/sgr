@@ -381,6 +381,29 @@ class TestKillSwitchBypassAndFailSafety:
 
         portfolio.on_order_filled.assert_not_awaited()
 
+    async def test_partially_filled_result_still_calls_on_order_filled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Root-Cause-Fund (Live-Verification-Anweisung, Recovery/Partial-
+        Fill-Durchlauf): ein SL/TP/Max-Holding-Exit, der nur teilweise
+        gefuellt wird (Timeout, Rest storniert), reduziert die Position
+        trotzdem real - PortfolioEngine muss davon erfahren, nicht nur
+        bei einem vollstaendigen FILLED."""
+        position = _position(max_holding_until=datetime.now(tz=UTC) - timedelta(seconds=1))
+        partial = _filled_result(position, position.current_price).model_copy(
+            update={
+                "status": OrderStatus.PARTIALLY_FILLED,
+                "filled_quantity": position.quantity / 2,
+            }
+        )
+        watchdog, portfolio, _execution = _make_watchdog(
+            monkeypatch, [position], execute_result=partial
+        )
+
+        await watchdog.check_positions_once()
+
+        portfolio.on_order_filled.assert_awaited_once_with(partial)
+
     async def test_execute_exception_is_swallowed_and_does_not_call_on_order_filled(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -255,6 +255,45 @@ async def test_happy_path_updates_portfolio_on_fill(
     )
 
 
+async def test_partially_filled_order_updates_portfolio(
+    sample_signal: Signal, sample_features: FeatureSet, btc_symbol: Symbol
+) -> None:
+    """Root-Cause-Fund (Live-Verification-Anweisung, Recovery/Partial-
+    Fill-Durchlauf): ein terminal PARTIALLY_FILLED Ergebnis (Timeout in
+    ExecutionEngine._monitor_fill(), Rest storniert, aber ein echter Teil
+    wurde gefuellt) wurde vorher stillschweigend verworfen - PortfolioEngine
+    erfuhr nie von der tatsaechlichen Exchange-Exposure. Muss jetzt wie
+    FILLED behandelt werden."""
+    e = _Engines()
+    e.strategy_engine.process.return_value = sample_signal
+    e.feature_store.get_latest.return_value = sample_features
+    assessment = _approved_assessment(sample_signal)
+    e.risk_engine.evaluate.return_value = assessment
+    order_request = _order_request(sample_signal, btc_symbol)
+    e.risk_engine.build_order_request.return_value = order_request
+
+    partial_result = OrderResult(
+        request_id=sample_signal.id,
+        exchange_order_id="EX-3",
+        symbol=btc_symbol,
+        status=OrderStatus.PARTIALLY_FILLED,
+        filled_quantity=Decimal("0.06"),  # von urspruenglich 0.1 beabsichtigt
+        average_fill_price=Decimal("50000"),
+        submitted_at=datetime.now(tz=UTC),
+        trading_mode=TradingMode.PAPER,
+    )
+    e.execution_engine.execute.return_value = partial_result
+    orchestrator = e.orchestrator()
+
+    result = await orchestrator.run_cycle("pionex:BTC/USDT", "1h")
+
+    assert result.status == TradingCycleStatus.ORDER_FILLED
+    e.portfolio_engine.on_order_filled.assert_called_once_with(partial_result)
+    e.risk_engine.record_trade.assert_called_once_with(
+        "pionex:BTC/USDT", sample_signal.strategy_name
+    )
+
+
 # ---------------------------------------------------------------------------
 # 4. Submitted, aber nicht gefüllt -> kein Portfolio-Update
 # ---------------------------------------------------------------------------

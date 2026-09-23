@@ -119,3 +119,78 @@ class TestShortPositionOpen:
         # cash - notional(=50000, current_price=entry_price) sein.
         expected_value = engine._state.cash - Decimal("50000")
         assert engine._state.portfolio_value == expected_value
+
+
+class TestPartiallyFilledOrdersAreTracked:
+    """Root-Cause-Fund (Live-Verification-Anweisung, Recovery/Partial-
+    Fill-Durchlauf): on_order_filled() akzeptierte bisher ausschliesslich
+    OrderStatus.FILLED - ein terminal PARTIALLY_FILLED Ergebnis (siehe
+    ExecutionEngine._monitor_fill() Timeout-Pfad) wurde stillschweigend
+    verworfen, obwohl die zugrundeliegende Open-/Update-Logik bereits
+    durchgaengig result.filled_quantity verwendet."""
+
+    async def test_partially_filled_open_creates_position_with_actual_quantity(self) -> None:
+        engine = PortfolioEngine(trading_mode=TradingMode.PAPER)
+        fill = OrderResult(
+            request_id=uuid4(),
+            exchange_order_id="EX-PARTIAL-1",
+            symbol=_symbol(),
+            status=OrderStatus.PARTIALLY_FILLED,
+            filled_quantity=Decimal("0.4"),
+            average_fill_price=Decimal("50000"),
+            fees=Decimal("2"),
+            submitted_at=datetime.now(tz=UTC),
+            trading_mode=TradingMode.PAPER,
+            raw_response={"side": Side.BUY.value},
+        )
+
+        await engine.on_order_filled(fill)
+
+        positions = list(engine.positions)
+        assert len(positions) == 1
+        assert positions[0].quantity == Decimal("0.4")
+        assert positions[0].side == PositionSide.LONG
+
+    async def test_partially_filled_close_reduces_position_by_actual_quantity(self) -> None:
+        engine = PortfolioEngine(trading_mode=TradingMode.PAPER)
+        open_fill = _fill(Side.BUY, qty=Decimal("1"))
+        await engine.on_order_filled(open_fill)
+
+        close_fill = OrderResult(
+            request_id=uuid4(),
+            exchange_order_id="EX-PARTIAL-2",
+            symbol=_symbol(),
+            status=OrderStatus.PARTIALLY_FILLED,
+            filled_quantity=Decimal("0.3"),  # nur ein Teil der offenen 1.0
+            average_fill_price=Decimal("51000"),
+            fees=Decimal("1"),
+            submitted_at=datetime.now(tz=UTC),
+            trading_mode=TradingMode.PAPER,
+            raw_response={"side": Side.SELL.value},
+        )
+
+        await engine.on_order_filled(close_fill)
+
+        positions = list(engine.positions)
+        assert len(positions) == 1  # bleibt offen, nur kleiner
+        assert positions[0].quantity == Decimal("0.7")
+
+    async def test_rejected_order_still_does_not_update_portfolio(self) -> None:
+        """Gegenprobe: REJECTED/CANCELLED (kein tatsaechlicher Fill,
+        filled_quantity=0) darf weiterhin keine Position eroeffnen."""
+        engine = PortfolioEngine(trading_mode=TradingMode.PAPER)
+        fill = OrderResult(
+            request_id=uuid4(),
+            exchange_order_id="EX-REJECTED",
+            symbol=_symbol(),
+            status=OrderStatus.REJECTED,
+            filled_quantity=Decimal("0"),
+            average_fill_price=None,
+            submitted_at=datetime.now(tz=UTC),
+            trading_mode=TradingMode.PAPER,
+            raw_response={"side": Side.BUY.value},
+        )
+
+        await engine.on_order_filled(fill)
+
+        assert list(engine.positions) == []

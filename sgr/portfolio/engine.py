@@ -248,10 +248,28 @@ class PortfolioEngine:
 
     async def on_order_filled(self, result: OrderResult) -> None:
         """
-        Wird bei jedem gefüllten Order aufgerufen.
-        Öffnet neue Position oder schließt/reduziert bestehende.
+        Wird bei jedem gefüllten (oder terminal teil-gefüllten) Order
+        aufgerufen. Öffnet neue Position oder schließt/reduziert
+        bestehende.
+
+        Root-Cause-Fund (Live-Verification-Anweisung, Recovery/Partial-
+        Fill-Durchlauf): dieser Guard akzeptierte bisher AUSSCHLIESSLICH
+        OrderStatus.FILLED - ein terminal PARTIALLY_FILLED Ergebnis
+        (siehe ExecutionEngine._monitor_fill(): Timeout -> Rest stornieren
+        -> gibt zurueck, was TATSAECHLICH gefuellt wurde, moeglicherweise
+        PARTIALLY_FILLED) wurde von JEDEM der drei Aufrufer (Trading-
+        Orchestrator, PositionProtectionWatchdog, PositionLiquidator - alle
+        hatten denselben "== OrderStatus.FILLED"-Gate) stillschweigend
+        verworfen. Ein echter, realer Teil-Fill auf der Exchange wurde
+        dadurch NIE in PortfolioEngine.positions nachgezogen - reale
+        Exposure ohne jede lokale Positions-/PnL-/Exposure-Verfolgung, nur
+        durch die separate ReconciliationEngine (read-only, korrigiert
+        nichts) ueberhaupt erkennbar. _open_position()/_update_position()
+        verwenden bereits durchgaengig result.filled_quantity (die
+        tatsaechliche Menge, nie die urspruenglich beabsichtigte) - dieser
+        Guard war die einzige Blockade.
         """
-        if result.status != OrderStatus.FILLED:
+        if result.status not in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
             return
         if result.average_fill_price is None or result.filled_quantity <= 0:
             log.warning(

@@ -766,7 +766,13 @@ class PositionProtectionWatchdog:
         # das identische, bereits etablierte Muster) - kein produktiver
         # Subscriber auf OrderFilledEvent, PortfolioEngine.on_order_filled()
         # wird ausschliesslich direkt aufgerufen.
-        if result.status == OrderStatus.FILLED:
+        #
+        # PARTIALLY_FILLED zaehlt bewusst mit (Root-Cause-Fund, siehe
+        # PortfolioEngine.on_order_filled() Docstring): ein SL/TP/Max-
+        # Holding-Exit, der nur teilweise gefuellt wird (Timeout, Rest
+        # storniert), reduziert die Position trotzdem tatsaechlich real
+        # auf der Exchange - das muss verfolgt werden, nicht verworfen.
+        if result.status in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
             await self._portfolio.on_order_filled(result)
             if self._kill_switch is not None:
                 # Nur fuer das Auto-Recovery-Audit-Log gezaehlt (siehe

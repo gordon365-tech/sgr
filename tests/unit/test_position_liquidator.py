@@ -197,6 +197,40 @@ class TestClosingOrders:
         await liquidator.on_kill_switch_event(_event())
         portfolio.on_order_filled.assert_not_awaited()
 
+    async def test_partially_filled_close_updates_portfolio_but_is_not_flat(
+        self, liquidator: PositionLiquidator, portfolio: MagicMock, execution: MagicMock, mocker
+    ) -> None:
+        """Root-Cause-Fund (Live-Verification-Anweisung, Recovery/Partial-
+        Fill-Durchlauf): ein Emergency-Close, der nur teilweise fuellt,
+        muss die real reduzierte Menge trotzdem ins Portfolio uebernehmen
+        - gleichzeitig bleibt der aggregierte Flatness-Nachweis (siehe
+        TestAggregateFlatnessProof) korrekt bei CRITICAL/nicht-flach."""
+        mock_log = mocker.patch("sgr.risk.position_liquidator.log")
+        position = _position(PositionSide.LONG)
+
+        def _side_effect(order, **kw):
+            return OrderResult(
+                request_id=order.id,
+                exchange_order_id="PAPER-PARTIAL",
+                symbol=order.symbol,
+                status=OrderStatus.PARTIALLY_FILLED,
+                filled_quantity=order.quantity / 2,
+                average_fill_price=Decimal("51000"),
+                fees=Decimal("1"),
+                submitted_at=datetime.now(tz=UTC),
+                trading_mode=order.trading_mode,
+            )
+
+        execution.execute = AsyncMock(side_effect=_side_effect)
+        portfolio.positions = [position]
+
+        await liquidator.on_kill_switch_event(_event())
+
+        portfolio.on_order_filled.assert_awaited_once()
+        events = [call.args[0] for call in mock_log.critical.call_args_list]
+        assert "position_liquidator.close_order_not_filled" in events
+        assert "position_liquidator.emergency_close_incomplete" in events
+
     async def test_one_close_failure_does_not_block_others(
         self, liquidator: PositionLiquidator, portfolio: MagicMock, execution: MagicMock
     ) -> None:

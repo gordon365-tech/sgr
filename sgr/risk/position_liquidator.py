@@ -275,9 +275,18 @@ class PositionLiquidator:
 
         # Direkter Aufruf statt Event Bus (siehe Modul-Docstring) - gleiches
         # Muster wie TradingOrchestrator.run_cycle().
-        if result.status == OrderStatus.FILLED:
+        #
+        # PARTIALLY_FILLED aktualisiert das Portfolio ebenfalls (Root-
+        # Cause-Fund, siehe PortfolioEngine.on_order_filled() Docstring) -
+        # die tatsaechlich reduzierte Menge darf nicht verloren gehen, nur
+        # weil der Emergency-Close-Versuch selbst nicht vollstaendig war.
+        # Der Rueckgabewert bleibt trotzdem False fuer PARTIALLY_FILLED:
+        # Flatness dieser Position ist NICHT bewiesen (siehe unten), auch
+        # wenn der teilweise Fortschritt jetzt korrekt verfolgt wird.
+        if result.status in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
             await self._portfolio.on_order_filled(result)
-            return True
+            if result.status == OrderStatus.FILLED:
+                return True
 
         # Jeder andere Status (REJECTED, PARTIALLY_FILLED, ...) heisst:
         # Flatness dieser Position ist NICHT bewiesen - laut loggen statt

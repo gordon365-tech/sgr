@@ -250,7 +250,18 @@ class TradingOrchestrator:
 
         # 7. Portfolio State aktualisieren (deterministisch, direkter Aufruf -
         #    NICHT über Event Bus, um Doppelverarbeitung/Race auszuschließen)
-        if order_result.status == OrderStatus.FILLED:
+        #
+        # PARTIALLY_FILLED zaehlt hier bewusst wie FILLED (Root-Cause-Fund,
+        # siehe PortfolioEngine.on_order_filled() Docstring): ein Timeout
+        # in ExecutionEngine._monitor_fill() kann eine Order mit einer
+        # tatsaechlich > 0 gefuellten Teilmenge terminal PARTIALLY_FILLED
+        # zurueckgeben (Rest storniert) - das IST ein echter, stattgefundener
+        # Trade und muss ins Portfolio UND ins Cooldown-Tracking einfliessen,
+        # nicht stillschweigend als "kein Fill" behandelt werden. Es gibt
+        # bewusst keinen eigenen TradingCycleStatus-Wert dafuer (siehe
+        # sgr/core/types.py) - ORDER_FILLED bleibt der treffende Status,
+        # solange filled_quantity > 0 tatsaechlich verarbeitet wurde.
+        if order_result.status in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
             await self._portfolio_engine.on_order_filled(order_result)
             # Cooldown-Tracking: erst jetzt ist sicher, dass ein Trade
             # tatsächlich stattgefunden hat (APPROVED != FILLED).
