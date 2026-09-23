@@ -101,6 +101,7 @@ class PositionLiquidator:
             return
 
         positions = list(self._portfolio.positions)
+        positions_flat = True
         if not positions:
             log.info("position_liquidator.no_open_positions", reason=event.reason)
         else:
@@ -111,22 +112,53 @@ class PositionLiquidator:
                 tenant_id=self._tenant_id,
             )
             for position in positions:
-                await self._close_position(position, event.reason)
+                closed_flat = await self._close_position(position, event.reason)
+                positions_flat = positions_flat and closed_flat
 
         # Phase H (GATE 3): PortfolioEngine.positions sieht Grid-Exposure
         # NICHT als normale Position (siehe Modul-Docstring) - ohne diesen
         # zweiten, expliziten Schritt wuerde ein aktives Grid einen
         # globalen Kill Switch mit close_positions=True ueberleben.
-        await self._close_all_grids(event.reason)
+        grids_flat = await self._close_all_grids(event.reason)
 
-    async def _close_all_grids(self, kill_switch_reason: str) -> None:
+        # Abschliessender, aggregierter Flatness-Nachweis (explizite
+        # Anweisung: "Nach Emergency Close muss NET EXPOSURE = 0
+        # beweisbar sein... Wenn Flatness nicht eindeutig festgestellt
+        # werden kann: FAIL CLOSED / Operator Attention Required") - ein
+        # einzelner, unmissverstaendlicher CRITICAL-Log-Eintrag am Ende
+        # des gesamten Emergency-Close-Laufs, zusaetzlich zu den bereits
+        # vorhandenen Per-Item-Logs, damit ein unvollstaendiger Close
+        # nicht in einzelnen WARNING-Zeilen untergeht.
+        if positions_flat and grids_flat:
+            log.info(
+                "position_liquidator.emergency_close_complete",
+                tenant_id=self._tenant_id,
+                reason=event.reason,
+                net_exposure_zero=True,
+            )
+        else:
+            log.critical(
+                "position_liquidator.emergency_close_incomplete",
+                tenant_id=self._tenant_id,
+                reason=event.reason,
+                positions_flat=positions_flat,
+                grids_flat=grids_flat,
+                note="Operator Attention Required - Net Exposure nicht nachweislich 0",
+            )
+
+    async def _close_all_grids(self, kill_switch_reason: str) -> bool:
+        """Returns True nur, wenn JEDES aktive Grid nachweislich flach
+        geschlossen wurde (net_position_qty == 0) - siehe aggregierter
+        Flatness-Nachweis in on_kill_switch_event()."""
         if self._grid_controller is None:
-            return
+            return True
 
         grids = self._grid_controller.active_grids()
         if not grids:
             log.info("position_liquidator.no_open_grids", reason=kill_switch_reason)
-            return
+            return True
+
+        all_flat = True
 
         log.warning(
             "position_liquidator.closing_grids",
@@ -149,6 +181,7 @@ class PositionLiquidator:
                     grid_id=str(grid.id),
                     symbol=str(grid.symbol),
                 )
+                all_flat = False
                 continue
 
             try:
@@ -161,6 +194,7 @@ class PositionLiquidator:
                     grid_id=str(grid.id),
                     error=str(e),
                 )
+                all_flat = False
                 continue
 
             is_flat = abs(closed.net_position_qty) < Decimal("0.00000001")
@@ -191,8 +225,16 @@ class PositionLiquidator:
                     grid_id=str(closed.id),
                     net_position_qty=str(closed.net_position_qty),
                 )
+                all_flat = False
 
-    async def _close_position(self, position: Any, kill_switch_reason: str) -> None:
+        return all_flat
+
+    async def _close_position(self, position: Any, kill_switch_reason: str) -> bool:
+        """Returns True nur, wenn die schliessende Order nachweislich
+        FILLED wurde (siehe aggregierter Flatness-Nachweis in
+        on_kill_switch_event()) - jeder andere Ausgang (REJECTED,
+        PARTIALLY_FILLED, Exception) bedeutet: Flatness dieser Position
+        ist NICHT bewiesen, wird laut (CRITICAL) statt still geloggt."""
         close_side = Side.SELL if position.side == PositionSide.LONG else Side.BUY
 
         order = OrderRequest(
@@ -216,12 +258,13 @@ class PositionLiquidator:
             # ExecutionEngine.execute() Docstring.
             result = await self._execution.execute(order, bypass_kill_switch=True)
         except Exception as e:
-            log.error(
+            log.critical(
                 "position_liquidator.close_order_failed",
                 symbol=str(position.symbol),
                 error=str(e),
+                note="Operator Attention Required - Position vermutlich weiterhin offen",
             )
-            return
+            return False
 
         log.info(
             "position_liquidator.close_order_result",
@@ -234,3 +277,15 @@ class PositionLiquidator:
         # Muster wie TradingOrchestrator.run_cycle().
         if result.status == OrderStatus.FILLED:
             await self._portfolio.on_order_filled(result)
+            return True
+
+        # Jeder andere Status (REJECTED, PARTIALLY_FILLED, ...) heisst:
+        # Flatness dieser Position ist NICHT bewiesen - laut loggen statt
+        # dem bisherigen stillen "return" (siehe Docstring oben).
+        log.critical(
+            "position_liquidator.close_order_not_filled",
+            symbol=str(position.symbol),
+            status=result.status.value,
+            note="Operator Attention Required - Position vermutlich weiterhin offen",
+        )
+        return False

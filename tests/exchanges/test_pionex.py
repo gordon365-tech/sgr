@@ -26,7 +26,7 @@ import pytest
 from pydantic import SecretStr
 
 from sgr.core.config import ExchangeCredentials
-from sgr.core.types import ExchangeID, TradingMode
+from sgr.core.types import AssetClass, ExchangeID, OrderStatus, TradingMode
 from sgr.exchanges.pionex import PionexAdapter
 
 # ---------------------------------------------------------------------
@@ -690,3 +690,74 @@ class TestNativeFallback:
         assert native_client.closed is True
         assert fallback_paper_adapter._connected is False
         assert fallback_paper_adapter._native_fallback is False
+
+
+class TestParseNativeOrderCancelledAfterPartialFill:
+    """'Cancel nach Partial Fill' (siehe Live-Verification-Anweisung
+    Abschnitt G): Pionex's CLOSED-Bucket deckt sowohl FILLED als auch
+    CANCELED/REJECTED ab (kein feineres Statusfeld im Schema, siehe
+    _parse_native_order() Docstring). Eine Order, die storniert wurde,
+    NACHDEM sie bereits teilweise gefuellt war, muss die tatsaechlich
+    gefuellte Menge behalten (status wird FILLED fuer die tatsaechlich
+    gefuellte Teilmenge, siehe Root-Cause-Fix-Docstring) statt sie als
+    CANCELLED mit verlorener Fill-Information zu melden."""
+
+    def test_closed_with_partial_fill_maps_to_filled_not_cancelled(
+        self, paper_adapter: PionexAdapter
+    ) -> None:
+        raw = {
+            "orderId": 42,
+            "symbol": "BTC_USDT_PERP",
+            "side": "BUY",
+            "type": "MARKET",
+            "size": "1.0",
+            "filledSize": "0.3",
+            "filledAmount": "18000",
+            "status": "CLOSED",
+            "createTime": 1786237680000,
+            "updateTime": 1786237680000,
+        }
+
+        result = paper_adapter._parse_native_order(raw, AssetClass.FUTURES)
+
+        assert result.status == OrderStatus.FILLED
+        assert result.filled_quantity == Decimal("0.3")
+
+    def test_closed_with_zero_fill_maps_to_cancelled(self, paper_adapter: PionexAdapter) -> None:
+        raw = {
+            "orderId": 43,
+            "symbol": "BTC_USDT_PERP",
+            "side": "BUY",
+            "type": "LIMIT",
+            "size": "1.0",
+            "filledSize": "0",
+            "status": "CLOSED",
+            "createTime": 1786237680000,
+            "updateTime": 1786237680000,
+        }
+
+        result = paper_adapter._parse_native_order(raw, AssetClass.FUTURES)
+
+        assert result.status == OrderStatus.CANCELLED
+        assert result.filled_quantity == Decimal("0")
+
+    def test_open_with_partial_fill_maps_to_partially_filled(
+        self, paper_adapter: PionexAdapter
+    ) -> None:
+        raw = {
+            "orderId": 44,
+            "symbol": "BTC_USDT_PERP",
+            "side": "BUY",
+            "type": "LIMIT",
+            "size": "1.0",
+            "filledSize": "0.3",
+            "filledAmount": "18000",
+            "status": "OPEN",
+            "createTime": 1786237680000,
+            "updateTime": 1786237680000,
+        }
+
+        result = paper_adapter._parse_native_order(raw, AssetClass.FUTURES)
+
+        assert result.status == OrderStatus.PARTIALLY_FILLED
+        assert result.filled_quantity == Decimal("0.3")

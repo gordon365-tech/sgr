@@ -1256,6 +1256,42 @@ class TestHelpers:
         assert result.fees == Decimal("0.5")
         assert result.filled_at is not None
 
+    def test_parse_order_result_cancelled_after_partial_fill_still_reports_fill(self, adapter):
+        """'Cancel nach Partial Fill' (siehe Live-Verification-Anweisung
+        Abschnitt G): ccxt kann eine Order melden, die durch den
+        Operator/Exchange storniert wurde, NACHDEM sie bereits teilweise
+        gefuellt war (status='canceled', filled>0). Der bestehende
+        Partial-Fill-Override greift unabhaengig vom rohen Status-String -
+        die tatsaechlich gefuellte Menge darf NIE verloren gehen, nur weil
+        der Rest storniert wurde (siehe GridController._fill_level(), das
+        sich auf genau dieses Verhalten verlaesst)."""
+        req = make_order_request()
+        raw = {
+            "id": "1",
+            "status": "canceled",
+            "amount": "10",
+            "filled": "3",
+            "fee": {"cost": "0.3", "currency": "USDT"},
+            "average": "100",
+            "timestamp": 1_700_000_000_000,
+        }
+        result = adapter._parse_order_result(raw, req)
+        assert result.status.value == "partially_filled"
+        assert result.filled_quantity == Decimal("3")
+
+    def test_parse_order_result_cancelled_with_zero_fill_stays_cancelled(self, adapter):
+        req = make_order_request()
+        raw = {
+            "id": "1",
+            "status": "canceled",
+            "amount": "10",
+            "filled": "0",
+            "timestamp": 1_700_000_000_000,
+        }
+        result = adapter._parse_order_result(raw, req)
+        assert result.status.value == "cancelled"
+        assert result.filled_quantity == Decimal("0")
+
     def test_parse_order_result_no_lasttrade_timestamp(self, adapter):
         req = make_order_request()
         raw = {"id": "1", "status": "open", "amount": "1", "filled": "0"}

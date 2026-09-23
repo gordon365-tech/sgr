@@ -1165,6 +1165,80 @@ class TestGridRecoveryIdempotencyAndNoResubmit:
 
         assert adapter.call_count("place_order") == 0
 
+    async def test_partial_close_fill_leaves_remaining_quantity_after_restart(
+        self, pool: ExchangePool
+    ) -> None:
+        """'Restart nach Partial Fill' (Live-Verification-Anweisung
+        Abschnitt G) - Regressionstest fuer einen echten Bug: die
+        Ledger-Replay-Logik in _restore_one_grid() setzte JEDEN
+        schliessenden Fill pauschal auf is_filled=False/quantity=0,
+        selbst wenn dieser schliessende Fill selbst nur ein TEIL-Close
+        war (0.4 von 1.0 geschlossen). Nach einem Neustart waere die
+        real noch offene Restmenge (0.6) dadurch STILLSCHWEIGEND
+        verloren gegangen - sowohl fuer die Unrealized-PnL-Berechnung
+        als auch fuer die naechste Crossing-Erkennung (die das Level
+        faelschlich wieder als 'frei zum Oeffnen' behandelt haette,
+        obwohl real noch 0.6 offen sind - ein doppelter Fill/doppelte
+        Exposure waere die Folge gewesen)."""
+        open_order_id = str(uuid4())
+        partial_close_order_id = str(uuid4())
+        row = _grid_row(_G1)
+        fills = {
+            _G1: [
+                _fill(0, is_opening=True, order_id=open_order_id, quantity="1.0"),
+                _fill(
+                    0,
+                    is_opening=False,
+                    order_id=partial_close_order_id,
+                    quantity="0.4",
+                ),
+            ]
+        }
+        order_repo = FakeOrderRepo(
+            {
+                open_order_id: {"status": "filled"},
+                partial_close_order_id: {"status": "filled"},
+            }
+        )
+        repo = FakeGridRepo(open_grids=[row], fills_by_grid=fills)
+        controller = _controller_for_recovery(pool, repo, order_repo)
+
+        restored = await controller.restore_from_persistence()
+
+        level_0 = next(lv for lv in restored[0].levels if lv.index == 0)
+        assert level_0.is_filled is True  # weiterhin offen, nur kleiner
+        assert level_0.quantity == Decimal("0.6")
+
+    async def test_full_close_fill_after_open_zeroes_level_after_restart(
+        self, pool: ExchangePool
+    ) -> None:
+        """Gegenprobe zum obigen Test: ein VOLLSTAENDIGER Close (Fill-
+        Menge == Open-Menge) muss weiterhin korrekt auf is_filled=False/
+        quantity=0 zurueckgesetzt werden."""
+        open_order_id = str(uuid4())
+        close_order_id = str(uuid4())
+        row = _grid_row(_G1)
+        fills = {
+            _G1: [
+                _fill(0, is_opening=True, order_id=open_order_id, quantity="1.0"),
+                _fill(0, is_opening=False, order_id=close_order_id, quantity="1.0"),
+            ]
+        }
+        order_repo = FakeOrderRepo(
+            {
+                open_order_id: {"status": "filled"},
+                close_order_id: {"status": "filled"},
+            }
+        )
+        repo = FakeGridRepo(open_grids=[row], fills_by_grid=fills)
+        controller = _controller_for_recovery(pool, repo, order_repo)
+
+        restored = await controller.restore_from_persistence()
+
+        level_0 = next(lv for lv in restored[0].levels if lv.index == 0)
+        assert level_0.is_filled is False
+        assert level_0.quantity == Decimal("0")
+
     async def test_restored_grid_resumes_normal_operation_via_price_tick(
         self, pool: ExchangePool, adapter: MockExchangeAdapter
     ) -> None:

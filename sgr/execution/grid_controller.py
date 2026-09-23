@@ -1079,12 +1079,33 @@ class GridController:
                     return None  # fail-closed: unklarer Order-Ausgang, kein Raten
 
             if fill["is_opening"]:
+                # Ein zweiter "opening"-Fill fuer denselben Level-Index
+                # VOR einem dazwischenliegenden Close ist ein weiterer
+                # Partial-Fill desselben Opens (siehe _fill_level(): ein
+                # Level kann in mehreren Teil-Fuellungen geoeffnet werden,
+                # bevor es als vollstaendig "gefuellt" gilt) - Mengen
+                # akkumulieren statt ueberschreiben, damit der Replay
+                # dieselbe Endmenge ergibt wie die Live-Verarbeitung.
                 level.is_filled = True
-                level.quantity = fill["quantity"]
+                level.quantity += fill["quantity"]
                 level.cycle_count += 1
             else:
-                level.is_filled = False
-                level.quantity = Decimal("0")
+                # "Restart nach Partial Fill" (siehe Live-Verification-
+                # Anweisung Abschnitt G): ein schliessender Fill kann
+                # selbst nur ein TEIL-Close sein (siehe _fill_level(),
+                # closing-Zweig) - die Restmenge muss wie live per
+                # Subtraktion berechnet werden, NICHT pauschal auf 0
+                # gesetzt werden. Sonst wuerde ein Neustart nach einem
+                # Partial Close die tatsaechlich noch offene Restmenge
+                # (und damit reale Exchange-Exposure) stillschweigend
+                # verlieren.
+                remaining_qty = level.quantity - fill["quantity"]
+                if remaining_qty <= Decimal("0.00000001"):
+                    level.is_filled = False
+                    level.quantity = Decimal("0")
+                else:
+                    level.is_filled = True
+                    level.quantity = remaining_qty
             level.last_order_id = str(order_id) if order_id else level.last_order_id
             level.last_filled_at = fill["filled_at"]
 

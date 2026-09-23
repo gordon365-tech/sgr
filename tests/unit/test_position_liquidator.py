@@ -219,6 +219,70 @@ class TestClosingOrders:
         portfolio.on_order_filled.assert_awaited_once()
 
 
+class TestAggregateFlatnessProof:
+    """Explizite Anweisung: 'Nach Emergency Close muss NET EXPOSURE = 0
+    beweisbar sein... Wenn Flatness nicht eindeutig festgestellt werden
+    kann: FAIL CLOSED / Operator Attention Required.' Verifiziert den
+    aggregierten Flatness-Nachweis am Ende von on_kill_switch_event()
+    (CRITICAL-Log bei jedem nicht bewiesenen Flatness-Fall), nicht nur
+    die bereits bestehenden Per-Item-Logs."""
+
+    @staticmethod
+    def _critical_events(mock_log: MagicMock) -> list[str]:
+        return [call.args[0] for call in mock_log.critical.call_args_list]
+
+    async def test_all_positions_filled_logs_complete_not_critical(
+        self, liquidator: PositionLiquidator, portfolio: MagicMock, mocker
+    ) -> None:
+        mock_log = mocker.patch("sgr.risk.position_liquidator.log")
+        portfolio.positions = [_position(PositionSide.LONG)]
+
+        await liquidator.on_kill_switch_event(_event())
+
+        assert self._critical_events(mock_log) == []
+        assert mock_log.info.call_args_list[-1].args[0] == (
+            "position_liquidator.emergency_close_complete"
+        )
+
+    async def test_rejected_close_triggers_critical_escalation(
+        self, liquidator: PositionLiquidator, portfolio: MagicMock, execution: MagicMock, mocker
+    ) -> None:
+        mock_log = mocker.patch("sgr.risk.position_liquidator.log")
+        execution.execute = AsyncMock(
+            side_effect=lambda order, **kw: _fill_result(order, status=OrderStatus.REJECTED)
+        )
+        portfolio.positions = [_position(PositionSide.LONG)]
+
+        await liquidator.on_kill_switch_event(_event())
+
+        events = self._critical_events(mock_log)
+        assert "position_liquidator.close_order_not_filled" in events
+        assert "position_liquidator.emergency_close_incomplete" in events
+
+    async def test_exception_during_close_triggers_critical_escalation(
+        self, liquidator: PositionLiquidator, portfolio: MagicMock, execution: MagicMock, mocker
+    ) -> None:
+        mock_log = mocker.patch("sgr.risk.position_liquidator.log")
+        execution.execute = AsyncMock(side_effect=RuntimeError("exchange unreachable"))
+        portfolio.positions = [_position(PositionSide.LONG)]
+
+        await liquidator.on_kill_switch_event(_event())
+
+        events = self._critical_events(mock_log)
+        assert "position_liquidator.close_order_failed" in events
+        assert "position_liquidator.emergency_close_incomplete" in events
+
+    async def test_all_filled_and_no_grids_reports_no_critical(
+        self, liquidator: PositionLiquidator, portfolio: MagicMock, mocker
+    ) -> None:
+        mock_log = mocker.patch("sgr.risk.position_liquidator.log")
+        portfolio.positions = [_position(PositionSide.LONG), _position(PositionSide.SHORT)]
+
+        await liquidator.on_kill_switch_event(_event())
+
+        assert self._critical_events(mock_log) == []
+
+
 # ---------------------------------------------------------------------------
 # Phase H (GATE 3): Grid-Awareness - echter GridController, kein Mock
 # ---------------------------------------------------------------------------
