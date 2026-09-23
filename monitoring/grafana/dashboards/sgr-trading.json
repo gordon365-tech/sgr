@@ -2595,6 +2595,210 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "collapsed": false,
+      "datasource": "Prometheus",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 87
+      },
+      "id": 39,
+      "panels": [],
+      "title": "Execution Quality & Live Verification",
+      "type": "row"
+    },
+    {
+      "datasource": "Prometheus",
+      "title": "Order Slippage (%)",
+      "description": "Realized slippage per fill (abs(fill price - reference price) / reference price * 100) - only recorded when a reference price (order.limit_price) was available. sgr_order_slippage_pct histogram, see ExecutionEngine._on_fill().",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 88
+      },
+      "id": 40,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "sum(rate(sgr_order_slippage_pct_sum{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\"}[15m])) / sum(rate(sgr_order_slippage_pct_count{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\"}[15m]))",
+          "legendFormat": "Gordon",
+          "refId": "A"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "sum(rate(sgr_order_slippage_pct_sum{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\"}[15m])) / sum(rate(sgr_order_slippage_pct_count{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\"}[15m]))",
+          "legendFormat": "Sumo",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "title": "Live Verification Gate: Active",
+      "description": "1 while a LiveVerificationGate can still admit LIVE orders for this tenant, 0 once deactivated (budget/time/loss limit hit). No data = no live verification run currently configured (the case for Gordon/Sumo today, both PAPER-only). See sgr/risk/live_verification_profile.py.",
+      "type": "stat",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 88
+      },
+      "id": 41,
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "INACTIVE",
+                  "index": 0
+                },
+                "1": {
+                  "text": "ACTIVE",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "gray",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short",
+          "noValue": "no live verification run"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "max(sgr_live_verification_active{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\"})",
+          "legendFormat": "Gordon",
+          "refId": "A"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "max(sgr_live_verification_active{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\"})",
+          "legendFormat": "Sumo",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "datasource": "Prometheus",
+      "title": "Live Verification: Loss Budget Remaining (USD)",
+      "description": "max_loss_usd minus cumulative realized loss for the current live verification run, floored at 0. No data = no live verification run currently configured. See LiveVerificationGate._emit_metrics().",
+      "type": "bargauge",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 88
+      },
+      "id": 42,
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "currencyUSD",
+          "noValue": "no live verification run"
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "max(sgr_live_verification_loss_budget_remaining_usd{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\"})",
+          "legendFormat": "Gordon",
+          "refId": "A"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "max(sgr_live_verification_loss_budget_remaining_usd{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\"})",
+          "legendFormat": "Sumo",
+          "refId": "B"
+        }
+      ]
     }
   ],
   "refresh": "30s",

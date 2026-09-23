@@ -77,7 +77,22 @@ def _otel_to_prometheus_names(content: str) -> set[str]:
 
 
 def _raw_prometheus_names(content: str) -> set[str]:
-    return {name for _kind, name in _RAW_INSTRUMENT_RE.findall(content)}
+    """Fuer Histogram-Metriken exportiert der prometheus_client-Client
+    zusaetzlich zum Basisnamen drei abgeleitete Zeitreihen (_bucket,
+    _sum, _count, siehe https://prometheus.io/docs/concepts/metric_types/
+    #histogram) - eine PromQL-Query referenziert ueblicherweise diese
+    Suffix-Varianten, nicht den nackten Basisnamen (der am /metrics-
+    Endpoint gar keine eigene Zeitreihe hat). Ohne diese Erweiterung
+    wuerde jede legitime Histogram-Query faelschlich als 'unbekannte
+    Metrik' durchfallen."""
+    names: set[str] = set()
+    for kind, name in _RAW_INSTRUMENT_RE.findall(content):
+        names.add(name)
+        if kind == "Histogram":
+            names.add(f"{name}_bucket")
+            names.add(f"{name}_sum")
+            names.add(f"{name}_count")
+    return names
 
 
 @pytest.fixture(scope="module")
@@ -473,3 +488,48 @@ class TestDashboardPanelTypesAreAppropriate:
                     f"Target {t.get('refId')} in {p['title']!r} has no real metric "
                     f"reference: {expr!r}"
                 )
+
+
+class TestExecutionQualityAndLiveVerificationSection:
+    """Root-Cause-Fund (Live-Verification-Anweisung, Observability):
+    sgr_order_slippage_pct und die sgr_live_verification_*-Gauges
+    existierten im Code, hatten aber keine Grafana-Sichtbarkeit."""
+
+    def _panel(self, dashboard: dict, title: str) -> dict:
+        matches = [p for p in _all_panels(dashboard) if p["title"] == title]
+        assert len(matches) == 1, f"Expected exactly one panel titled {title!r}"
+        return matches[0]
+
+    def test_execution_quality_row_exists(self, dashboard: dict) -> None:
+        row_titles = [p["title"] for p in dashboard["panels"] if p.get("type") == "row"]
+        assert any("Execution Quality" in t or "Live Verification" in t for t in row_titles)
+
+    def test_slippage_panel_references_the_real_histogram(self, dashboard: dict) -> None:
+        panel = self._panel(dashboard, "Order Slippage (%)")
+        exprs = [t["expr"] for t in panel["targets"]]
+        assert all("sgr_order_slippage_pct_sum" in e for e in exprs)
+        assert all("sgr_order_slippage_pct_count" in e for e in exprs)
+
+    def test_live_verification_active_panel_references_the_real_gauge(
+        self, dashboard: dict
+    ) -> None:
+        panel = self._panel(dashboard, "Live Verification Gate: Active")
+        exprs = [t["expr"] for t in panel["targets"]]
+        assert all("sgr_live_verification_active" in e for e in exprs)
+
+    def test_live_verification_loss_budget_panel_references_the_real_gauge(
+        self, dashboard: dict
+    ) -> None:
+        panel = self._panel(dashboard, "Live Verification: Loss Budget Remaining (USD)")
+        exprs = [t["expr"] for t in panel["targets"]]
+        assert all("sgr_live_verification_loss_budget_remaining_usd" in e for e in exprs)
+
+    def test_new_panels_are_tenant_split_gordon_and_sumo(self, dashboard: dict) -> None:
+        for title in (
+            "Order Slippage (%)",
+            "Live Verification Gate: Active",
+            "Live Verification: Loss Budget Remaining (USD)",
+        ):
+            panel = self._panel(dashboard, title)
+            legends = {t["legendFormat"] for t in panel["targets"]}
+            assert legends == {"Gordon", "Sumo"}, f"{title!r} legends: {legends}"
