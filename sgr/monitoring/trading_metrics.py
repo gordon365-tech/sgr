@@ -45,6 +45,8 @@ Metrics Categories:
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from prometheus_client import Counter, Gauge, Histogram, Info
 
 from sgr.core.logging import get_logger
@@ -133,6 +135,24 @@ order_latency_seconds = Histogram(
     buckets=(0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, float("inf")),
 )
 
+# Realized Slippage (Live-Verification-Anweisung Abschnitt 4,
+# "Observability"): ExecutionEngine._on_fill()'s eigener Docstring
+# versprach seit jeher "1. Slippage berechnen + loggen", tat das aber
+# nie tatsaechlich (siehe dortige Aufrufstelle) - reine interne
+# Risk-Gating-Kennzahlen (paper_slippage_pct in GridRiskEngine)
+# existierten, aber keine Produktions-Metrik aus einem echten Fill.
+# Nur berechenbar, wenn ein Referenzpreis vorliegt (order.limit_price -
+# bei einer reinen MARKET-Order ohne RiskEngine-erzwungenes Limit gibt
+# es keinen sinnvollen Referenzpreis, dann wird nichts aufgezeichnet,
+# statt einen erfundenen Wert zu melden).
+order_slippage_pct = Histogram(
+    "sgr_order_slippage_pct",
+    "Realized slippage: abs(average_fill_price - reference_price) / reference_price * 100, "
+    "only recorded when a reference price (order.limit_price) was available",
+    ["exchange", "symbol", "side", "trading_mode", "tenant"],
+    buckets=(0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 1.0, 2.0, 5.0, float("inf")),
+)
+
 
 # =============================================================================
 # EXECUTION METRICS
@@ -172,6 +192,66 @@ kill_switch_active = Gauge(
     "Kill switch activation state (1 = active, 0 = inactive)",
     ["trading_mode", "tenant"],
 )
+
+# LiveVerificationGate state (Live-Verification-Anweisung Abschnitt 4,
+# "Observability"): vorher nur sichtbar ueber die generische Order-
+# Rejection-Metrik (reason="live_verification_gate"), keine kontinuierliche
+# Sicht auf verbleibendes Budget/verbleibende Orders. "approved_by" (die
+# Pflichtangabe aus LiveVerificationProfile, z.B. "operator:gordon")
+# dient als Account-Label - KEINE Secrets, nur eine Operator-Kennung, die
+# der Operator selbst beim Erstellen des Profils frei waehlt.
+live_verification_active = Gauge(
+    "sgr_live_verification_active",
+    "1 solange dieses LiveVerificationGate Orders zulassen kann, 0 wenn deaktiviert",
+    ["approved_by", "tenant"],
+)
+live_verification_orders_submitted = Gauge(
+    "sgr_live_verification_orders_submitted",
+    "Bereits ueber dieses Gate abgesetzte Orders",
+    ["approved_by", "tenant"],
+)
+live_verification_max_orders = Gauge(
+    "sgr_live_verification_max_orders",
+    "Vom Operator konfiguriertes max_orders-Limit dieses Verifikationslaufs",
+    ["approved_by", "tenant"],
+)
+live_verification_loss_budget_remaining_usd = Gauge(
+    "sgr_live_verification_loss_budget_remaining_usd",
+    "max_loss_usd minus bereits realisiertem Verlust, floored bei 0",
+    ["approved_by", "tenant"],
+)
+live_verification_daily_loss_budget_remaining_usd = Gauge(
+    "sgr_live_verification_daily_loss_budget_remaining_usd",
+    "max_daily_loss_usd minus heute realisiertem Verlust, floored bei 0",
+    ["approved_by", "tenant"],
+)
+
+
+def record_live_verification_state(
+    approved_by: str,
+    active: bool,
+    orders_submitted: int,
+    max_orders: int,
+    loss_budget_remaining_usd: float,
+    daily_loss_budget_remaining_usd: float,
+) -> None:
+    """Aufrufer: LiveVerificationGate selbst (siehe live_verification_profile.py
+    _emit_metrics()) - nach jeder Zustandsaenderung (Order zugelassen/
+    abgelehnt, Verlust gebucht, deaktiviert)."""
+    tenant_id = _resolve_tenant_id()
+    live_verification_active.labels(approved_by=approved_by, tenant=tenant_id).set(
+        1 if active else 0
+    )
+    live_verification_orders_submitted.labels(approved_by=approved_by, tenant=tenant_id).set(
+        orders_submitted
+    )
+    live_verification_max_orders.labels(approved_by=approved_by, tenant=tenant_id).set(max_orders)
+    live_verification_loss_budget_remaining_usd.labels(
+        approved_by=approved_by, tenant=tenant_id
+    ).set(loss_budget_remaining_usd)
+    live_verification_daily_loss_budget_remaining_usd.labels(
+        approved_by=approved_by, tenant=tenant_id
+    ).set(daily_loss_budget_remaining_usd)
 
 # Counter: Risk checks performed
 risk_checks_total = Counter(
@@ -417,6 +497,27 @@ def record_order_filled(
         order_type="market",  # Simplified
         tenant=tenant_id,
     ).observe(latency_seconds)
+
+
+def record_order_slippage(
+    exchange: str,
+    symbol: str,
+    side: str,
+    trading_mode: str,
+    reference_price: Decimal,
+    fill_price: Decimal,
+) -> None:
+    """Record realized slippage for one fill - siehe order_slippage_pct
+    Docstring. Aufrufer muss bereits sichergestellt haben, dass
+    reference_price > 0 ist (siehe ExecutionEngine._on_fill())."""
+    slippage_pct = abs(fill_price - reference_price) / reference_price * Decimal("100")
+    order_slippage_pct.labels(
+        exchange=exchange,
+        symbol=symbol,
+        side=side,
+        trading_mode=trading_mode,
+        tenant=_resolve_tenant_id(),
+    ).observe(float(slippage_pct))
 
 
 def record_order_rejected(

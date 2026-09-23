@@ -129,10 +129,44 @@ class LiveVerificationGate:
 
     def __init__(self, profile: LiveVerificationProfile) -> None:
         self._state = LiveVerificationState(profile=profile)
+        # Gauge sofort mit dem tatsaechlichen Ist-Zustand initialisieren
+        # (identische Begruendung wie KillSwitch.__init__: "keine Daten"
+        # in Grafana ist fuer ein sicherheitskritisches Signal
+        # irrefuehrend, nicht neutral).
+        self._emit_metrics()
 
     @property
     def state(self) -> LiveVerificationState:
         return self._state
+
+    def _emit_metrics(self) -> None:
+        try:
+            from sgr.monitoring.trading_metrics import record_live_verification_state
+
+            profile = self._state.profile
+            record_live_verification_state(
+                approved_by=profile.approved_by,
+                active=not self._state.deactivated,
+                orders_submitted=self._state.orders_submitted,
+                max_orders=profile.max_orders,
+                loss_budget_remaining_usd=float(
+                    max(
+                        Decimal("0"),
+                        profile.max_loss_usd - self._state.cumulative_realized_loss_usd,
+                    )
+                ),
+                daily_loss_budget_remaining_usd=float(
+                    max(
+                        Decimal("0"),
+                        profile.max_daily_loss_usd - self._state.daily_realized_loss_usd,
+                    )
+                ),
+            )
+        except Exception as e:
+            # Metrik-Emission darf niemals eine Gate-Entscheidung
+            # beeinflussen oder verhindern (gleiches Fail-Safe-Prinzip
+            # wie ueberall sonst in dieser Datei).
+            log.debug("live_verification_gate.metrics_emission_failed", error=str(e))
 
     def _maybe_reset_daily_loss(self, now: datetime) -> None:
         if now - self._state.daily_loss_reset_at >= timedelta(hours=24):
@@ -202,6 +236,7 @@ class LiveVerificationGate:
         self._state.orders_submitted += 1
         if grid_id is not None:
             self._state.active_grid_ids.add(grid_id)
+        self._emit_metrics()
 
     def record_realized_loss(self, loss_usd: Decimal) -> None:
         """Nur tatsaechliche VERLUSTE buchen (loss_usd > 0 bedeutet
@@ -211,6 +246,7 @@ class LiveVerificationGate:
             return
         self._state.cumulative_realized_loss_usd += loss_usd
         self._state.daily_realized_loss_usd += loss_usd
+        self._emit_metrics()
 
     def deactivate(self, reason: str) -> None:
         if self._state.deactivated:
@@ -218,6 +254,7 @@ class LiveVerificationGate:
         self._state.deactivated = True
         self._state.deactivation_reason = reason
         log.critical("live_verification_gate.deactivated", reason=reason)
+        self._emit_metrics()
 
 
 async def check_live_verification_allowed(

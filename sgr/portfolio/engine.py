@@ -128,8 +128,16 @@ class PortfolioEngine:
         trade_repository: Any = None,
         on_position_opened: Any = None,
         on_position_closed: Any = None,
+        live_verification_gate: Any = None,
     ) -> None:
         self._trading_mode = trading_mode
+        # LiveVerificationGate (optional, additiv - siehe set_live_
+        # verification_gate() fuer die post-construction Injection, gleiche
+        # Begruendung wie set_protection_hooks() unten). None (Default) ist
+        # fuer JEDEN bestehenden Aufrufer/Test unveraendertes Verhalten -
+        # record_realized_loss() wird nur aufgerufen, wenn ein Gate
+        # tatsaechlich injiziert wurde UND die Order LIVE war.
+        self._live_verification_gate: Any = live_verification_gate
         self._state = PortfolioState(trading_mode, initial_cash)
         self._trade_history: list[dict] = []  # Closed trades
         # Optional: PositionRepository fuer Crash-Recovery und Phase 7B
@@ -221,6 +229,18 @@ class PortfolioEngine:
         """
         self._on_position_opened = on_position_opened
         self._on_position_closed = on_position_closed
+
+    def set_live_verification_gate(self, gate: Any) -> None:
+        """
+        Post-Construction-Injection fuer das LiveVerificationGate (siehe
+        __init__ Docstring) - identisches Konstruktions-Reihenfolge-
+        Problem wie set_protection_hooks(): das Gate (falls vom Operator
+        ueberhaupt konfiguriert) existiert typischerweise erst nach der
+        ExecutionEngine, PortfolioEngine aber vorher. gate=None ist
+        explizit erlaubt (deaktiviert die Buchung wieder), nicht nur ein
+        impliziter Default.
+        """
+        self._live_verification_gate = gate
 
     # ------------------------------------------------------------------
     # Event Handlers
@@ -374,6 +394,29 @@ class PortfolioEngine:
                 (exit_price - entry) * close_qty * side_factor - result.fees - entry_fee_share
             )
             total_fees = result.fees + entry_fee_share
+
+            # LiveVerificationGate-Buchung (Live-Verification-Anweisung,
+            # Abschnitt 5 "Realized Loss Accounting"): GENAU EINMAL pro
+            # tatsaechlich schliessendem Fill, exakt hier wo realized
+            # bereits final berechnet ist - kein zweiter Aufrufer bucht
+            # denselben Verlust nochmal (siehe grid_controller.py fuer den
+            # analogen Grid-Fall, ein getrenntes Gate-Objekt pro
+            # Verifikationslauf wird ohnehin nie gleichzeitig fuer beide
+            # Pfade verwendet). Nur LIVE, nur echte Gewinne/Verluste (die
+            # Gate-Methode selbst ignoriert bereits Nicht-Verluste, siehe
+            # dortigen Docstring) - fuer PAPER (self._live_verification_gate
+            # ist in Produktion aktuell IMMER None, siehe main.py) folgenlos.
+            if self._live_verification_gate is not None and result.trading_mode == (
+                TradingMode.LIVE
+            ):
+                try:
+                    self._live_verification_gate.record_realized_loss(-realized)
+                except Exception as e:
+                    log.error(
+                        "portfolio.live_verification_loss_recording_failed",
+                        symbol=symbol_key,
+                        error=str(e),
+                    )
 
             # Exit-Grund (siehe ExitReason, sgr/core/types.py): von
             # ExecutionEngine aus order.metadata["exit_reason"] in

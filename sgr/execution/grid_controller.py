@@ -120,6 +120,7 @@ class GridController:
         symbol_kill_switch: Any = None,
         exchange_pool: Any = None,
         rate_limiter: Any = None,
+        live_verification_gate: Any = None,
     ) -> None:
         self._execution = execution_engine
         self._trading_mode = trading_mode
@@ -149,6 +150,13 @@ class GridController:
         # deaktiviert, identisches Verhalten zu vorher (siehe
         # sgr/execution/grid_rate_limiter.py Modul-Docstring).
         self._rate_limiter = rate_limiter
+        # LiveVerificationGate (optional, additiv - siehe PortfolioEngine.
+        # set_live_verification_gate() fuer die analoge, direktionale
+        # Buchung). None (Default) = Realized-Loss-Buchung fuer Grid-
+        # Closes deaktiviert, unveraendertes Verhalten fuer jeden
+        # bestehenden Aufrufer/Test. In Produktion aktuell immer None
+        # (kein Operator-Profil vorhanden), also folgenlos fuer PAPER.
+        self._live_verification_gate = live_verification_gate
         # In-Memory-Registry aller vom Controller verwalteten Grids
         # (Prozess-lokal - Persistenz best-effort via _grid_repo, analog
         # zu PortfolioEngine._state._positions).
@@ -795,6 +803,23 @@ class GridController:
             side_factor = Decimal("1") if is_long else Decimal("-1")
             cycle_pnl = (exit_price - entry_price) * actual_qty * side_factor - result.fees
             grid.realized_pnl += cycle_pnl
+
+            # LiveVerificationGate-Buchung (Live-Verification-Anweisung,
+            # Abschnitt 5) - analog zu PortfolioEngine._update_position(),
+            # siehe dortigen Kommentar. Genau einmal pro tatsaechlich
+            # schliessendem Grid-Level-Fill (nicht pro Grid, nicht pro
+            # Preis-Tick).
+            if self._live_verification_gate is not None and result.trading_mode == (
+                TradingMode.LIVE
+            ):
+                try:
+                    self._live_verification_gate.record_realized_loss(-cycle_pnl)
+                except Exception as e:
+                    log.error(
+                        "grid_controller.live_verification_loss_recording_failed",
+                        grid_id=str(grid.id),
+                        error=str(e),
+                    )
 
             remaining_qty = level.quantity - actual_qty
             if remaining_qty <= Decimal("0.00000001"):

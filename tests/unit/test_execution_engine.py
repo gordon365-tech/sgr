@@ -1326,3 +1326,67 @@ class TestLiveVerificationGateIntegration:
 
         assert result.status == OrderStatus.REJECTED
         adapter.place_order.assert_not_awaited()
+
+
+class TestSlippageMetric:
+    """Live-Verification-Anweisung Abschnitt 4 ('Observability'):
+    ExecutionEngine._on_fill() versprach in seinem eigenen Docstring seit
+    jeher 'Slippage berechnen + loggen', tat das nie tatsaechlich. Jetzt
+    tatsaechlich verdrahtet: order.limit_price als Referenzpreis, nur
+    wenn vorhanden (reine MARKET-Order ohne RiskEngine-erzwungenes Limit
+    hat keinen sinnvollen Referenzpreis - siehe order_slippage_pct
+    Docstring)."""
+
+    async def test_limit_order_fill_records_slippage(
+        self, engine: ExecutionEngine, mock_pool: tuple[MagicMock, AsyncMock]
+    ) -> None:
+        from sgr.monitoring.trading_metrics import order_slippage_pct
+
+        _pool, adapter = mock_pool
+        order = _make_order_request(order_type=OrderType.LIMIT).model_copy(
+            update={"limit_price": Decimal("100")}
+        )
+        filled = _make_order_result(order, status=OrderStatus.FILLED)
+        filled = filled.model_copy(update={"average_fill_price": Decimal("101")})
+        adapter.place_order = AsyncMock(return_value=filled)
+
+        labels = dict(
+            exchange="binance",
+            symbol="BTC/USDT:binance",
+            side="buy",
+            trading_mode="paper",
+            tenant="default",
+        )
+        before = order_slippage_pct.labels(**labels)._sum.get()
+
+        await engine.execute(order)
+
+        after = order_slippage_pct.labels(**labels)._sum.get()
+        # |101 - 100| / 100 * 100 = 1.0%
+        assert after == pytest.approx(before + 1.0)
+
+    async def test_market_order_without_limit_price_records_no_slippage(
+        self, engine: ExecutionEngine, mock_pool: tuple[MagicMock, AsyncMock]
+    ) -> None:
+        from sgr.monitoring.trading_metrics import order_slippage_pct
+
+        _pool, adapter = mock_pool
+        order = _make_order_request(order_type=OrderType.MARKET)
+        assert order.limit_price is None
+        adapter.place_order = AsyncMock(
+            return_value=_make_order_result(order, status=OrderStatus.FILLED)
+        )
+
+        labels = dict(
+            exchange="binance",
+            symbol="BTC/USDT:binance",
+            side="buy",
+            trading_mode="paper",
+            tenant="default",
+        )
+        before = order_slippage_pct.labels(**labels)._sum.get()
+
+        await engine.execute(order)
+
+        after = order_slippage_pct.labels(**labels)._sum.get()
+        assert after == before  # keine erfundene Slippage ohne Referenzpreis

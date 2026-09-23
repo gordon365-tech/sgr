@@ -1463,6 +1463,150 @@ class TestPartialFillHandling:
         assert level_1_final.quantity == Decimal("0")
 
 
+class TestLiveVerificationGateLossAccounting:
+    """Live-Verification-Anweisung Abschnitt 5 ('Realized Loss
+    Accounting') - Grid-Seite. Analoge Buchungsstelle zu
+    PortfolioEngine._update_position() (siehe
+    tests/unit/test_portfolio_engine_live_verification_gate.py fuer die
+    direktionale Seite, identischer Mechanismus). result.trading_mode
+    steuert die Buchung unabhaengig vom Trading-Mode des Controllers
+    selbst - die PAPER-controller-Fixture genuegt, um den LIVE-Zweig
+    gezielt zu pruefen, ohne den vollen LIVE-Execution-Stack nachzubauen."""
+
+    def _result(self, order, status, filled_quantity, price, trading_mode) -> Any:
+        from sgr.core.types import OrderResult
+
+        return OrderResult(
+            request_id=order.id,
+            exchange_order_id="MOCK-RESULT",
+            symbol=order.symbol,
+            status=status,
+            filled_quantity=filled_quantity,
+            average_fill_price=price,
+            fees=Decimal("0"),
+            submitted_at=datetime.now(tz=UTC),
+            trading_mode=trading_mode,
+        )
+
+    def _profile(self, **overrides):
+        from sgr.risk.live_verification_profile import LiveVerificationProfile
+
+        base = dict(
+            max_total_budget_usd=Decimal("10000"),
+            max_loss_usd=Decimal("1000"),
+            max_daily_loss_usd=Decimal("1000"),
+            max_concurrent_grids=1,
+            max_orders=100,
+            max_exposure_usd=Decimal("10000"),
+            max_leverage=Decimal("5"),
+            max_position_size_usd=Decimal("10000"),
+            max_duration_minutes=600,
+            started_at=datetime.now(tz=UTC),
+            approved_by="operator:test",
+        )
+        base.update(overrides)
+        return LiveVerificationProfile(**base)
+
+    async def _open_and_get_grid(self, controller, account):
+        result = await controller.open_grid(
+            _decision(), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            current_price=Decimal("50000"),
+        )
+        return result.grid
+
+    async def test_losing_grid_close_records_loss_on_gate(
+        self, controller: GridController, account
+    ) -> None:
+        from sgr.core.types import OrderStatus
+        from sgr.risk.live_verification_profile import LiveVerificationGate
+
+        gate = LiveVerificationGate(self._profile())
+        controller._live_verification_gate = gate
+
+        grid = await self._open_and_get_grid(controller, account)
+        full_qty = Decimal("50") / Decimal("49500")
+        controller._execution.execute = AsyncMock(
+            side_effect=lambda order, **kw: self._result(
+                order, OrderStatus.FILLED, full_qty, Decimal("49500"), TradingMode.LIVE
+            )
+        )
+        grid = await controller.on_price_tick(str(grid.id), Decimal("49500"))  # open level 1
+
+        # Preis steigt wieder ueber 50000 -> Level 1 schliesst, aber zu
+        # einem HOEHEREN Exit-Preis als noetig fuer einen Verlust bei
+        # einem LONG-Level: erzwinge stattdessen einen Verlust, indem der
+        # Exit-Preis UNTER dem Entry (49500) liegt - simuliere das ueber
+        # einen direkten _fill_level()-Aufruf mit einem niedrigeren Preis.
+        level_1 = next(lv for lv in grid.levels if lv.index == 1)
+        controller._execution.execute = AsyncMock(
+            side_effect=lambda order, **kw: self._result(
+                order, OrderStatus.FILLED, full_qty, Decimal("49000"), TradingMode.LIVE
+            )
+        )
+        await controller._fill_level(grid, level_1, Decimal("49000"), opening=False)
+
+        assert gate.state.cumulative_realized_loss_usd > Decimal("0")
+
+    async def test_profitable_grid_close_does_not_record_loss(
+        self, controller: GridController, account
+    ) -> None:
+        from sgr.core.types import OrderStatus
+        from sgr.risk.live_verification_profile import LiveVerificationGate
+
+        gate = LiveVerificationGate(self._profile())
+        controller._live_verification_gate = gate
+
+        grid = await self._open_and_get_grid(controller, account)
+        full_qty = Decimal("50") / Decimal("49500")
+        controller._execution.execute = AsyncMock(
+            side_effect=lambda order, **kw: self._result(
+                order, OrderStatus.FILLED, full_qty, Decimal("49500"), TradingMode.LIVE
+            )
+        )
+        grid = await controller.on_price_tick(str(grid.id), Decimal("49500"))  # open level 1
+
+        level_1 = next(lv for lv in grid.levels if lv.index == 1)
+        controller._execution.execute = AsyncMock(
+            side_effect=lambda order, **kw: self._result(
+                order, OrderStatus.FILLED, full_qty, Decimal("50000"), TradingMode.LIVE
+            )
+        )
+        await controller._fill_level(grid, level_1, Decimal("50000"), opening=False)  # profit exit
+
+        assert gate.state.cumulative_realized_loss_usd == Decimal("0")
+
+    async def test_paper_grid_close_does_not_reach_gate(
+        self, controller: GridController, account
+    ) -> None:
+        """controller-Fixture ist PAPER; result.trading_mode hier
+        ebenfalls PAPER (der realistische Fall fuer Gordon/Sumo heute) -
+        selbst mit injiziertem Gate darf keine Buchung stattfinden."""
+        from sgr.core.types import OrderStatus
+        from sgr.risk.live_verification_profile import LiveVerificationGate
+
+        gate = LiveVerificationGate(self._profile())
+        controller._live_verification_gate = gate
+
+        grid = await self._open_and_get_grid(controller, account)
+        full_qty = Decimal("50") / Decimal("49500")
+        controller._execution.execute = AsyncMock(
+            side_effect=lambda order, **kw: self._result(
+                order, OrderStatus.FILLED, full_qty, Decimal("49500"), TradingMode.PAPER
+            )
+        )
+        grid = await controller.on_price_tick(str(grid.id), Decimal("49500"))
+
+        level_1 = next(lv for lv in grid.levels if lv.index == 1)
+        controller._execution.execute = AsyncMock(
+            side_effect=lambda order, **kw: self._result(
+                order, OrderStatus.FILLED, full_qty, Decimal("49000"), TradingMode.PAPER
+            )
+        )
+        await controller._fill_level(grid, level_1, Decimal("49000"), opening=False)  # loss, PAPER
+
+        assert gate.state.cumulative_realized_loss_usd == Decimal("0")
+
+
 # ---------------------------------------------------------------------------
 # Phase J: Rate-Limiter-Integration in GridController
 # ---------------------------------------------------------------------------

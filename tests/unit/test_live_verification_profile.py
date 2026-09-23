@@ -254,3 +254,93 @@ class TestGateChecks:
         gate.check_order_allowed(notional_usd=Decimal("10"), leverage=Decimal("1"))
 
         assert gate.state.orders_submitted == 0
+
+
+class TestObservabilityMetrics:
+    """Live-Verification-Anweisung Abschnitt 4: kontinuierliche Gauges
+    fuer active/orders_submitted/max_orders/remaining loss budgets -
+    vorher nur sichtbar ueber einzelne REJECTED-Events."""
+
+    def test_construction_immediately_emits_active_gauge(self) -> None:
+        from sgr.monitoring.trading_metrics import live_verification_active
+
+        gate = LiveVerificationGate(_profile(approved_by="operator:metrics-test-1"))
+
+        value = live_verification_active.labels(
+            approved_by="operator:metrics-test-1", tenant="default"
+        )._value.get()
+        assert value == 1
+        assert gate.state.deactivated is False  # Kontrolle: Gate ist tatsaechlich aktiv
+
+    def test_deactivation_sets_active_gauge_to_zero(self) -> None:
+        from sgr.monitoring.trading_metrics import live_verification_active
+
+        gate = LiveVerificationGate(_profile(approved_by="operator:metrics-test-2"))
+        gate.deactivate("test reason")
+
+        value = live_verification_active.labels(
+            approved_by="operator:metrics-test-2", tenant="default"
+        )._value.get()
+        assert value == 0
+
+    def test_order_submitted_updates_gauge(self) -> None:
+        from sgr.monitoring.trading_metrics import live_verification_orders_submitted
+
+        gate = LiveVerificationGate(_profile(approved_by="operator:metrics-test-3"))
+        gate.record_order_submitted()
+        gate.record_order_submitted()
+
+        value = live_verification_orders_submitted.labels(
+            approved_by="operator:metrics-test-3", tenant="default"
+        )._value.get()
+        assert value == 2
+
+    def test_realized_loss_updates_remaining_budget_gauges(self) -> None:
+        from sgr.monitoring.trading_metrics import (
+            live_verification_daily_loss_budget_remaining_usd,
+            live_verification_loss_budget_remaining_usd,
+        )
+
+        gate = LiveVerificationGate(
+            _profile(
+                approved_by="operator:metrics-test-4",
+                max_loss_usd=Decimal("20"),
+                max_daily_loss_usd=Decimal("20"),
+            )
+        )
+        gate.record_realized_loss(Decimal("7"))
+
+        loss_remaining = live_verification_loss_budget_remaining_usd.labels(
+            approved_by="operator:metrics-test-4", tenant="default"
+        )._value.get()
+        daily_remaining = live_verification_daily_loss_budget_remaining_usd.labels(
+            approved_by="operator:metrics-test-4", tenant="default"
+        )._value.get()
+        assert loss_remaining == pytest.approx(13.0)
+        assert daily_remaining == pytest.approx(13.0)
+
+    def test_remaining_budget_never_goes_negative_in_gauge(self) -> None:
+        """Ein Verlust, der max_loss_usd ueberschreitet, deaktiviert das
+        Gate (siehe bestehende Tests) - die verbleibende-Budget-Gauge
+        darf trotzdem nie unter 0 fallen (kein irrefuehrender negativer
+        'verbleibender' Wert)."""
+        from sgr.monitoring.trading_metrics import live_verification_loss_budget_remaining_usd
+
+        gate = LiveVerificationGate(
+            _profile(approved_by="operator:metrics-test-5", max_loss_usd=Decimal("10"))
+        )
+        gate.record_realized_loss(Decimal("25"))  # weit ueber dem Limit
+
+        remaining = live_verification_loss_budget_remaining_usd.labels(
+            approved_by="operator:metrics-test-5", tenant="default"
+        )._value.get()
+        assert remaining == 0.0
+
+    def test_no_secrets_in_any_label(self) -> None:
+        """approved_by ist eine vom Operator gewaehlte Kennung, niemals
+        ein Secret - dieser Test dokumentiert die Erwartung explizit."""
+        gate = LiveVerificationGate(
+            _profile(approved_by="operator:gordon-verification-run-1")
+        )
+        assert "key" not in gate.state.profile.approved_by.lower()
+        assert "secret" not in gate.state.profile.approved_by.lower()

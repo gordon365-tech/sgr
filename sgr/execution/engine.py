@@ -56,6 +56,7 @@ from sgr.monitoring.trading_metrics import (
     record_duplicate_blocked,
     record_order_filled,
     record_order_rejected,
+    record_order_slippage,
     record_order_submitted,
 )
 from sgr.risk.kill_switch import get_kill_switch
@@ -532,7 +533,7 @@ class ExecutionEngine:
 
         # Falls sofort filled (Market Order, Paper Mode)
         if result.status == OrderStatus.FILLED:
-            await self._on_fill(result, side=order.side.value)
+            await self._on_fill(result, side=order.side.value, reference_price=order.limit_price)
             return result
 
         # Fill Monitoring für nicht sofort gefüllte Orders
@@ -642,7 +643,7 @@ class ExecutionEngine:
             await self._persist_order_status(str(order.id), current)
 
         if current.status == OrderStatus.FILLED:
-            await self._on_fill(current, side=order.side.value)
+            await self._on_fill(current, side=order.side.value, reference_price=order.limit_price)
 
         return current
 
@@ -670,13 +671,40 @@ class ExecutionEngine:
                 error=str(e),
             )
 
-    async def _on_fill(self, result: OrderResult, side: str) -> None:
+    async def _on_fill(
+        self, result: OrderResult, side: str, reference_price: Decimal | None = None
+    ) -> None:
         """
         Wird aufgerufen wenn Order vollständig gefüllt.
-        1. Slippage berechnen + loggen
+        1. Slippage berechnen + loggen (Metrik, seit Live-Verification-
+           Anweisung Abschnitt 4 - vorher versprach dieser Docstring das,
+           ohne es tatsaechlich zu tun)
         2. Audit Log
         3. OrderFilledEvent auf Event Bus
+
+        reference_price: order.limit_price des Aufrufers, falls gesetzt
+        (z.B. ein RiskEngine-erzwungenes LIMIT bei hoher Slippage-
+        Erwartung). Fehlt er (reine MARKET-Order ohne erzwungenes
+        Limit), gibt es keinen sinnvollen Referenzpreis - dann wird
+        keine Slippage-Metrik aufgezeichnet, statt einen erfundenen Wert
+        zu melden (siehe order_slippage_pct Docstring).
         """
+        if (
+            reference_price is not None
+            and reference_price > 0
+            and result.average_fill_price is not None
+        ):
+            try:
+                record_order_slippage(
+                    exchange=result.symbol.exchange.value,
+                    symbol=str(result.symbol),
+                    side=side,
+                    trading_mode=result.trading_mode.value,
+                    reference_price=reference_price,
+                    fill_price=result.average_fill_price,
+                )
+            except Exception as e:
+                log.debug("execution_engine.slippage_metric_failed", error=str(e))
         # Audit
         audit_log.log_trade(
             event="filled",
