@@ -407,6 +407,34 @@ class RiskEngine:
                     f"Position reduced to stay within pre-trade leverage cap ({max_leverage}x)"
                 )
 
+        # 7c. Globaler Exposure-/Capital-Allocation-Cap (2026-09-24,
+        # operative Anweisung "dynamisches 25-Prozent-Exposure-Limit") -
+        # siehe RiskLimitsConfig.max_total_exposure_pct Docstring.
+        # Bewusst ein HARTER REJECT, kein Downsizing wie beim Leverage-
+        # Cap oben (explizite Anforderung: "Order ablehnen", nicht
+        # automatisch verkleinern) - existing_exposure + proposed_order
+        # <= max_total_exposure, dynamisch aus der AKTUELLEN Equity
+        # (portfolio_value), nicht aus einem einmalig fixierten Betrag.
+        if self._limits.max_total_exposure_pct is not None and portfolio_value > 0:
+            max_total_exposure = portfolio_value * Decimal(
+                str(self._limits.max_total_exposure_pct)
+            )
+            existing_exposure = sum(
+                (p.notional_value for p in open_positions), Decimal("0")
+            )
+            prospective_exposure = qty * current_price
+            if existing_exposure + prospective_exposure > max_total_exposure:
+                return self._reject(
+                    signal.id,
+                    (
+                        f"Global exposure cap: existing {existing_exposure} + proposed "
+                        f"{prospective_exposure} would exceed {max_total_exposure} "
+                        f"({self._limits.max_total_exposure_pct:.0%} of equity {portfolio_value})"
+                    ),
+                    portfolio_value,
+                    metrics,
+                )
+
         # 8. Null-Qty → REJECT
         if qty <= 0:
             reason = reduction_reason or "Position size computed as 0"

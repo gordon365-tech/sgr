@@ -590,3 +590,95 @@ class TestCombinedExposureFailClosed:
         )
 
         assert result.approved is True
+
+
+class TestDynamicTotalExposurePct:
+    """2026-09-24, operative Anweisung 'dynamisches 25-Prozent-Exposure-
+    Limit': max_total_exposure_pct ist das Equity-relative Pendant zu
+    max_combined_exposure_usd - derselbe kombinierte Grid+direktional-
+    Check, aber die Obergrenze skaliert mit snapshot.portfolio_value
+    statt ein fixer USD-Betrag zu sein."""
+
+    def test_within_dynamic_limit_is_approved(self) -> None:
+        """Equity 10000 (Default-Snapshot) -> Limit 2500. Grid-eigenes
+        Notional (_params(): 5 * 50 = 250) + direktional 2200 = 2450
+        <= 2500."""
+        limits = GridRiskLimitsConfig(max_total_exposure_pct=0.25)
+        engine = GridRiskEngine(limits)
+
+        result = engine.evaluate_new_grid(
+            _params(), _snapshot(), current_price=Decimal("100"),
+            directional_exposure_usd=Decimal("2200"),
+        )
+
+        assert result.approved is True
+
+    def test_exceeding_dynamic_limit_is_rejected(self) -> None:
+        """250 + 2300 = 2550 > 2500 Limit."""
+        limits = GridRiskLimitsConfig(max_total_exposure_pct=0.25)
+        engine = GridRiskEngine(limits)
+
+        result = engine.evaluate_new_grid(
+            _params(), _snapshot(), current_price=Decimal("100"),
+            directional_exposure_usd=Decimal("2300"),
+        )
+
+        assert result.approved is False
+        assert "exposure-limit" in (result.reason or "").lower()
+
+    def test_limit_scales_with_portfolio_value(self) -> None:
+        """Equity 20000 -> Limit 5000 statt 2500 bei gleichem pct."""
+        limits = GridRiskLimitsConfig(max_total_exposure_pct=0.25)
+        engine = GridRiskEngine(limits)
+        snapshot = GridPortfolioSnapshot(open_grids=[], portfolio_value=Decimal("20000"))
+
+        # 250 (Grid) + 4700 (direktional) = 4950 <= 5000 -> PASS
+        approved = engine.evaluate_new_grid(
+            _params(), snapshot, current_price=Decimal("100"),
+            directional_exposure_usd=Decimal("4700"),
+        )
+        assert approved.approved is True
+
+        # 250 + 4800 = 5050 > 5000 -> REJECT
+        rejected = engine.evaluate_new_grid(
+            _params(), snapshot, current_price=Decimal("100"),
+            directional_exposure_usd=Decimal("4800"),
+        )
+        assert rejected.approved is False
+
+    def test_stricter_of_absolute_and_dynamic_limit_wins(self) -> None:
+        """Beide Limits konfiguriert: max_combined_exposure_usd=3000
+        (grosszuegiger) UND max_total_exposure_pct=0.25 (-> 2500 bei
+        10000 Equity, strenger) - das STRENGERE (2500) muss gelten."""
+        limits = GridRiskLimitsConfig(
+            max_combined_exposure_usd=Decimal("3000"),
+            max_total_exposure_pct=0.25,
+        )
+        engine = GridRiskEngine(limits)
+
+        # 250 + 2300 = 2550: unter dem absoluten 3000-Limit, aber ueber
+        # dem dynamischen 2500-Limit - muss trotzdem ablehnen.
+        result = engine.evaluate_new_grid(
+            _params(), _snapshot(), current_price=Decimal("100"),
+            directional_exposure_usd=Decimal("2300"),
+        )
+
+        assert result.approved is False
+
+    def test_zero_portfolio_value_disables_dynamic_check_not_fail_open(self) -> None:
+        """snapshot.portfolio_value == 0 (z.B. kein PortfolioEngine
+        injiziert, siehe GridScheduler-Fallback) - der DYNAMISCHE Check
+        wird uebersprungen (0 * pct = 0 waere sonst faelschlich IMMER
+        ablehnend), aber das ist kein Fail-Open: ohne ein zusaetzlich
+        konfiguriertes max_combined_exposure_usd bleibt das Verhalten
+        schlicht identisch zu 'kein Limit konfiguriert'."""
+        limits = GridRiskLimitsConfig(max_total_exposure_pct=0.25)
+        engine = GridRiskEngine(limits)
+        snapshot = GridPortfolioSnapshot(open_grids=[], portfolio_value=Decimal("0"))
+
+        result = engine.evaluate_new_grid(
+            _params(), snapshot, current_price=Decimal("100"),
+            directional_exposure_usd=Decimal("999999"),
+        )
+
+        assert result.approved is True

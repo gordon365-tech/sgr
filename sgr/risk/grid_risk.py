@@ -92,6 +92,19 @@ class GridRiskLimitsConfig(BaseSettings):
     # directional_exposure_usd-Parameter.
     max_combined_exposure_usd: Decimal | None = Field(default=None, gt=0)
 
+    # Dynamisches, Equity-relatives Pendant zu max_combined_exposure_usd
+    # (2026-09-24, operative Anweisung "dynamisches 25-Prozent-Exposure-
+    # Limit") - derselbe kombinierte Grid+direktional-Notional-Check wie
+    # oben, aber die Obergrenze ist ein Anteil der AKTUELLEN Account-
+    # Equity (GridPortfolioSnapshot.portfolio_value) statt ein einmalig
+    # fixierter USD-Betrag. Sind BEIDE Felder konfiguriert, gilt das
+    # jeweils STRENGERE (kleinere) Limit - keins der beiden darf das
+    # andere aufweichen. None (Default) = deaktiviert, identisches
+    # Verhalten zu vorher. Siehe RiskLimitsConfig.max_total_exposure_pct
+    # fuer das direktionale Pendant - beide sollten fuer ein einheitliches
+    # Gesamt-Cap auf denselben Wert gesetzt werden.
+    max_total_exposure_pct: float | None = Field(default=None, gt=0.0, le=1.0)
+
     # Breakout-Schutz (2026-09-23, Phase O - Backtest-Live-Konsistenz):
     # GridBacktestSimulator schliesst ein Grid zwangsweise, wenn der Preis
     # mehr als diesen Faktor der urspruenglichen Range-Breite ausserhalb
@@ -239,32 +252,48 @@ class GridRiskEngine:
             )
 
         # 5b. Kombinierte Kapital-Obergrenze ueber Grid- UND direktionale
-        # Exposure (Phase 9) - nur aktiv, wenn max_combined_exposure_usd
-        # konfiguriert ist (opt-in, siehe Feld-Docstring). Notional-
-        # basiert, keine pauschale Zaehl-Addition. FAIL-CLOSED: wenn das
-        # Limit konfiguriert ist, aber die direktionale Exposure nicht
+        # Exposure (Phase 9, erweitert 2026-09-24 um das dynamische
+        # Equity-relative Pendant, siehe max_total_exposure_pct
+        # Feld-Docstring) - nur aktiv, wenn mindestens eines der beiden
+        # Felder konfiguriert ist (opt-in). Notional-basiert, keine
+        # pauschale Zaehl-Addition. FAIL-CLOSED: wenn eines der Limits
+        # konfiguriert ist, aber die direktionale Exposure nicht
         # zuverlaessig bestimmbar war (directional_exposure_usd is None),
         # wird abgelehnt - niemals stillschweigend als 0 angenommen (siehe
-        # evaluate_new_grid() Docstring).
-        if self._limits.max_combined_exposure_usd is not None:
+        # evaluate_new_grid() Docstring). Sind beide Limits konfiguriert,
+        # gilt das STRENGERE (kleinere).
+        pct_limit = self._limits.max_total_exposure_pct
+        dynamic_max_usd: Decimal | None = None
+        if pct_limit is not None and snapshot.portfolio_value > 0:
+            dynamic_max_usd = snapshot.portfolio_value * Decimal(str(pct_limit))
+
+        effective_max: Decimal | None = None
+        if self._limits.max_combined_exposure_usd is not None and dynamic_max_usd is not None:
+            effective_max = min(self._limits.max_combined_exposure_usd, dynamic_max_usd)
+        elif self._limits.max_combined_exposure_usd is not None:
+            effective_max = self._limits.max_combined_exposure_usd
+        elif dynamic_max_usd is not None:
+            effective_max = dynamic_max_usd
+
+        if effective_max is not None:
             if directional_exposure_usd is None:
                 return GridRiskAssessment(
                     approved=False,
                     reason=(
-                        "max_combined_exposure_usd ist konfiguriert, aber die direktionale "
-                        "Exposure konnte nicht zuverlaessig bestimmt werden (kein "
-                        "PortfolioEngine-Zugriff im Aufrufer) - fail-closed, kein Default 0"
+                        "max_combined_exposure_usd/max_total_exposure_pct ist konfiguriert, "
+                        "aber die direktionale Exposure konnte nicht zuverlaessig bestimmt "
+                        "werden (kein PortfolioEngine-Zugriff im Aufrufer) - fail-closed, "
+                        "kein Default 0"
                     ),
                 )
             combined_exposure = total_exposure + directional_exposure_usd
-            if combined_exposure > self._limits.max_combined_exposure_usd:
+            if combined_exposure > effective_max:
                 return GridRiskAssessment(
                     approved=False,
                     reason=(
                         f"Kombinierte Exposure (Grid {total_exposure} + direktional "
-                        f"{directional_exposure_usd} = {combined_exposure}) wuerde "
-                        f"max_combined_exposure_usd {self._limits.max_combined_exposure_usd} "
-                        f"ueberschreiten"
+                        f"{directional_exposure_usd} = {combined_exposure}) wuerde das "
+                        f"Exposure-Limit {effective_max} ueberschreiten"
                     ),
                 )
 

@@ -193,9 +193,25 @@ class GridScheduler:
                 )
                 return
 
+            # Root-Cause-Fund (2026-09-24, "dynamisches 25-Prozent-
+            # Exposure-Limit"): portfolio_value war hier IMMER hart auf 0
+            # gesetzt (totes Feld - GridRiskEngine las es bis zu diesem
+            # Zeitpunkt nirgends). Fuer GridRiskLimitsConfig.
+            # max_total_exposure_pct (Equity-relatives Cap) wird der
+            # echte Wert jetzt benoetigt - dieselbe PortfolioEngine, die
+            # bereits fuer _directional_exposure_usd() injiziert ist
+            # (kein neuer Zugriffspfad). None-Engine -> 0 bleibt der
+            # bisherige, sichere Fallback (deaktiviert dann effektiv nur
+            # den neuen pct-Check, aendert nichts an max_combined_
+            # exposure_usd, das weiterhin unabhaengig funktioniert).
+            portfolio_value = (
+                self._portfolio_engine.portfolio_value
+                if self._portfolio_engine is not None
+                else Decimal("0")
+            )
             snapshot = GridPortfolioSnapshot(
                 open_grids=self._grid_controller.active_grids(),
-                portfolio_value=Decimal("0"),
+                portfolio_value=portfolio_value,
             )
             result = await self._grid_controller.open_grid(
                 decision,

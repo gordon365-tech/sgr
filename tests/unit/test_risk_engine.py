@@ -30,6 +30,7 @@ from sgr.core.types import (
     MarketRegime,
     Position,
     PositionSide,
+    RiskAssessment,
     RiskDecision,
     Signal,
     SignalDirection,
@@ -1896,3 +1897,213 @@ class TestOrderConstruction:
 
         with pytest.raises(ValueError, match="current_price required"):
             risk_engine.build_order_request(sample_signal, assessment)
+
+
+# ---------------------------------------------------------------------------
+# Globaler Exposure-/Capital-Allocation-Cap (2026-09-24, operative
+# Anweisung "dynamisches 25-Prozent-Exposure-Limit"): existing_exposure +
+# proposed_order_exposure <= equity * max_total_exposure_pct, dynamisch
+# aus der AKTUELLEN Equity berechnet, harter Reject (kein Downsizing wie
+# beim Leverage-Cap) bei Ueberschreitung.
+# ---------------------------------------------------------------------------
+
+
+class TestGlobalExposureCap:
+    @staticmethod
+    def _existing_position(notional_usd: str) -> Position:
+        """Position auf einem ANDEREN Symbol als sample_signal (BTC) -
+        vermeidet die Duplicate-Position-Pruefung (Schritt 1c), analog zu
+        TestPreTradeLeverageCap.eth_position. current_price=1 macht
+        notional_value == quantity, damit die Testwerte direkt lesbar
+        bleiben."""
+        return Position(
+            symbol=Symbol(base="ETH", quote="USDT", exchange=ExchangeID.BINANCE),
+            side=PositionSide.LONG,
+            quantity=Decimal(notional_usd),
+            entry_price=Decimal("1"),
+            current_price=Decimal("1"),
+            opened_at=datetime.now(tz=UTC),
+            strategy_name="trend_v1",
+            trading_mode=TradingMode.PAPER,
+        )
+
+    async def _evaluate_with_fixed_order_size(
+        self,
+        risk_engine: RiskEngine,
+        sample_signal: Signal,
+        *,
+        equity: Decimal,
+        existing_positions: list[Position],
+        order_size_usd: Decimal,
+        max_total_exposure_pct: float = 0.25,
+    ) -> RiskAssessment:
+        await risk_engine.initialize()
+        risk_engine._limits.max_total_exposure_pct = max_total_exposure_pct
+        # Fixed-Notional-Sizing (siehe PositionSizer._compute_fixed_notional)
+        # macht die vorgeschlagene Order-Groesse deterministisch - isoliert
+        # den neuen Exposure-Cap-Check von der sonstigen adaptiven
+        # Sizing-Logik, exakt wie TestPreTradeLeverageCap es fuer den
+        # Leverage-Cap tut.
+        risk_engine._limits.position_size_usd = order_size_usd
+        return await risk_engine.evaluate(
+            signal=sample_signal,
+            open_positions=existing_positions,
+            portfolio_value=equity,
+            available_capital=equity,
+            current_price=Decimal("50000"),
+        )
+
+    async def test_equity_10000_yields_limit_2500_small_order_passes(
+        self, risk_engine: RiskEngine, sample_signal: Signal
+    ) -> None:
+        assessment = await self._evaluate_with_fixed_order_size(
+            risk_engine,
+            sample_signal,
+            equity=Decimal("10000"),
+            existing_positions=[],
+            order_size_usd=Decimal("100"),
+        )
+        assert assessment.decision != RiskDecision.REJECTED
+        assert not any("exposure cap" in w.lower() for w in assessment.warnings)
+
+    async def test_existing_2400_plus_order_100_at_10000_equity_passes(
+        self, risk_engine: RiskEngine, sample_signal: Signal
+    ) -> None:
+        """2400 + 100 = 2500 == Limit - inklusive, muss durchgehen."""
+        assessment = await self._evaluate_with_fixed_order_size(
+            risk_engine,
+            sample_signal,
+            equity=Decimal("10000"),
+            existing_positions=[self._existing_position("2400")],
+            order_size_usd=Decimal("100"),
+        )
+        assert assessment.decision != RiskDecision.REJECTED
+        assert assessment.approved_quantity > 0
+
+    async def test_existing_2450_plus_order_100_at_10000_equity_rejects(
+        self, risk_engine: RiskEngine, sample_signal: Signal
+    ) -> None:
+        """2450 + 100 = 2550 > 2500 Limit - muss abgelehnt werden."""
+        assessment = await self._evaluate_with_fixed_order_size(
+            risk_engine,
+            sample_signal,
+            equity=Decimal("10000"),
+            existing_positions=[self._existing_position("2450")],
+            order_size_usd=Decimal("100"),
+        )
+        assert assessment.decision == RiskDecision.REJECTED
+        assert "exposure cap" in (assessment.rejection_reason or "").lower()
+
+    async def test_existing_2500_plus_any_order_at_10000_equity_rejects(
+        self, risk_engine: RiskEngine, sample_signal: Signal
+    ) -> None:
+        """Bereits exakt am Limit - selbst eine minimale weitere Order
+        muss abgelehnt werden."""
+        assessment = await self._evaluate_with_fixed_order_size(
+            risk_engine,
+            sample_signal,
+            equity=Decimal("10000"),
+            existing_positions=[self._existing_position("2500")],
+            order_size_usd=Decimal("1"),
+        )
+        assert assessment.decision == RiskDecision.REJECTED
+        assert "exposure cap" in (assessment.rejection_reason or "").lower()
+
+    async def test_equity_20000_yields_limit_5000(
+        self, risk_engine: RiskEngine, sample_signal: Signal
+    ) -> None:
+        # Genau am Limit (4900 + 100 = 5000) - muss durchgehen.
+        approved = await self._evaluate_with_fixed_order_size(
+            risk_engine,
+            sample_signal,
+            equity=Decimal("20000"),
+            existing_positions=[self._existing_position("4900")],
+            order_size_usd=Decimal("100"),
+        )
+        assert approved.decision != RiskDecision.REJECTED
+
+        # Einen USD ueber dem Limit - muss ablehnen.
+        rejected = await self._evaluate_with_fixed_order_size(
+            risk_engine,
+            sample_signal,
+            equity=Decimal("20000"),
+            existing_positions=[self._existing_position("4901")],
+            order_size_usd=Decimal("100"),
+        )
+        assert rejected.decision == RiskDecision.REJECTED
+
+    async def test_equity_5000_yields_limit_1250(
+        self, risk_engine: RiskEngine, sample_signal: Signal
+    ) -> None:
+        approved = await self._evaluate_with_fixed_order_size(
+            risk_engine,
+            sample_signal,
+            equity=Decimal("5000"),
+            existing_positions=[self._existing_position("1150")],
+            order_size_usd=Decimal("100"),
+        )
+        assert approved.decision != RiskDecision.REJECTED
+
+        rejected = await self._evaluate_with_fixed_order_size(
+            risk_engine,
+            sample_signal,
+            equity=Decimal("5000"),
+            existing_positions=[self._existing_position("1151")],
+            order_size_usd=Decimal("100"),
+        )
+        assert rejected.decision == RiskDecision.REJECTED
+
+    async def test_multiple_existing_positions_are_summed(
+        self, risk_engine: RiskEngine, sample_signal: Signal
+    ) -> None:
+        """Mehrere bestehende Positionen muessen korrekt aufsummiert
+        werden, nicht nur die letzte/erste beruecksichtigt."""
+        positions = [
+            self._existing_position("800"),
+            self._existing_position("800"),
+            self._existing_position("800"),  # Summe 2400
+        ]
+        approved = await self._evaluate_with_fixed_order_size(
+            risk_engine,
+            sample_signal,
+            equity=Decimal("10000"),
+            existing_positions=positions,
+            order_size_usd=Decimal("100"),
+        )
+        assert approved.decision != RiskDecision.REJECTED  # 2400 + 100 = 2500, PASS
+
+        positions_over = [
+            self._existing_position("800"),
+            self._existing_position("800"),
+            self._existing_position("851"),  # Summe 2451
+        ]
+        rejected = await self._evaluate_with_fixed_order_size(
+            risk_engine,
+            sample_signal,
+            equity=Decimal("10000"),
+            existing_positions=positions_over,
+            order_size_usd=Decimal("100"),
+        )
+        assert rejected.decision == RiskDecision.REJECTED
+
+    async def test_disabled_by_default_no_behavior_change(
+        self, risk_engine: RiskEngine, sample_signal: Signal
+    ) -> None:
+        """max_total_exposure_pct=None (Default) - identisches Verhalten
+        zu vorher, selbst bei sehr hoher Exposure."""
+        await risk_engine.initialize()
+        assert risk_engine._limits.max_total_exposure_pct is None
+        risk_engine._limits.position_size_usd = Decimal("100")
+
+        assessment = await risk_engine.evaluate(
+            signal=sample_signal,
+            open_positions=[self._existing_position("999999")],
+            portfolio_value=Decimal("10000"),
+            available_capital=Decimal("10000"),
+            current_price=Decimal("50000"),
+        )
+        assert not any("exposure cap" in w.lower() for w in assessment.warnings)
+        # (kann aus anderen Gruenden - z.B. Leverage-Cap - trotzdem
+        # abgelehnt/reduziert werden, aber NICHT wegen des neuen Checks)
+        if assessment.decision == RiskDecision.REJECTED:
+            assert "exposure cap" not in (assessment.rejection_reason or "").lower()

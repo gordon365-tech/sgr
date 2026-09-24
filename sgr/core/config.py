@@ -161,6 +161,25 @@ class RiskLimitsConfig(BaseSettings):
     # verkleinert oder vergroessert.
     risk_per_trade_pct: float = Field(default=0.01, gt=0.0, le=0.20)
 
+    # Globaler Exposure-/Capital-Allocation-Cap (2026-09-24, operative
+    # Anweisung "dynamisches 25-Prozent-Exposure-Limit") - NICHT zu
+    # verwechseln mit risk_per_trade_pct (max. Verlust EINES Trades bei
+    # SL-Treffer) oder max_single_position_pct (Groesse EINER Position).
+    # Begrenzt die SUMME aller gleichzeitig offenen direktionalen
+    # Positionen (Notional) auf diesen Anteil der aktuellen Account-
+    # Equity (PortfolioEngine.portfolio_value, dynamisch - nicht ein
+    # einmalig fixierter USD-Betrag). None (Default) = deaktiviert,
+    # identisches Verhalten zu vorher fuer jedes bestehende Profil, das
+    # diese Variable nicht setzt - siehe RiskEngine._evaluate_internal()
+    # fuer den harten Reject-Check (kein Downsizing wie beim Leverage-
+    # Cap, explizit als Ablehnung gefordert). Grid-Exposure hat einen
+    # eigenen, analogen Parameter (GridRiskLimitsConfig.
+    # max_total_exposure_pct), da GridRiskEngine ein separates,
+    # eigenstaendiges Limit-System ist (siehe dortigen Docstring) - beide
+    # sollten auf denselben Wert gesetzt werden, wenn ein einheitliches
+    # Gesamt-Cap gewuenscht ist.
+    max_total_exposure_pct: float | None = Field(default=None, gt=0.0, le=1.0)
+
     # Ab diesem Zeitpunkt (UTC) geoeffnete Positionen erhalten SL/TP/
     # Max-Holding-Time-Schutz. None = Feature global inaktiv. Bereits
     # VOR diesem Zeitpunkt offene ("Legacy"-)Positionen werden davon

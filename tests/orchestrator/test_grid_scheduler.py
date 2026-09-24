@@ -374,3 +374,98 @@ class TestDirectionalExposureWiring:
 
         _, kwargs = controller.open_grid.call_args
         assert kwargs["directional_exposure_usd"] == Decimal("777")
+
+    async def test_open_grid_snapshot_carries_real_portfolio_value(self, monkeypatch) -> None:
+        """Root-Cause-Fund (2026-09-24, 'dynamisches 25-Prozent-Exposure-
+        Limit'): GridPortfolioSnapshot.portfolio_value war zuvor IMMER
+        hart auf Decimal('0') gesetzt - totes Feld, das GridRiskEngine's
+        neuer max_total_exposure_pct-Check jetzt tatsaechlich benoetigt."""
+        from decimal import Decimal
+
+        from sgr.core.grid_types import FuturesGridParameters
+        from sgr.execution.grid_controller import GridOpenResult
+
+        portfolio = MagicMock()
+        portfolio.positions = []
+        portfolio.portfolio_value = Decimal("12345")
+
+        strategy = MagicMock()
+        strategy.name = "futures_grid_long_v1"
+        strategy.evaluate.return_value = GridDecision(
+            direction=GridDirection.LONG,
+            parameters=FuturesGridParameters(
+                grid_lower_price=Decimal("49000"),
+                grid_upper_price=Decimal("51000"),
+                grid_count=5,
+                long_or_short=GridDirection.LONG,
+                position_size=Decimal("50"),
+            ),
+            confidence=0.8,
+            reasons=["ranging"],
+        )
+        monkeypatch.setattr(
+            "sgr.orchestrator.grid_scheduler.get_active_grid_strategies", lambda: [strategy]
+        )
+        controller = _grid_controller_mock()
+        controller.open_grid = AsyncMock(
+            return_value=GridOpenResult(grid=MagicMock(id="fake"), approved=True, reason="")
+        )
+        scheduler = GridScheduler(
+            controller,
+            _feature_store_mock(),
+            TradingMode.PAPER,
+            enabled=True,
+            account_eligibility_provider=lambda: MagicMock(),
+            portfolio_engine=portfolio,
+        )
+
+        await scheduler.on_candle_event(_candle_event())
+
+        args, _kwargs = controller.open_grid.call_args
+        snapshot = args[4]
+        assert snapshot.portfolio_value == Decimal("12345")
+
+    async def test_open_grid_snapshot_falls_back_to_zero_without_portfolio_engine(
+        self, monkeypatch
+    ) -> None:
+        """Kein portfolio_engine injiziert - bisheriges, sicheres
+        Fallback-Verhalten (0) bleibt erhalten, kein Crash."""
+        from decimal import Decimal
+
+        from sgr.core.grid_types import FuturesGridParameters
+        from sgr.execution.grid_controller import GridOpenResult
+
+        strategy = MagicMock()
+        strategy.name = "futures_grid_long_v1"
+        strategy.evaluate.return_value = GridDecision(
+            direction=GridDirection.LONG,
+            parameters=FuturesGridParameters(
+                grid_lower_price=Decimal("49000"),
+                grid_upper_price=Decimal("51000"),
+                grid_count=5,
+                long_or_short=GridDirection.LONG,
+                position_size=Decimal("50"),
+            ),
+            confidence=0.8,
+            reasons=["ranging"],
+        )
+        monkeypatch.setattr(
+            "sgr.orchestrator.grid_scheduler.get_active_grid_strategies", lambda: [strategy]
+        )
+        controller = _grid_controller_mock()
+        controller.open_grid = AsyncMock(
+            return_value=GridOpenResult(grid=MagicMock(id="fake"), approved=True, reason="")
+        )
+        scheduler = GridScheduler(
+            controller,
+            _feature_store_mock(),
+            TradingMode.PAPER,
+            enabled=True,
+            account_eligibility_provider=lambda: MagicMock(),
+        )
+
+        await scheduler.on_candle_event(_candle_event())
+
+        args, _kwargs = controller.open_grid.call_args
+        snapshot = args[4]
+        assert snapshot.portfolio_value == Decimal("0")
