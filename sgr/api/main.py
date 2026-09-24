@@ -674,6 +674,31 @@ async def lifespan(app: FastAPI, role: LifespanRole = "worker") -> AsyncIterator
         # (Redis noch nicht verbunden) -> Limiter faellt fail-open zurueck,
         # kein Startup-Blocker.
         grid_rate_limiter = GridRateLimiter(feature_store.redis_client)
+
+        # Compliance-Regel fuer FUTURES_GRID (2026-09-24, operative
+        # Anweisung "gehe viel auf future grid"): ComplianceEngine hat
+        # KEINE eingebauten Default-Regeln (siehe ComplianceEngine._check()
+        # Docstring - Default ist "nirgendwo freigegeben", bis der Operator
+        # es explizit aendert) und main.py registrierte bis jetzt UEBERHAUPT
+        # KEINE Regel - jeder Grid-Open-Versuch waere strukturell immer am
+        # Compliance-Check gescheitert, unabhaengig von allem anderen. Eine
+        # eigene ComplianceEngine-Instanz (nicht der globale
+        # get_compliance_engine()-Singleton) mit genau einer Regel: Binance
+        # FUTURES_GRID fuer Jurisdiktion "DE" (siehe AccountEligibility
+        # unten - dieselbe Jurisdiktion).
+        from sgr.compliance.engine import ComplianceEngine
+        from sgr.compliance.types import ProductAvailabilityRule
+        from sgr.core.types import ExchangeID, ProductType
+
+        grid_compliance_engine = ComplianceEngine()
+        grid_compliance_engine.register_rule(
+            ProductAvailabilityRule(
+                exchange=ExchangeID.BINANCE,
+                product_type=ProductType.FUTURES_GRID,
+                jurisdictions_allowed=["DE"],
+            )
+        )
+
         grid_controller = GridController(
             execution_engine,
             config.trading_mode,
@@ -683,6 +708,7 @@ async def lifespan(app: FastAPI, role: LifespanRole = "worker") -> AsyncIterator
             symbol_kill_switch=get_symbol_kill_switch(tenant_id=config.tenant_id),
             exchange_pool=pool,
             rate_limiter=grid_rate_limiter,
+            compliance_engine=grid_compliance_engine,
         )
         try:
             restored_grids = await grid_controller.restore_from_persistence()
@@ -703,6 +729,45 @@ async def lifespan(app: FastAPI, role: LifespanRole = "worker") -> AsyncIterator
         # (siehe sgr/risk/position_liquidator.py Modul-Docstring).
         liquidator.set_grid_controller(grid_controller)
 
+        # AccountEligibility fuer GridScheduler (2026-09-24, operative
+        # Anweisung "gehe viel auf future grid"): AccountEligibility ist
+        # laut eigenem Docstring "vom Tenant/Operator explizit gepflegte
+        # Zulassungs-Angaben - NIEMALS abgeleitet" - es existiert aber
+        # WEDER in der DB (users-Tabelle hat keine jurisdiction/kyc-Felder)
+        # NOCH sonst irgendwo im System eine echte Quelle dafuer, weder fuer
+        # Gordon noch fuer Sumo. Ohne einen injizierten Provider bleibt
+        # GridScheduler strukturell ein No-Op (siehe dortigen Docstring
+        # Punkt 4, "fail-closed, keine erfundene Account-Freigabe").
+        #
+        # Diese synthetische Eligibility ist AUSSCHLIESSLICH fuer PAPER
+        # (simuliertes Test-Trading, kein echtes Geld, keine reale
+        # Rechtsperson mit echtem KYC-Status) - fuer jeden anderen
+        # trading_mode (insbesondere LIVE) liefert der Provider None, hart
+        # kodiert, unabhaengig von jeder Umgebungsvariable. Fuer einen
+        # echten Live-Grid-Betrieb MUESSTE der Operator eine echte
+        # AccountEligibility liefern - das ist hier bewusst NICHT
+        # nachgebildet.
+        grid_account_eligibility = None
+        if config.trading_mode == TradingMode.PAPER:
+            from sgr.compliance.types import AccountEligibility
+
+            grid_account_eligibility = AccountEligibility(
+                tenant_id=config.tenant_id or "default",
+                jurisdiction="DE",
+                kyc_verified=True,
+                futures_trading_enabled=True,
+                risk_disclosure_acknowledged=True,
+                enabled_product_types=["futures_grid"],
+            )
+            log.warning(
+                "sgr.api.grid_synthetic_paper_account_eligibility_used",
+                tenant_id=config.tenant_id,
+                note=(
+                    "Synthetic PAPER-only eligibility - NOT a real KYC/jurisdiction "
+                    "determination, never used for LIVE"
+                ),
+            )
+
         grid_scheduler = GridScheduler(
             grid_controller,
             feature_store,
@@ -715,6 +780,7 @@ async def lifespan(app: FastAPI, role: LifespanRole = "worker") -> AsyncIterator
             # jedes Grid ablehnen, statt faelschlich 0 direktionale
             # Exposure anzunehmen.
             portfolio_engine=portfolio_engine,
+            account_eligibility_provider=grid_account_eligibility,
         )
         app.state.grid_scheduler = grid_scheduler
         if grid_scheduler.enabled:

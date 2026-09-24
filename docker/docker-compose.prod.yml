@@ -461,7 +461,35 @@ services:
       # 8+ iterative Analyse-Dokumente, die auf hoehere Fragilitaet
       # hindeuten) - dies ist weiterhin ein reiner Lifecycle-Test, KEINE
       # oekonomische Validierung oder Live-Freigabe.
-      STRATEGY_FORCE_ACTIVATE: "trend_following_v1"
+      # Aggressive PAPER-Validierungsphase (2026-09-22, operative
+      # Anweisung): zusaetzlich momentum_v1/breakout_v1/
+      # volatility_adjusted_momentum_v1 aktiviert - identischer
+      # Override-Mechanismus wie trend_following_v1 oben, gleiche
+      # live_approved=False-Garantie (siehe apply_strategy_force_
+      # activate_override() in sgr/api/main.py), keine neue Logik.
+      # futures_grid_*-Strategien bewusst NICHT aktiviert - sie haben
+      # keine bestehende Grid-Parameter-Konfiguration in diesem File.
+      # 2026-09-24, operative Anweisung ("gehe viel auf future grid"):
+      # futures_grid_long_v1/futures_grid_short_v1/futures_grid_adaptive_v1
+      # ergaenzt. Grid-Strategien handeln nicht ueber den direktionalen
+      # Signal-Pfad (siehe futures_grid.py Modul-Docstring) - ihre
+      # Aktivierung hier allein oeffnet noch KEIN Grid, das erfordert
+      # zusaetzlich GRID_SCHEDULER_ENABLED=true (siehe unten).
+      STRATEGY_FORCE_ACTIVATE: "trend_following_v1,momentum_v1,breakout_v1,volatility_adjusted_momentum_v1,futures_grid_long_v1,futures_grid_short_v1,futures_grid_adaptive_v1"
+      # 2026-09-24, operative Anweisung: schaltet GridScheduler.on_candle_
+      # event() von einem No-Op (Default) auf tatsaechliches Grid-Opening
+      # um (siehe sgr/orchestrator/grid_scheduler.py Modul-Docstring).
+      # PAPER only (config.trading_mode fuer Gordon/Sumo) - kein Live-
+      # Trading-Effekt.
+      GRID_SCHEDULER_ENABLED: "true"
+
+      # PAPER-Stress-Test Auto-Recovery (2026-09-22, explizite operative
+      # Anweisung): automatischer Kill-Switch-Reset NUR wenn der Tenant
+      # 0 offene Positionen haelt (siehe PositionProtectionWatchdog.
+      # enable_paper_stress_auto_recovery() Docstring fuer die
+      # vollstaendige Begruendung + Live-Sperre). Hart auf PAPER
+      # beschraenkt im Code selbst, unabhaengig von dieser Variable.
+      PAPER_STRESS_AUTO_RECOVERY_ENABLED: "true"
 
       # TEST_1X Risk Profile (kontrollierter Funktionstest, Position-
       # Protection-Deployment 2026-09-16) - NUR fuer Gordon, Sumo bleibt
@@ -485,15 +513,43 @@ services:
       # (die 10 bestehenden Spot-Positionen wuerden fuer einen Futures-
       # Adapter unsichtbar).
       RISK_PROFILE_NAME: "TEST_1X"
-      RISK_MAX_OPEN_POSITIONS: "2"
-      RISK_DEFAULT_LEVERAGE: "1"
-      RISK_MAX_LEVERAGE: "1"
-      RISK_POSITION_SIZE_USD: "20"
+      # 2026-09-24, operative Anweisung ("steigere das Risiko und setze
+      # mehr Paper-Geld ein"): weitere Stufe nach der Aggressive-PAPER-
+      # Validierungsphase (2026-09-22, siehe Historie oben). Bewusst noch
+      # innerhalb bekannter Schema-Grenzen (max_open_positions<=50,
+      # risk_per_trade_pct<=0.20) und nicht ueber den bereits an anderer
+      # Stelle in dieser Datei referenzierten RiskLimitsConfig-Default
+      # max_leverage=3.0 hinaus - keine willkuerliche Maximalausreizung,
+      # sondern ein begruendeter, kontrollierter naechster Schritt (weiterhin
+      # PAPER, kein echtes Geld). max_open_positions 8 -> 15, leverage
+      # 2 -> 3, position_size_usd 20 -> 50 (2.5x mehr Kapital pro Trade).
+      RISK_MAX_OPEN_POSITIONS: "15"
+      RISK_DEFAULT_LEVERAGE: "3"
+      RISK_MAX_LEVERAGE: "3"
+      RISK_POSITION_SIZE_USD: "50"
       RISK_STOP_LOSS_PCT: "0.01"
       RISK_TAKE_PROFIT_PCT: "0.02"
-      RISK_MAX_HOLDING_MINUTES: "30"
-      RISK_RISK_PER_TRADE_PCT: "0.01"
-      RISK_MAX_ORDER_NOTIONAL: "50"
+      # 30 -> 240 Minuten (2026-09-24, operative Anweisung "hoehere
+      # Gewinne"): mit 30 Minuten erreichte in der Praxis so gut wie
+      # keine Position ueberhaupt den TP-(+2%) oder SL-(-1%)-Schwellenwert
+      # - beobachtet ueber 3h Gordon-Produktionslogs: 24/24 Closes hatten
+      # close_reason=max_holding_time, 0 via take_profit_hit/stop_loss_hit.
+      # Der TP/SL-Mechanismus war dadurch faktisch wirkungslos, jede
+      # Position wurde de facto rein zeitgetrieben (unabhaengig vom
+      # tatsaechlichen PnL) geschlossen - kein gewinnorientiertes
+      # Verhalten. 240 Minuten gibt Positionen realistisch mehr Zeit, die
+      # konfigurierten Gewinn-/Verlust-Schwellen tatsaechlich zu
+      # erreichen, BEVOR die Zeitgrenze eingreift. Kein Backtest-belegter
+      # "optimaler" Wert - eine begruendete Anpassung, keine
+      # Scheingenauigkeit. RISK_STOP_LOSS_PCT/RISK_TAKE_PROFIT_PCT selbst
+      # bewusst unveraendert (kein Beleg fuer bessere Werte vorhanden).
+      RISK_MAX_HOLDING_MINUTES: "240"
+      # 0.01 -> 0.02 und 50 -> 200 (2026-09-24, gleiche Anweisung wie oben):
+      # max_order_notional muss den erhoehten position_size_usd*leverage
+      # (50*3=150) mit Puffer abdecken, sonst wuerde dieser Wert faelschlich
+      # zum bindenden Limit statt RISK_POSITION_SIZE_USD/RISK_MAX_LEVERAGE.
+      RISK_RISK_PER_TRADE_PCT: "0.02"
+      RISK_MAX_ORDER_NOTIONAL: "200"
       # Nur Positionen, die AB diesem Zeitpunkt eroeffnet werden, erhalten
       # SL/TP/Max-Holding-Schutz - die 10 bereits offenen Legacy-
       # Positionen bleiben bewusst unangetastet (siehe sgr/risk/
@@ -568,13 +624,18 @@ services:
 
       # Siehe ausfuehrlichen Kommentar bei worker-gordon oben: manueller
       # Override auf explizite operative Anweisung, kein Go-Live-Signal.
-      # UNVERAENDERT gelassen (2026-09-17 Risk-Profile-Angleichung, siehe
-      # RISK_*-Block unten): Sumo faehrt weiterhin zwei force-aktivierte
-      # Strategien statt Gordons einer - das ist eine Strategie-Auswahl-
-      # Entscheidung, keine Risk-Limit-Frage, und war nicht Teil dieses
-      # Auftrags (Angleichung ausdruecklich nur auf RISK_*). Bewusst
-      # unangetastet, siehe Bericht.
-      STRATEGY_FORCE_ACTIVATE: "trend_following_v1,mean_reversion_v1"
+      # Aggressive PAPER-Validierungsphase (2026-09-22): momentum_v1/
+      # breakout_v1/volatility_adjusted_momentum_v1 ergaenzt, identisch
+      # zu Gordon - Sumo behaelt zusaetzlich sein eigenes mean_reversion_v1.
+      # 2026-09-24, operative Anweisung ("gehe viel auf future grid") -
+      # siehe ausfuehrlichen Kommentar beim identischen Block bei
+      # worker-gordon oben.
+      STRATEGY_FORCE_ACTIVATE: "trend_following_v1,mean_reversion_v1,momentum_v1,breakout_v1,volatility_adjusted_momentum_v1,futures_grid_long_v1,futures_grid_short_v1,futures_grid_adaptive_v1"
+      GRID_SCHEDULER_ENABLED: "true"
+
+      # PAPER-Stress-Test Auto-Recovery (2026-09-22) - siehe ausfuehrlichen
+      # Kommentar beim identischen Block bei worker-gordon oben.
+      PAPER_STRESS_AUTO_RECOVERY_ENABLED: "true"
 
       # TEST_1X Risk Profile (Angleichung an Gordon, 2026-09-17) - siehe
       # ausfuehrlichen Kommentar beim identischen Block bei worker-gordon
@@ -601,15 +662,43 @@ services:
       # (zwischen dieser Aenderung und dem eigentlichen Rollout) neu
       # eroeffnete Positionen faelschlich ungeschuetzt.
       RISK_PROFILE_NAME: "TEST_1X"
-      RISK_MAX_OPEN_POSITIONS: "2"
-      RISK_DEFAULT_LEVERAGE: "1"
-      RISK_MAX_LEVERAGE: "1"
-      RISK_POSITION_SIZE_USD: "20"
+      # 2026-09-24, operative Anweisung ("steigere das Risiko und setze
+      # mehr Paper-Geld ein"): weitere Stufe nach der Aggressive-PAPER-
+      # Validierungsphase (2026-09-22, siehe Historie oben). Bewusst noch
+      # innerhalb bekannter Schema-Grenzen (max_open_positions<=50,
+      # risk_per_trade_pct<=0.20) und nicht ueber den bereits an anderer
+      # Stelle in dieser Datei referenzierten RiskLimitsConfig-Default
+      # max_leverage=3.0 hinaus - keine willkuerliche Maximalausreizung,
+      # sondern ein begruendeter, kontrollierter naechster Schritt (weiterhin
+      # PAPER, kein echtes Geld). max_open_positions 8 -> 15, leverage
+      # 2 -> 3, position_size_usd 20 -> 50 (2.5x mehr Kapital pro Trade).
+      RISK_MAX_OPEN_POSITIONS: "15"
+      RISK_DEFAULT_LEVERAGE: "3"
+      RISK_MAX_LEVERAGE: "3"
+      RISK_POSITION_SIZE_USD: "50"
       RISK_STOP_LOSS_PCT: "0.01"
       RISK_TAKE_PROFIT_PCT: "0.02"
-      RISK_MAX_HOLDING_MINUTES: "30"
-      RISK_RISK_PER_TRADE_PCT: "0.01"
-      RISK_MAX_ORDER_NOTIONAL: "50"
+      # 30 -> 240 Minuten (2026-09-24, operative Anweisung "hoehere
+      # Gewinne"): mit 30 Minuten erreichte in der Praxis so gut wie
+      # keine Position ueberhaupt den TP-(+2%) oder SL-(-1%)-Schwellenwert
+      # - beobachtet ueber 3h Gordon-Produktionslogs: 24/24 Closes hatten
+      # close_reason=max_holding_time, 0 via take_profit_hit/stop_loss_hit.
+      # Der TP/SL-Mechanismus war dadurch faktisch wirkungslos, jede
+      # Position wurde de facto rein zeitgetrieben (unabhaengig vom
+      # tatsaechlichen PnL) geschlossen - kein gewinnorientiertes
+      # Verhalten. 240 Minuten gibt Positionen realistisch mehr Zeit, die
+      # konfigurierten Gewinn-/Verlust-Schwellen tatsaechlich zu
+      # erreichen, BEVOR die Zeitgrenze eingreift. Kein Backtest-belegter
+      # "optimaler" Wert - eine begruendete Anpassung, keine
+      # Scheingenauigkeit. RISK_STOP_LOSS_PCT/RISK_TAKE_PROFIT_PCT selbst
+      # bewusst unveraendert (kein Beleg fuer bessere Werte vorhanden).
+      RISK_MAX_HOLDING_MINUTES: "240"
+      # 0.01 -> 0.02 und 50 -> 200 (2026-09-24, gleiche Anweisung wie oben):
+      # max_order_notional muss den erhoehten position_size_usd*leverage
+      # (50*3=150) mit Puffer abdecken, sonst wuerde dieser Wert faelschlich
+      # zum bindenden Limit statt RISK_POSITION_SIZE_USD/RISK_MAX_LEVERAGE.
+      RISK_RISK_PER_TRADE_PCT: "0.02"
+      RISK_MAX_ORDER_NOTIONAL: "200"
       RISK_PROTECTION_CUTOVER_AT: "2026-09-17T22:40:46+00:00"
 
       SENTRY_DSN: ${SENTRY_DSN:-}
