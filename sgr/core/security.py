@@ -19,6 +19,7 @@ log = get_logger(__name__)
 
 class AuditAction(StrEnum):
     """Audit log action types."""
+
     API_KEY_CREATED = "api_key_created"
     API_KEY_ROTATED = "api_key_rotated"
     API_KEY_DELETED = "api_key_deleted"
@@ -191,6 +192,7 @@ class InputValidator:
     def validate_email(email: str) -> bool:
         """Simple email validation."""
         import re
+
         pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
         return bool(re.match(pattern, email)) and len(email) <= 255
 

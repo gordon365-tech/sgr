@@ -111,7 +111,7 @@ class LiveVerificationState:
     daily_realized_loss_usd: Decimal = Decimal("0")
     daily_loss_reset_at: datetime = field(default_factory=lambda: datetime.now(tz=UTC))
     orders_submitted: int = 0
-    active_grid_ids: set = field(default_factory=set)
+    active_grid_ids: set[Any] = field(default_factory=set)
     deactivated: bool = False
     deactivation_reason: str | None = None
 
@@ -189,8 +189,7 @@ class LiveVerificationGate:
 
         if self._state.deactivated:
             return False, (
-                f"Live-Verifikationsprofil bereits deaktiviert: "
-                f"{self._state.deactivation_reason}"
+                f"Live-Verifikationsprofil bereits deaktiviert: {self._state.deactivation_reason}"
             )
 
         if profile.is_expired(now):
@@ -306,8 +305,7 @@ async def check_live_verification_allowed(
             price = ticker.ask if order.side == Side.BUY else ticker.bid
         except Exception as e:
             return False, (
-                f"Live trading blocked: Preis fuer LiveVerificationGate nicht "
-                f"abrufbar ({e})"
+                f"Live trading blocked: Preis fuer LiveVerificationGate nicht abrufbar ({e})"
             )
 
     try:

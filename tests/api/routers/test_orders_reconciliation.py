@@ -47,9 +47,7 @@ class TestGetOrderHistory:
         result = await orders_router.get_order_history(repos=repos, user=mock_user, limit=50)
 
         assert result == orders
-        repos.orders.get_by_user.assert_awaited_once_with(
-            "u1", TradingMode.PAPER, limit=50
-        )
+        repos.orders.get_by_user.assert_awaited_once_with("u1", TradingMode.PAPER, limit=50)
 
     @pytest.mark.asyncio
     async def test_respects_limit_parameter(self) -> None:
@@ -58,9 +56,7 @@ class TestGetOrderHistory:
 
         await orders_router.get_order_history(repos=repos, user=mock_user, limit=3)
 
-        repos.orders.get_by_user.assert_awaited_once_with(
-            "u1", TradingMode.PAPER, limit=3
-        )
+        repos.orders.get_by_user.assert_awaited_once_with("u1", TradingMode.PAPER, limit=3)
 
     @pytest.mark.asyncio
     async def test_empty_history_returns_empty_list(self) -> None:

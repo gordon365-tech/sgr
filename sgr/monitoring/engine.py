@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 from prometheus_client import make_asgi_app
@@ -53,7 +55,7 @@ class MonitoringEngine:
         self._strategy_registry = strategy_registry
         self._trading_mode = trading_mode
         self._interval = interval_seconds
-        self._task: asyncio.Task | None = None
+        self._task: asyncio.Task[Any] | None = None
         self._running = False
         # Merkt sich die Label-Kombination (symbol, side, exchange) aller
         # im letzten Zyklus gemeldeten offenen Positionen. Eine Position,
@@ -107,10 +109,7 @@ class MonitoringEngine:
             try:
                 portfolio_value = self._portfolio_engine.portfolio_value
                 positions = self._portfolio_engine.positions
-                cash = getattr(self._portfolio_engine, "cash", None)
-
-                if cash is None:
-                    cash = getattr(self._portfolio_engine, "cash_balance", 0)
+                cash = self._portfolio_engine.cash
 
                 # Portfolio snapshot wird nach Möglichkeit mit den Risk-Daten
                 # ergänzt. Ohne Risk Engine werden nur die verfügbaren Werte
@@ -124,8 +123,8 @@ class MonitoringEngine:
                         record_portfolio_snapshot(
                             portfolio_value=portfolio_value,
                             cash=cash,
-                            daily_pnl=getattr(risk_metrics, "daily_pnl", 0),
-                            daily_pnl_pct=float(getattr(risk_metrics, "daily_pnl_pct", 0)) * 100,
+                            daily_pnl=risk_metrics.daily_pnl,
+                            daily_pnl_pct=risk_metrics.daily_pnl_pct * 100,
                         )
                     except Exception as e:
                         log.debug(
@@ -136,8 +135,8 @@ class MonitoringEngine:
                     record_portfolio_snapshot(
                         portfolio_value=portfolio_value,
                         cash=cash,
-                        daily_pnl=0,
-                        daily_pnl_pct=0,
+                        daily_pnl=Decimal("0"),
+                        daily_pnl_pct=0.0,
                     )
             except Exception as e:
                 log.debug("monitoring.portfolio_error", error=str(e))
@@ -285,7 +284,7 @@ class MonitoringEngine:
         self._last_position_keys = current_keys
 
 
-def create_metrics_app():
+def create_metrics_app() -> Callable[..., Any]:
     """
     Erstellt die bestehende Prometheus ASGI-App.
 
@@ -298,14 +297,14 @@ def create_metrics_app():
 
 def add_metrics_middleware(app: Any) -> None:
     """Fügt Request-Tracking über die zentrale OTel-Metrics-API hinzu."""
-    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
     from starlette.requests import Request
     from starlette.responses import Response
 
     class MetricsMiddleware(BaseHTTPMiddleware):
-        async def dispatch(self, request: Request, call_next: Any) -> Response:
+        async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
             start = time.monotonic()
-            response = await call_next(request)
+            response: Response = await call_next(request)
             duration = time.monotonic() - start
 
             path = request.url.path

@@ -41,6 +41,7 @@ from typing import Any, Literal
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.middleware.base import RequestResponseEndpoint
 
 from sgr.core.config import get_config
 from sgr.core.logging import get_logger, setup_logging
@@ -1089,18 +1090,18 @@ def create_app() -> FastAPI:
 
     # Request ID Middleware
     @app.middleware("http")
-    async def add_request_id(request: Request, call_next: Any) -> Response:
+    async def add_request_id(request: Request, call_next: RequestResponseEndpoint) -> Response:
         request_id = str(uuid.uuid4())
         request.state.request_id = request_id
-        response = await call_next(request)
+        response: Response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
         return response
 
     # Request Timing
     @app.middleware("http")
-    async def add_timing(request: Request, call_next: Any) -> Response:
+    async def add_timing(request: Request, call_next: RequestResponseEndpoint) -> Response:
         start = time.monotonic()
-        response = await call_next(request)
+        response: Response = await call_next(request)
         duration_ms = (time.monotonic() - start) * 1000
         response.headers["X-Response-Time-Ms"] = f"{duration_ms:.1f}"
         return response

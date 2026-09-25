@@ -80,9 +80,7 @@ class TestSuccessfulSubmission:
         self, executor: SafeOrderExecutor
     ) -> None:
         order = _make_order_request()
-        submit_fn = AsyncMock(
-            return_value=_make_order_result(order, status=OrderStatus.SUBMITTED)
-        )
+        submit_fn = AsyncMock(return_value=_make_order_result(order, status=OrderStatus.SUBMITTED))
 
         await executor.execute_safely(order, submit_fn)
 
@@ -99,9 +97,7 @@ class TestDuplicateDetection:
         dieselbe order.id wird geblockt, bevor exchange_submit_fn ueberhaupt
         aufgerufen wird."""
         order = _make_order_request()
-        submit_fn = AsyncMock(
-            return_value=_make_order_result(order, status=OrderStatus.SUBMITTED)
-        )
+        submit_fn = AsyncMock(return_value=_make_order_result(order, status=OrderStatus.SUBMITTED))
         await executor.execute_safely(order, submit_fn)
 
         second_result = await executor.execute_safely(order, submit_fn)
@@ -155,9 +151,7 @@ class TestDuplicateDetection:
         ist dieselbe order.id NICHT mehr blockiert - relevant fuer einen
         spaeteren, unabhaengigen Retry-Zyklus."""
         order = _make_order_request()
-        submit_fn = AsyncMock(
-            return_value=_make_order_result(order, status=OrderStatus.FILLED)
-        )
+        submit_fn = AsyncMock(return_value=_make_order_result(order, status=OrderStatus.FILLED))
         await executor.execute_safely(order, submit_fn)
         executor.release(order)
 
@@ -218,9 +212,7 @@ class TestUnknownStateHandling:
         nur laufende/erfolgreiche Submissions blocken soll, kein
         fehlgeschlagenes exchange_submit_fn."""
         order = _make_order_request()
-        submit_fn = AsyncMock(
-            side_effect=[RuntimeError("timeout"), _make_order_result(order)]
-        )
+        submit_fn = AsyncMock(side_effect=[RuntimeError("timeout"), _make_order_result(order)])
 
         first_result = await executor.execute_safely(order, submit_fn)
         second_result = await executor.execute_safely(order, submit_fn)
@@ -235,9 +227,7 @@ class TestInflightTrackingHelpers:
         self, executor: SafeOrderExecutor
     ) -> None:
         order = _make_order_request()
-        submit_fn = AsyncMock(
-            return_value=_make_order_result(order, status=OrderStatus.SUBMITTED)
-        )
+        submit_fn = AsyncMock(return_value=_make_order_result(order, status=OrderStatus.SUBMITTED))
         await executor.execute_safely(order, submit_fn)
 
         updated = _make_order_result(order, status=OrderStatus.PARTIALLY_FILLED)
@@ -276,9 +266,7 @@ class TestInflightTrackingHelpers:
 
     async def test_clear_removes_all_tracked_orders(self, executor: SafeOrderExecutor) -> None:
         order = _make_order_request()
-        submit_fn = AsyncMock(
-            return_value=_make_order_result(order, status=OrderStatus.SUBMITTED)
-        )
+        submit_fn = AsyncMock(return_value=_make_order_result(order, status=OrderStatus.SUBMITTED))
         await executor.execute_safely(order, submit_fn)
 
         executor.clear()

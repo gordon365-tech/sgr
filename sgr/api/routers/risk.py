@@ -32,7 +32,7 @@ gilt, nicht cross-prozess-verlässlich ist.
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
@@ -96,9 +96,7 @@ async def get_risk_metrics(
     Felder 0/Platzhalter und dürfen NICHT als "kein Risiko" interpretiert
     werden.
     """
-    metrics = await read_risk_metrics_from_redis(
-        redis_client, trading_mode, tenant_id=user.user_id
-    )
+    metrics = await read_risk_metrics_from_redis(redis_client, trading_mode, tenant_id=user.user_id)
     ks_state = await read_kill_switch_state_from_redis(
         redis_client, trading_mode, tenant_id=user.user_id
     )
@@ -137,7 +135,7 @@ async def get_risk_metrics(
 @router.get("/limits")
 async def get_limits(
     user: Annotated[TokenData, Depends(require_auth)],
-) -> dict:
+) -> dict[str, Any]:
     """Aktuelle Risk-Limit-Konfiguration."""
     config = get_config()
     limits = config.risk_limits
@@ -202,7 +200,7 @@ async def trigger_kill_switch(
     trading_mode: Annotated[TradingMode, Depends(get_trading_mode)],
     redis_client: Annotated[Redis, Depends(get_redis_client)],
     user: Annotated[TokenData, Depends(require_live_2fa)],
-) -> dict:
+) -> dict[str, Any]:
     """
     Manueller Kill Switch Trigger.
     Erfordert Auth + 2FA (Live Mode).
@@ -232,7 +230,7 @@ async def reset_kill_switch(
     trading_mode: Annotated[TradingMode, Depends(get_trading_mode)],
     redis_client: Annotated[Redis, Depends(get_redis_client)],
     user: Annotated[TokenData, Depends(require_admin)],
-) -> dict:
+) -> dict[str, Any]:
     """
     Kill Switch zurücksetzen.
     Erfordert Admin-Rolle.

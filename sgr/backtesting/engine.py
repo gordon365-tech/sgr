@@ -211,9 +211,7 @@ class BacktestingEngine:
             # nachgelagerten RecoveryManager-Fix wieder korrigiert, statt
             # gar nicht erst falsch gesetzt zu sein.
             for name in activated_here:
-                await registry.deactivate(
-                    name, reason="backtest validation run completed"
-                )
+                await registry.deactivate(name, reason="backtest validation run completed")
 
     async def _run_full_validation_body(
         self,
@@ -381,9 +379,7 @@ class BacktestingEngine:
             # Gleiches Aufraeumen wie in run_full_validation() - siehe
             # dortiger Kommentar fuer die vollstaendige Begruendung.
             for name in activated_here:
-                await registry.deactivate(
-                    name, reason="backtest validation run completed"
-                )
+                await registry.deactivate(name, reason="backtest validation run completed")
 
     def _make_decision(
         self,
@@ -404,18 +400,21 @@ class BacktestingEngine:
         if walk_forward:
             if not walk_forward.is_consistent:
                 blockers.append(
-                    f"Walk-Forward inconsistent (degradation: {walk_forward.degradation_factor:.1%})"
+                    "Walk-Forward inconsistent "
+                    f"(degradation: {walk_forward.degradation_factor:.1%})"
                 )
             elif walk_forward.degradation_factor < 0.7:
                 warnings.append(
-                    f"Walk-Forward degradation {walk_forward.degradation_factor:.1%} — monitor closely"
+                    f"Walk-Forward degradation {walk_forward.degradation_factor:.1%} "
+                    "— monitor closely"
                 )
 
         # Monte Carlo Ergebnis
         if monte_carlo:
             if monte_carlo.percentile_95_max_drawdown_pct > 25.0:
                 blockers.append(
-                    f"Monte Carlo P95 Drawdown {monte_carlo.percentile_95_max_drawdown_pct:.1f}% > 25%"
+                    "Monte Carlo P95 Drawdown "
+                    f"{monte_carlo.percentile_95_max_drawdown_pct:.1f}% > 25%"
                 )
             if monte_carlo.ruin_probability > 0.05:
                 blockers.append(f"Ruin probability {monte_carlo.ruin_probability:.1%} > 5%")

@@ -77,9 +77,7 @@ class TestGridRateLimiterBasics:
         gordon_results = [
             await limiter.acquire("binance", "gordon", "order_submit") for _ in range(3)
         ]
-        sumo_results = [
-            await limiter.acquire("binance", "sumo", "order_submit") for _ in range(3)
-        ]
+        sumo_results = [await limiter.acquire("binance", "sumo", "order_submit") for _ in range(3)]
 
         assert gordon_results == [True, True, False]
         assert sumo_results == [True, True, False]  # unbeeinflusst von Gordons Budget

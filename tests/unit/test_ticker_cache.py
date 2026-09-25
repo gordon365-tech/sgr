@@ -48,9 +48,7 @@ class TestPublishTickerWithoutRedis:
     """Regressionsschutz: ohne injizierten Redis-Client darf
     publish_ticker() ein reines no-op sein."""
 
-    async def test_publish_without_redis_does_not_raise(
-        self, sample_ticker: TickerData
-    ) -> None:
+    async def test_publish_without_redis_does_not_raise(self, sample_ticker: TickerData) -> None:
         await publish_ticker(None, sample_ticker)
 
 
@@ -75,9 +73,7 @@ class TestPublishTicker:
         assert data["change_24h_pct"] == 1.2
         assert data["timestamp"] == sample_ticker.timestamp.isoformat()
 
-    async def test_publish_uses_correct_key_per_symbol(
-        self, fake_redis: AsyncMock
-    ) -> None:
+    async def test_publish_uses_correct_key_per_symbol(self, fake_redis: AsyncMock) -> None:
         """Zwei verschiedene Symbole duerfen sich niemals denselben
         Redis-Key teilen."""
         eth_ticker = TickerData(
@@ -97,9 +93,7 @@ class TestPublishTicker:
 
 
 class TestPublishTickerFailSafe:
-    async def test_publish_swallows_redis_errors(
-        self, sample_ticker: TickerData
-    ) -> None:
+    async def test_publish_swallows_redis_errors(self, sample_ticker: TickerData) -> None:
         redis = AsyncMock()
         redis.set = AsyncMock(side_effect=ConnectionError("redis down"))
 
@@ -109,9 +103,7 @@ class TestPublishTickerFailSafe:
 
 
 class TestReadTickerFromRedis:
-    async def test_returns_parsed_ticker_when_present(
-        self, fake_redis: AsyncMock
-    ) -> None:
+    async def test_returns_parsed_ticker_when_present(self, fake_redis: AsyncMock) -> None:
         fake_redis.get = AsyncMock(
             return_value=json.dumps({"symbol": "BTC/USDT", "bid": "50000.00"})
         )
@@ -120,18 +112,14 @@ class TestReadTickerFromRedis:
 
         assert result == {"symbol": "BTC/USDT", "bid": "50000.00"}
 
-    async def test_returns_none_when_no_ticker_written_yet(
-        self, fake_redis: AsyncMock
-    ) -> None:
+    async def test_returns_none_when_no_ticker_written_yet(self, fake_redis: AsyncMock) -> None:
         fake_redis.get = AsyncMock(return_value=None)
 
         result = await read_ticker_from_redis(fake_redis, "BTC/USDT")
 
         assert result is None
 
-    async def test_returns_none_on_redis_error_fail_safe(
-        self, fake_redis: AsyncMock
-    ) -> None:
+    async def test_returns_none_on_redis_error_fail_safe(self, fake_redis: AsyncMock) -> None:
         """Fail-safe: Redis-Fehler -> None ('noch kein Ticker
         verfügbar'), kein Absturz."""
         fake_redis.get = AsyncMock(side_effect=ConnectionError("redis down"))

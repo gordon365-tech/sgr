@@ -268,9 +268,7 @@ class TestVolatilityAdjustedMomentumStrategy:
             )
         )
         extreme_signal = strategy.generate_signal(
-            _context(
-                MarketRegime.HIGH_VOLATILITY, extreme_vol_ind, returns_5=0.04, returns_10=0.03
-            )
+            _context(MarketRegime.HIGH_VOLATILITY, extreme_vol_ind, returns_5=0.04, returns_10=0.03)
         )
         assert moderate_signal is not None
         # Bei extremer Volatilitaet darf entweder die Konfidenz spuerbar

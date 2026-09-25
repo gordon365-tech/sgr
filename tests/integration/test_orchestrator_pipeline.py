@@ -23,13 +23,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 import pytest
-
-# Benoetigt eine echte Redis-Instanz (echter EventBus, kein Mock) -
-# in Sandbox/CI ohne laufende Redis-Instanz nicht ausfuehrbar.
-# Siehe pyproject.toml: standardmaessig via -m ausgeschlossen.
-pytestmark = pytest.mark.requires_redis
 
 from sgr.core.types import (
     Environment,
@@ -54,6 +50,11 @@ from sgr.risk.engine import RiskEngine
 from sgr.strategy.base import BaseStrategy, ValidationStatus
 from sgr.strategy.engine import StrategyEngine
 from sgr.strategy.registry import StrategyRegistry
+
+# Benoetigt eine echte Redis-Instanz (echter EventBus, kein Mock) -
+# in Sandbox/CI ohne laufende Redis-Instanz nicht ausfuehrbar.
+# Siehe pyproject.toml: standardmaessig via -m ausgeschlossen.
+pytestmark = pytest.mark.requires_redis
 
 # ============================================================================
 # Test Fixtures
@@ -249,9 +250,7 @@ async def execution_engine(exchange_pool: ExchangePool) -> ExecutionEngine:
 
 
 @pytest.fixture
-async def strategy_engine(
-    paper_mode_config: Any, feature_store: FeatureStore
-) -> StrategyEngine:
+async def strategy_engine(paper_mode_config: Any, feature_store: FeatureStore) -> StrategyEngine:
     """Initialisiert Strategy Engine mit Test-Strategie."""
     registry = StrategyRegistry.get()
     registry.clear()
@@ -261,9 +260,7 @@ async def strategy_engine(
     registry.register_instance(test_strat)
     registry.mark_validated(
         test_strat.name,
-        ValidationStatus(
-            backtest_passed=True, walk_forward_passed=True, paper_trading_passed=True
-        ),
+        ValidationStatus(backtest_passed=True, walk_forward_passed=True, paper_trading_passed=True),
     )
     # mark_validated() setzt nur is_validated (in-memory) - StrategyEngine
     # filtert auf is_active (siehe registry.get_active()), das erst durch
@@ -510,8 +507,9 @@ async def test_paper_trading_is_default_mode(paper_mode_config: Any) -> None:
 
     config = get_config()
     # Note: get_config() returns actual config based on env.
-    # For this test, we verify the TradingMode enum supports PAPER
+    # PAPER must be the config default (fail-safe against accidental live trading).
     assert TradingMode.PAPER in list(TradingMode)
+    assert config.trading_mode == TradingMode.PAPER
 
 
 @pytest.mark.asyncio
@@ -521,7 +519,8 @@ async def test_live_trading_impossible_in_default_config() -> None:
 
     config = get_config()
     # Default: no Pionex live API key
-    assert not config.credentials.pionex_live_api_key or config.credentials.pionex_live_api_key == ""
+    live_key = config.credentials.pionex_live_api_key
+    assert not live_key or live_key == ""
 
 
 # ============================================================================
@@ -621,6 +620,3 @@ async def test_risk_engine_reduces_position_on_soft_limits(
     if result.assessment is not None and result.assessment.decision == RiskDecision.REDUCED:
         assert result.assessment.approved_quantity > Decimal("0")
         assert len(result.assessment.warnings) > 0
-
-
-from typing import Any

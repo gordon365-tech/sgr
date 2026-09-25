@@ -6,7 +6,7 @@ Authentifizierung, Billing und API-Key-Management.
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, EmailStr
@@ -66,9 +66,9 @@ class StoreAPIKeyRequest(BaseModel):
 class PerformanceReportResponse(BaseModel):
     user_id: str
     report_generated_at: str
-    summary: dict
-    portfolio_history: list
-    fee_periods: list
+    summary: dict[str, Any]
+    portfolio_history: list[Any]
+    fee_periods: list[Any]
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +188,7 @@ async def setup_2fa(
 async def enable_2fa(
     body: Enable2FARequest,
     user: Annotated[TokenData, Depends(require_auth)],
-) -> dict:
+) -> dict[str, Any]:
     """Aktiviert 2FA nach Bestätigung des TOTP-Codes."""
     success = await _auth.enable_2fa(user.user_id, body.totp_code)
     if not success:
@@ -207,7 +207,7 @@ apikey_router = APIRouter(prefix="/api-keys", tags=["api-keys"])
 async def store_api_key(
     body: StoreAPIKeyRequest,
     user: Annotated[TokenData, Depends(require_auth)],
-) -> dict:
+) -> dict[str, Any]:
     """
     Speichert verschlüsselten Exchange API Key.
     Key wird AES-256-GCM verschlüsselt mit User-ID als AAD.
@@ -240,7 +240,7 @@ async def store_api_key(
 @apikey_router.get("/")
 async def list_api_keys(
     user: Annotated[TokenData, Depends(require_auth)],
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """
     Listet alle konfigurierten API Keys (ohne Secrets!).
     """
@@ -273,22 +273,26 @@ async def list_api_keys(
 async def delete_api_key(
     key_id: str,
     user: Annotated[TokenData, Depends(require_auth)],
-) -> dict:
+) -> dict[str, Any]:
     """Deaktiviert API Key (nicht wirklich gelöscht – Audit Trail)."""
     from sqlalchemy import and_, update
+    from sqlalchemy.engine import CursorResult
 
     from sgr.core.database import APIKeyModel, get_session
 
     async with get_session() as session:
-        result = await session.execute(
-            update(APIKeyModel)
-            .where(
-                and_(
-                    APIKeyModel.id == key_id,
-                    APIKeyModel.user_id == user.user_id,
+        result = cast(
+            CursorResult[Any],
+            await session.execute(
+                update(APIKeyModel)
+                .where(
+                    and_(
+                        APIKeyModel.id == key_id,
+                        APIKeyModel.user_id == user.user_id,
+                    )
                 )
-            )
-            .values(is_active=False)
+                .values(is_active=False)
+            ),
         )
         if result.rowcount == 0:
             raise HTTPException(status_code=404, detail="API key not found")
@@ -307,7 +311,7 @@ _fee_engine = PerformanceFeeEngine()
 @billing_router.get("/performance-report")
 async def get_performance_report(
     user: Annotated[TokenData, Depends(require_auth)],
-) -> dict:
+) -> dict[str, Any]:
     """
     Vollständiger Performance + Fee Report.
     Zeigt HWM-Verlauf, berechnete Fees, Portfolio-Entwicklung.
@@ -324,7 +328,7 @@ async def get_performance_report(
 @billing_router.get("/fees")
 async def get_fee_summary(
     user: Annotated[TokenData, Depends(require_auth)],
-) -> dict:
+) -> dict[str, Any]:
     """
     Fee-Zusammenfassung: ausstehende und bezahlte Fees.
     """
@@ -345,7 +349,7 @@ async def get_fee_summary(
 @billing_router.get("/invoices")
 async def get_invoices(
     user: Annotated[TokenData, Depends(require_auth)],
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Alle Rechnungen für den User."""
     # In Produktion: aus DB laden
     return []

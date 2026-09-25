@@ -96,9 +96,7 @@ class TestRequireLive2FA:
         encrypted = auth.encrypt_totp_secret(secret)
 
         repos = MagicMock()
-        repos.users.get_by_id = AsyncMock(
-            return_value=_make_db_user(totp_secret=encrypted)
-        )
+        repos.users.get_by_id = AsyncMock(return_value=_make_db_user(totp_secret=encrypted))
 
         with pytest.raises(HTTPException) as exc_info:
             await require_live_2fa(user=_live_token(), repos=repos, x_totp_code="000000")
@@ -115,9 +113,7 @@ class TestRequireLive2FA:
         code = pyotp.TOTP(secret).now()
 
         repos = MagicMock()
-        repos.users.get_by_id = AsyncMock(
-            return_value=_make_db_user(totp_secret=encrypted)
-        )
+        repos.users.get_by_id = AsyncMock(return_value=_make_db_user(totp_secret=encrypted))
 
         result = await require_live_2fa(user=_live_token(), repos=repos, x_totp_code=code)
 

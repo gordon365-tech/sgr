@@ -107,9 +107,7 @@ class SymbolStrategyGate:
             for row in rows:
                 if row["exchange"] != self._exchange or row["timeframe"] != self._timeframe:
                     continue
-                new_map[row["symbol"]] = (
-                    row["strategy"] if row["status"] == "active" else None
-                )
+                new_map[row["symbol"]] = row["strategy"] if row["status"] == "active" else None
             self._active_strategy_by_symbol = new_map
             self._last_refreshed_at = datetime.now(tz=UTC)
             log.info("symbol_gate.refreshed", symbols_known=len(new_map))

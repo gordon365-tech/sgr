@@ -243,9 +243,7 @@ class TestReadKillSwitchStateFromRedis:
     Faehigkeit)."""
 
     async def test_returns_parsed_state_when_present(self, fake_redis: AsyncMock) -> None:
-        fake_redis.get = AsyncMock(
-            return_value=json.dumps({"is_active": True, "reason": "test"})
-        )
+        fake_redis.get = AsyncMock(return_value=json.dumps({"is_active": True, "reason": "test"}))
 
         result = await read_kill_switch_state_from_redis(fake_redis, TradingMode.PAPER)
 
@@ -317,9 +315,7 @@ class TestKillSwitchTenantScoping:
 
         assert default_ks is not tenant_ks
 
-    async def test_tenant_scoped_redis_key_includes_tenant_id(
-        self, fake_redis: AsyncMock
-    ) -> None:
+    async def test_tenant_scoped_redis_key_includes_tenant_id(self, fake_redis: AsyncMock) -> None:
         ks = KillSwitch(TradingMode.PAPER, redis_client=fake_redis, tenant_id="gordon-uuid")
         await ks.trigger("drawdown exceeded")
 

@@ -137,15 +137,20 @@ class FeatureExtractor:
         """Transformiert neue Daten mit gespeicherter Normalisierung."""
         if not self._fitted:
             raise RuntimeError("FeatureExtractor not fitted. Call fit_transform first.")
+        # _fitted=True garantiert, dass fit() diese bereits gesetzt hat
+        # (siehe fit_transform) - hier explizit geprueft statt implizit
+        # per type: ignore angenommen.
+        if self._means is None or self._stds is None or self._medians is None:
+            raise RuntimeError("FeatureExtractor._fitted=True aber Statistiken fehlen.")
 
         X_raw = self._build_matrix(feature_sets)
 
         # Imputation mit Trainings-Medians
         for j in range(X_raw.shape[1]):
             mask = np.isnan(X_raw[:, j])
-            X_raw[mask, j] = self._medians[j]  # type: ignore[index]
+            X_raw[mask, j] = self._medians[j]
 
-        X_norm = (X_raw - self._means) / self._stds  # type: ignore[operator]
+        X_norm = (X_raw - self._means) / self._stds
 
         return FeatureMatrix(
             X=X_norm,
@@ -156,7 +161,8 @@ class FeatureExtractor:
     def transform_single(self, features: FeatureSet) -> np.ndarray:
         """Transformiert einzelnes FeatureSet (für Live-Inference)."""
         matrix = self.transform([features])
-        return matrix.X[0]
+        row: np.ndarray = matrix.X[0]
+        return row
 
     def _build_matrix(self, feature_sets: list[FeatureSet]) -> np.ndarray:
         rows = [self._extract_row(fs) for fs in feature_sets]
@@ -196,7 +202,7 @@ class FeatureExtractor:
 
         return [_get(name) for name in self._feature_names]
 
-    def get_params(self) -> dict:
+    def get_params(self) -> dict[str, Any]:
         """Serialisiert Normalisierungs-Parameter für Persistence."""
         if not self._fitted:
             return {}
@@ -208,7 +214,7 @@ class FeatureExtractor:
         }
 
     @classmethod
-    def from_params(cls, params: dict) -> FeatureExtractor:
+    def from_params(cls, params: dict[str, Any]) -> FeatureExtractor:
         """Stellt FeatureExtractor aus gespeicherten Parametern wieder her."""
         extractor = cls(params["feature_names"])
         extractor._means = np.array(params["means"])

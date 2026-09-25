@@ -147,9 +147,7 @@ def _robustness_score(
         # gesamte Backtest-Dauer verteilt, oder geclustert in einem
         # kurzen Fenster? Gemessen als Spanne der mittleren 80% der
         # Trade-Entry-Zeitpunkte relativ zur Gesamtdauer.
-        entry_times = sorted(
-            datetime.fromisoformat(t["entry_time"]) for t in trades
-        )
+        entry_times = sorted(datetime.fromisoformat(t["entry_time"]) for t in trades)
         total_span = (entry_times[-1] - entry_times[0]).total_seconds()
         if total_span > 0:
             lo_idx = int(len(entry_times) * 0.1)

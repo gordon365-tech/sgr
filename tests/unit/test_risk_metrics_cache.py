@@ -50,9 +50,7 @@ class TestPublishRiskMetricsWithoutRedis:
     """Regressionsschutz: ohne injizierten Redis-Client (Default in
     RiskEngine) darf publish_risk_metrics() ein reines no-op sein."""
 
-    async def test_publish_without_redis_does_not_raise(
-        self, sample_metrics: RiskMetrics
-    ) -> None:
+    async def test_publish_without_redis_does_not_raise(self, sample_metrics: RiskMetrics) -> None:
         await publish_risk_metrics(None, TradingMode.PAPER, sample_metrics)
 
 
@@ -85,9 +83,7 @@ class TestPublishRiskMetrics:
 
 
 class TestPublishRiskMetricsFailSafe:
-    async def test_publish_swallows_redis_errors(
-        self, sample_metrics: RiskMetrics
-    ) -> None:
+    async def test_publish_swallows_redis_errors(self, sample_metrics: RiskMetrics) -> None:
         redis = AsyncMock()
         redis.set = AsyncMock(side_effect=ConnectionError("redis down"))
 
@@ -97,9 +93,7 @@ class TestPublishRiskMetricsFailSafe:
 
 
 class TestReadRiskMetricsFromRedis:
-    async def test_returns_parsed_metrics_when_present(
-        self, fake_redis: AsyncMock
-    ) -> None:
+    async def test_returns_parsed_metrics_when_present(self, fake_redis: AsyncMock) -> None:
         fake_redis.get = AsyncMock(
             return_value=json.dumps({"portfolio_value": "10000.00", "var_95": 0.03})
         )
@@ -108,18 +102,14 @@ class TestReadRiskMetricsFromRedis:
 
         assert result == {"portfolio_value": "10000.00", "var_95": 0.03}
 
-    async def test_returns_none_when_no_metrics_written_yet(
-        self, fake_redis: AsyncMock
-    ) -> None:
+    async def test_returns_none_when_no_metrics_written_yet(self, fake_redis: AsyncMock) -> None:
         fake_redis.get = AsyncMock(return_value=None)
 
         result = await read_risk_metrics_from_redis(fake_redis, TradingMode.PAPER)
 
         assert result is None
 
-    async def test_returns_none_on_redis_error_fail_safe(
-        self, fake_redis: AsyncMock
-    ) -> None:
+    async def test_returns_none_on_redis_error_fail_safe(self, fake_redis: AsyncMock) -> None:
         """Fail-safe: Redis-Fehler -> None ('unbekannt'), kein Absturz.
         Der Aufrufer (Risk-Router) muss dies als 'Status unbekannt'
         behandeln, nicht als 'kein Risiko'."""
@@ -157,16 +147,12 @@ class TestRiskMetricsCacheTenantScoping:
     async def test_none_tenant_key_is_byte_identical_to_pre_scoping_format(
         self, fake_redis: AsyncMock, sample_metrics: RiskMetrics
     ) -> None:
-        await publish_risk_metrics(
-            fake_redis, TradingMode.PAPER, sample_metrics, tenant_id=None
-        )
+        await publish_risk_metrics(fake_redis, TradingMode.PAPER, sample_metrics, tenant_id=None)
 
         key, _payload = fake_redis.set.call_args.args
         assert key == "sgr:risk:metrics:paper"
 
-    async def test_two_tenants_write_to_different_keys(
-        self, sample_metrics: RiskMetrics
-    ) -> None:
+    async def test_two_tenants_write_to_different_keys(self, sample_metrics: RiskMetrics) -> None:
         """Der eigentliche Kern des Audit-Fundes: Gordon und Sumo schreiben
         gleichzeitig (beide PAPER) - keiner ueberschreibt den Wert des
         anderen."""
@@ -176,9 +162,7 @@ class TestRiskMetricsCacheTenantScoping:
         await publish_risk_metrics(
             gordon_redis, TradingMode.PAPER, sample_metrics, tenant_id="gordon"
         )
-        await publish_risk_metrics(
-            sumo_redis, TradingMode.PAPER, sample_metrics, tenant_id="sumo"
-        )
+        await publish_risk_metrics(sumo_redis, TradingMode.PAPER, sample_metrics, tenant_id="sumo")
 
         gordon_key, _ = gordon_redis.set.call_args.args
         sumo_key, _ = sumo_redis.set.call_args.args
@@ -187,9 +171,7 @@ class TestRiskMetricsCacheTenantScoping:
         assert sumo_key == "sgr:risk:metrics:sumo:paper"
 
     async def test_read_respects_tenant_id(self, fake_redis: AsyncMock) -> None:
-        await read_risk_metrics_from_redis(
-            fake_redis, TradingMode.PAPER, tenant_id="gordon-uuid"
-        )
+        await read_risk_metrics_from_redis(fake_redis, TradingMode.PAPER, tenant_id="gordon-uuid")
 
         fake_redis.get.assert_awaited_once_with("sgr:risk:metrics:gordon-uuid:paper")
 

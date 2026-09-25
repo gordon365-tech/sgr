@@ -92,9 +92,7 @@ class TestWorkerMetricsPublisher:
         assert isinstance(snapshot, bytes)
         assert kwargs.get("ex") == 60
 
-    async def test_publish_once_registers_key_in_worker_set(
-        self, fake_redis: AsyncMock
-    ) -> None:
+    async def test_publish_once_registers_key_in_worker_set(self, fake_redis: AsyncMock) -> None:
         publisher = WorkerMetricsPublisher(
             redis_client=fake_redis, tenant_id="gordon-tenant", trading_mode="paper"
         )
@@ -115,9 +113,7 @@ class TestWorkerMetricsPublisher:
         # Lifecycle im Worker niemals unterbrechen.
         await publisher._publish_once()
 
-    async def test_stop_deregisters_key_and_deletes_snapshot(
-        self, fake_redis: AsyncMock
-    ) -> None:
+    async def test_stop_deregisters_key_and_deletes_snapshot(self, fake_redis: AsyncMock) -> None:
         publisher = WorkerMetricsPublisher(
             redis_client=fake_redis, tenant_id="gordon-tenant", trading_mode="paper"
         )
@@ -230,9 +226,7 @@ class TestCollectWorkerMetrics:
 
         assert b"sgr_orders_total 1" in result
 
-    async def test_list_workers_failure_returns_empty_bytes(
-        self, fake_redis: AsyncMock
-    ) -> None:
+    async def test_list_workers_failure_returns_empty_bytes(self, fake_redis: AsyncMock) -> None:
         fake_redis.smembers = AsyncMock(side_effect=ConnectionError("redis down"))
 
         result = await collect_worker_metrics(fake_redis)

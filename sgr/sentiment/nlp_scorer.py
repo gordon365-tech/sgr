@@ -31,7 +31,7 @@ Score-Mapping:
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, cast
 
 from sgr.core.logging import get_logger
 from sgr.sentiment.types import EventCategory
@@ -212,7 +212,12 @@ class SentimentScorer:
 
     def _score_finbert(self, text: str) -> tuple[float, float]:
         """FinBERT scoring via Transformers pipeline."""
-        results = self._pipeline(text)[0]
+        # return_all_scores=True liefert list[list[dict]] mit "label"/"score"
+        # pro Klasse - der transformers-Stub typt den Pipeline-Call jedoch
+        # zu eng, daher hier explizit auf die tatsaechliche Laufzeit-Form
+        # gecastet statt stillschweigend Any/str durchzureichen.
+        raw = cast(list[list[dict[str, Any]]], self._pipeline(text))
+        results = raw[0]
         scores_dict = {r["label"].lower(): r["score"] for r in results}
 
         positive = scores_dict.get("positive", 0.0)

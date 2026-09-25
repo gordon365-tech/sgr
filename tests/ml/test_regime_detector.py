@@ -193,9 +193,7 @@ class TestTrain:
 
     def test_train_swallows_non_import_hmm_training_failure(self) -> None:
         detector = RegimeDetector()
-        with patch.object(
-            RegimeDetector, "_train_hmm", side_effect=RuntimeError("hmm blew up")
-        ):
+        with patch.object(RegimeDetector, "_train_hmm", side_effect=RuntimeError("hmm blew up")):
             # Should not raise - _train_hmm failures are swallowed in train().
             metrics = detector.train(_make_training_set(150))
         assert "accuracy" in metrics
@@ -283,9 +281,7 @@ class TestPredictTrained:
 
         assert prediction.regime is not None
 
-    def test_predict_hmm_exception_is_swallowed(
-        self, trained_detector: RegimeDetector
-    ) -> None:
+    def test_predict_hmm_exception_is_swallowed(self, trained_detector: RegimeDetector) -> None:
         fake_hmm = MagicMock()
         fake_hmm.predict.side_effect = RuntimeError("hmm broken")
         trained_detector._hmm_model = fake_hmm

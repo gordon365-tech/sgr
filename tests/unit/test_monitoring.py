@@ -95,6 +95,7 @@ def make_fake_backtest_result(
         total_slippage="0",
     )
 
+
 # ---------------------------------------------------------------------------
 # metrics.py
 # ---------------------------------------------------------------------------
@@ -328,9 +329,7 @@ class TestSendTelegramAlert:
         monkeypatch.setenv("MONITORING_TELEGRAM_BOT_TOKEN", "dummy-token")
         monkeypatch.setenv("MONITORING_TELEGRAM_CHAT_ID", "12345")
 
-        with patch(
-            "httpx.AsyncClient.post", new=AsyncMock(side_effect=httpx.ConnectError("boom"))
-        ):
+        with patch("httpx.AsyncClient.post", new=AsyncMock(side_effect=httpx.ConnectError("boom"))):
             result = await alerts.send_telegram_alert("test")
         assert result is False
 
@@ -537,7 +536,9 @@ class TestMonitoringEngineCollect:
                     paper_trading_passed=True,
                 ),
                 backtest_result=make_fake_backtest_result(
-                    sharpe_ratio=-1.91, total_return_pct=-1.6, max_drawdown_pct=12.0,
+                    sharpe_ratio=-1.91,
+                    total_return_pct=-1.6,
+                    max_drawdown_pct=12.0,
                     total_trades=120,
                 ),
             )

@@ -1044,9 +1044,7 @@ class TestOrderManagement:
         expected_fees = req.quantity * result.average_fill_price * expected_fee_rate
         assert result.fees == expected_fees
 
-    async def test_simulate_order_without_grid_metadata_uses_taker_fee(
-        self, adapter, monkeypatch
-    ):
+    async def test_simulate_order_without_grid_metadata_uses_taker_fee(self, adapter, monkeypatch):
         """Unveraendertes Verhalten fuer jede direktionale, nicht-Grid-
         Order (kein grid_fill_type in metadata) - Regressionsschutz."""
         install_fake_ccxt(monkeypatch)
@@ -1416,7 +1414,7 @@ class TestErrorMapping:
         banned_until_ms = int(datetime(2026, 9, 16, 5, 0, 0, tzinfo=UTC).timestamp() * 1000)
         exc = ccxt.NetworkError(
             f'binance 418 I\'m a teapot {{"code":-1003,"msg":"Way too many requests; '
-            f'IP(1.2.3.4) banned until {banned_until_ms}. Please use the websocket for '
+            f"IP(1.2.3.4) banned until {banned_until_ms}. Please use the websocket for "
             f'live updates to avoid bans."}}'
         )
         mapped = adapter._map_error(exc)

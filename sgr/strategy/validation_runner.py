@@ -210,9 +210,7 @@ class StrategyValidationRunner:
             Modul-Docstring.
         """
         backtest_passed = report.backtest.is_acceptable
-        walk_forward_passed = (
-            report.walk_forward is not None and report.walk_forward.is_consistent
-        )
+        walk_forward_passed = report.walk_forward is not None and report.walk_forward.is_consistent
 
         return ValidationStatus(
             backtest_passed=backtest_passed,

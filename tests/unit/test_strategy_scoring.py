@@ -120,10 +120,6 @@ class TestRobustness:
             {"net_pnl": "300", "entry_time": "2026-01-02T00:00:00+00:00"},
             {"net_pnl": "300", "entry_time": "2026-01-03T00:00:00+00:00"},
         ]
-        dependent = score_validation(
-            _backtest(trades_list=trades_dependent), _wf()
-        )
-        distributed = score_validation(
-            _backtest(trades_list=trades_distributed), _wf()
-        )
+        dependent = score_validation(_backtest(trades_list=trades_dependent), _wf())
+        distributed = score_validation(_backtest(trades_list=trades_distributed), _wf())
         assert dependent.robustness_score < distributed.robustness_score

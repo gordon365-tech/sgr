@@ -97,9 +97,7 @@ async def get_failed(
 ) -> list[dict[str, Any]]:
     """Symbole ohne geeignete Strategie (NO_VALID_STRATEGY) - fuer die
     im Auftrag geforderte 'failed validations'-Ansicht."""
-    rows = await repos.strategy_symbol_validations.get_best_by_symbol(
-        batch_id=batch_id, limit=5000
-    )
+    rows = await repos.strategy_symbol_validations.get_best_by_symbol(batch_id=batch_id, limit=5000)
     return [r for r in rows if r["status"] == "no_valid_strategy"]
 
 
@@ -112,9 +110,7 @@ async def get_data_quality_failures(
     """Symbole, die schon am Data Quality Gate gescheitert sind
     (INSUFFICIENT_DATA / INVALID_DATA) - wurden nie einer Strategie
     zugeordnet."""
-    rows = await repos.strategy_symbol_validations.get_best_by_symbol(
-        batch_id=batch_id, limit=5000
-    )
+    rows = await repos.strategy_symbol_validations.get_best_by_symbol(batch_id=batch_id, limit=5000)
     return [r for r in rows if r["status"] in ("insufficient_data", "invalid_data")]
 
 

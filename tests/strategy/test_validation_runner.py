@@ -225,9 +225,7 @@ class TestSuccessfulValidation:
         assert entry.validation_status.paper_trading_passed is True
         assert entry.validation_status.live_approved is False
 
-    async def test_validation_stores_backtest_result_on_entry_for_metrics(
-        self, fake_pool
-    ) -> None:
+    async def test_validation_stores_backtest_result_on_entry_for_metrics(self, fake_pool) -> None:
         """
         Schritt 6 (Prometheus/Grafana): StrategyEntry.last_validation_result
         muss nach der Validierung die vollen Backtest-Rohwerte enthalten,
@@ -252,9 +250,7 @@ class TestSuccessfulValidation:
         assert entry.last_validation_result.sharpe_ratio == 1.5
         assert entry.last_validation_result.total_trades == 40
 
-    async def test_failed_validation_still_stores_backtest_result(
-        self, fake_pool
-    ) -> None:
+    async def test_failed_validation_still_stores_backtest_result(self, fake_pool) -> None:
         """Auch bei nicht bestandener Validierung (is_acceptable False)
         sollen die Rohwerte für die Metriken verfügbar bleiben - genau das
         ist der auf dem Server beobachtete, fachlich korrekte Fall
@@ -278,9 +274,7 @@ class TestSuccessfulValidation:
         assert entry.last_validation_result is backtest
         assert entry.last_validation_result.sharpe_ratio == 0.2
 
-    async def test_already_validated_strategy_is_not_rebacktested(
-        self, fake_pool
-    ) -> None:
+    async def test_already_validated_strategy_is_not_rebacktested(self, fake_pool) -> None:
         registry = StrategyRegistry.get()
         registry.register_instance(FakeStrategy("s1"))
         from sgr.strategy.base import ValidationStatus
@@ -347,9 +341,7 @@ class TestFailingGates:
         assert entry.validation_status.backtest_passed is True
         assert entry.validation_status.walk_forward_passed is False
 
-    async def test_missing_walk_forward_result_counts_as_not_passed(
-        self, fake_pool
-    ) -> None:
+    async def test_missing_walk_forward_result_counts_as_not_passed(self, fake_pool) -> None:
         registry = StrategyRegistry.get()
         registry.register_instance(FakeStrategy("s1"))
 
@@ -373,9 +365,7 @@ class TestFailingGates:
 
 
 class TestErrorHandling:
-    async def test_exception_for_one_strategy_does_not_block_others(
-        self, fake_pool
-    ) -> None:
+    async def test_exception_for_one_strategy_does_not_block_others(self, fake_pool) -> None:
         registry = StrategyRegistry.get()
         registry.register_instance(FakeStrategy("broken"))
         registry.register_instance(FakeStrategy("healthy"))
@@ -391,9 +381,7 @@ class TestErrorHandling:
             return good_report
 
         runner = StrategyValidationRunner(exchange_pool=fake_pool)
-        runner._engine.run_full_validation = AsyncMock(
-            side_effect=fake_run_full_validation
-        )
+        runner._engine.run_full_validation = AsyncMock(side_effect=fake_run_full_validation)
 
         summary = await runner.validate_pending_strategies()
 

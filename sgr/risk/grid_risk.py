@@ -319,9 +319,7 @@ class GridRiskEngine:
                     ),
                 )
             elif abs(funding_rate_annualized_pct) > max_annualized_pct * 0.7:
-                warnings.append(
-                    f"Funding Rate {funding_rate_annualized_pct:.1f}% naeher am Limit"
-                )
+                warnings.append(f"Funding Rate {funding_rate_annualized_pct:.1f}% naeher am Limit")
 
         # 8. Volatilitaet
         max_volatility = self._limits.max_volatility_atr_pct
@@ -512,8 +510,7 @@ class GridRiskEngine:
 
         if (
             funding_rate_annualized_pct is not None
-            and abs(funding_rate_annualized_pct)
-            > self._limits.max_funding_cost_pct * 100 * 3 * 365
+            and abs(funding_rate_annualized_pct) > self._limits.max_funding_cost_pct * 100 * 3 * 365
         ):
             violations.append(
                 GridViolation(

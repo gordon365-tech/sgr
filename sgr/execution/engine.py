@@ -135,9 +135,7 @@ class ExecutionEngine:
         # also fail-safe in die sichere Richtung.
         self._leverage_cache: dict[str, Decimal] = {}
 
-    async def execute(
-        self, order: OrderRequest, bypass_kill_switch: bool = False
-    ) -> OrderResult:
+    async def execute(self, order: OrderRequest, bypass_kill_switch: bool = False) -> OrderResult:
         """
         Hauptmethode: OrderRequest → OrderResult.
 
@@ -299,10 +297,7 @@ class ExecutionEngine:
             )
             return self._rejected_result(order, lv_reason or "Live verification gate blocked")
 
-        if (
-            self._live_verification_gate is not None
-            and order.trading_mode == TradingMode.LIVE
-        ):
+        if self._live_verification_gate is not None and order.trading_mode == TradingMode.LIVE:
             grid_id = order.metadata.get("grid_id")
             self._live_verification_gate.record_order_submitted(grid_id=grid_id)
 
@@ -728,9 +723,7 @@ class ExecutionEngine:
             fees=str(result.fees),
         )
 
-        latency_seconds = max(
-            0.0, (datetime.now(tz=UTC) - result.submitted_at).total_seconds()
-        )
+        latency_seconds = max(0.0, (datetime.now(tz=UTC) - result.submitted_at).total_seconds())
         record_order_filled(
             exchange=result.symbol.exchange.value,
             symbol=str(result.symbol),

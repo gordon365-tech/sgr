@@ -270,8 +270,7 @@ def check_capability(
             status=CapabilityStatus.EXCHANGE_CAPABILITY_MISSING,
             capability=capability,
             reason=(
-                f"{exchange.value}/{product_type.value} unterstuetzt nicht: "
-                f"{', '.join(missing)}"
+                f"{exchange.value}/{product_type.value} unterstuetzt nicht: {', '.join(missing)}"
             ),
         )
 

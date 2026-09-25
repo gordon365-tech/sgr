@@ -63,9 +63,7 @@ class TestSetAdminStatus:
 
         assert result is False
 
-    async def test_handles_none_rowcount_as_false(
-        self, mocker: pytest_mock.MockerFixture
-    ) -> None:
+    async def test_handles_none_rowcount_as_false(self, mocker: pytest_mock.MockerFixture) -> None:
         """Manche DBAPI-Treiber liefern rowcount=None statt 0 fuer
         UPDATE-Statements ohne Treffer - muss ebenfalls als 'kein User
         aktualisiert' gewertet werden, nicht als Fehler."""

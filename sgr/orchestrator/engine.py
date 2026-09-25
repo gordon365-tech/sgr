@@ -184,9 +184,7 @@ class TradingOrchestrator:
         #    selbst additiv - siehe strategy/engine.py _publish())
         signal = await self._strategy_engine.process(symbol_key, timeframe, regime)
         if signal is None:
-            return self._result(
-                TradingCycleStatus.NO_SIGNAL, started_at, symbol_key, timeframe
-            )
+            return self._result(TradingCycleStatus.NO_SIGNAL, started_at, symbol_key, timeframe)
 
         # 2. Aktuelle Marktdaten für Risk Engine (Preis + ATR)
         features = await self._feature_store.get_latest(symbol_key, timeframe)

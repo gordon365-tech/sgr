@@ -233,7 +233,7 @@ class PionexAdapter(CCXTBaseAdapter):
     _ccxt_id = "pionex"
 
     # Pionex besitzt kein dediziertes Testnet.
-    _testnet_urls: dict = {}
+    _testnet_urls: dict[str, Any] = {}
 
     def __init__(
         self,

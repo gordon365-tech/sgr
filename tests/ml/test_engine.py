@@ -288,9 +288,7 @@ class TestRun:
         }
         assert result["volatility_ci"].keys() == {"lower", "upper"}
 
-    async def test_run_uses_symbol_override_when_provided(
-        self, registry: StrategyRegistry
-    ) -> None:
+    async def test_run_uses_symbol_override_when_provided(self, registry: StrategyRegistry) -> None:
         engine = MLEngine(registry=registry)
         await engine.initialize()
         engine._vol_forecaster.predict = MagicMock(return_value=_make_vol_forecast())  # type: ignore[method-assign]
@@ -320,9 +318,7 @@ class TestRun:
         await engine.initialize()
         mock_selector = MagicMock()
         mock_selector.is_fitted = True
-        mock_selector.select = MagicMock(
-            return_value=[_make_strategy_score(recommended=False)]
-        )
+        mock_selector.select = MagicMock(return_value=[_make_strategy_score(recommended=False)])
         engine._strategy_selector = mock_selector
         engine._regime_detector.predict = MagicMock(  # type: ignore[method-assign]
             return_value=_make_regime_prediction(confidence=0.3)
@@ -352,9 +348,7 @@ class TestRun:
 
         assert len(result["strategy_scores"]) == 3
 
-    async def test_run_limits_top_regime_features_to_five(
-        self, registry: StrategyRegistry
-    ) -> None:
+    async def test_run_limits_top_regime_features_to_five(self, registry: StrategyRegistry) -> None:
         engine = MLEngine(registry=registry)
         await engine.initialize()
         many_features = {f"f{i}": float(i) for i in range(10)}
@@ -383,9 +377,7 @@ class TestRun:
 
 
 class TestUpdateRegistry:
-    async def test_low_confidence_skips_registry_update(
-        self, registry: StrategyRegistry
-    ) -> None:
+    async def test_low_confidence_skips_registry_update(self, registry: StrategyRegistry) -> None:
         engine = MLEngine(registry=registry)
         await engine.initialize()
         pred = _make_regime_prediction(confidence=0.2)
@@ -448,9 +440,7 @@ class TestUpdateRegistry:
             pred, [_make_strategy_score(name="ghost_strategy", recommended=True)]
         )
 
-    async def test_recommended_and_already_active_is_noop(
-        self, registry: StrategyRegistry
-    ) -> None:
+    async def test_recommended_and_already_active_is_noop(self, registry: StrategyRegistry) -> None:
         engine = MLEngine(registry=registry)
         await engine.initialize()
         entry = registry.get_entry("trend_following_v1")

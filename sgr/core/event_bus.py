@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import asynccontextmanager
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 import orjson
 import redis.asyncio as aioredis
@@ -155,7 +155,7 @@ class EventBus:
     def subscribe(
         self,
         event_class: type[T],
-        handler: HandlerFn,
+        handler: Callable[[T], Coroutine[Any, Any, None]],
         consumer_group: str,
         consumer_name: str,
     ) -> None:
@@ -167,16 +167,23 @@ class EventBus:
         stream = _stream_name(event_type)
         key = f"{stream}:{consumer_group}"
 
+        # Intern als HandlerFn (Callable[[BaseEvent], ...]) gespeichert -
+        # _consume() ruft handler ausschliesslich mit Instanzen von
+        # event_class auf (per Stream-Filterung), Callable-Parametertypen
+        # sind aber kontravariant, daher hier explizit gecastet statt
+        # eines unsound generischen Storage-Typs.
+        generic_handler = cast(HandlerFn, handler)
+
         if key not in self._handlers:
             self._handlers[key] = []
-        self._handlers[key].append(handler)
+        self._handlers[key].append(generic_handler)
 
         # Schedule consumer task
         task = asyncio.create_task(
             self._consume(
                 stream=stream,
                 event_class=event_class,
-                handler=handler,
+                handler=generic_handler,
                 consumer_group=consumer_group,
                 consumer_name=consumer_name,
             ),
@@ -226,7 +233,13 @@ class EventBus:
 
         while self._running:
             try:
-                messages = await self._redis.xreadgroup(
+                # redis-py's XReadGroupResponse-Stub ist ein breiter Union-Typ
+                # (deckt mehrere historische Response-Formate ab); die
+                # tatsaechliche Laufzeit-Form bei binaerem decode_responses=False
+                # ist immer list[(stream_name, list[(message_id, fields)])] -
+                # hier explizit gecastet statt Any/str stillschweigend
+                # durchzureichen.
+                raw_messages = await self._redis.xreadgroup(
                     groupname=consumer_group,
                     consumername=consumer_name,
                     streams={stream: ">"},
@@ -234,8 +247,13 @@ class EventBus:
                     block=1000,  # 1s blocking read
                 )
 
-                if not messages:
+                if not raw_messages:
                     continue
+
+                messages = cast(
+                    "list[tuple[bytes, list[tuple[bytes, dict[bytes, bytes]]]]]",
+                    raw_messages,
+                )
 
                 for _stream_name_bytes, stream_messages in messages:
                     for message_id, fields in stream_messages:

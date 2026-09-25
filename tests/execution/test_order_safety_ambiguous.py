@@ -3,7 +3,7 @@ Tests für Order Safety: Ambiguous Submission Handling
 
 Testszenarios:
 1. Exchange Timeout nach Submission (ambiguous)
-2. Connection Reset nach Submission  
+2. Connection Reset nach Submission
 3. HTTP Response Loss
 4. Normal Rejection
 5. Normal Success
@@ -78,9 +78,7 @@ class TestAmbiguousOrderSubmission:
     """Orders die ambiguous nach Submission hinterlassen wurden."""
 
     @pytest.mark.asyncio
-    async def test_exchange_timeout_no_blind_retry(
-        self, order_request: OrderRequest
-    ) -> None:
+    async def test_exchange_timeout_no_blind_retry(self, order_request: OrderRequest) -> None:
         """Exchange timeout nach Submission wird nicht blind resubmittet."""
         pool = MagicMock()
         adapter = _make_default_adapter()
@@ -97,9 +95,7 @@ class TestAmbiguousOrderSubmission:
         assert adapter.place_order.await_count == 1
 
     @pytest.mark.asyncio
-    async def test_connection_reset_no_blind_retry(
-        self, order_request: OrderRequest
-    ) -> None:
+    async def test_connection_reset_no_blind_retry(self, order_request: OrderRequest) -> None:
         """Connection reset wird nicht blind resubmittet."""
         pool = MagicMock()
         adapter = _make_default_adapter()
@@ -143,9 +139,7 @@ class TestAmbiguousOrderSubmission:
         assert "Insufficient balance" in result.raw_response.get("error", "")
 
     @pytest.mark.asyncio
-    async def test_successful_submission_filled(
-        self, order_request: OrderRequest
-    ) -> None:
+    async def test_successful_submission_filled(self, order_request: OrderRequest) -> None:
         """Normale Success-Submission wird sofort gefüllt (Paper Mode)."""
         pool = MagicMock()
         adapter = _make_default_adapter()

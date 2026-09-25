@@ -67,7 +67,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sgr.core.logging import get_logger
 from sgr.core.types import ExchangeID
@@ -165,8 +165,10 @@ def classify_asset_status(
 def _safe_int(value: object) -> int | None:
     if value is None:
         return None
+    if not isinstance(value, (int, float, str)):
+        return None
     try:
-        return int(value)  # type: ignore[arg-type]
+        return int(value)
     except (TypeError, ValueError):
         return None
 
@@ -180,7 +182,9 @@ def _safe_decimal(value: object) -> Decimal | None:
         return None
 
 
-def pionex_symbol_to_market_info(raw: dict, *, discovered_at: datetime) -> MarketInfo | None:
+def pionex_symbol_to_market_info(
+    raw: dict[str, Any], *, discovered_at: datetime
+) -> MarketInfo | None:
     """
     Uebersetzt einen einzelnen Eintrag aus PionexClient.get_symbols()
     (siehe sgr/exchanges/pionex_client.py) in MarketInfo. Gibt None
@@ -226,7 +230,7 @@ async def discover_pionex_markets() -> list[MarketInfo]:
     """
     from sgr.exchanges.pionex_client import PionexClient
 
-    def _fetch() -> list[dict]:
+    def _fetch() -> list[dict[str, Any]]:
         with PionexClient() as client:
             return client.get_symbols()
 
@@ -332,7 +336,7 @@ class AssetUniverseEngine:
         self._discovery_interval = discovery_interval_seconds
         self._republish_interval = republish_interval_seconds
         self._on_discovery = on_discovery
-        self._task: asyncio.Task | None = None
+        self._task: asyncio.Task[Any] | None = None
         self._running = False
         self._last_snapshot: list[AssetUniverseEntry] = []
         self._last_exportable: list[AssetUniverseEntry] = []
@@ -341,7 +345,7 @@ class AssetUniverseEngine:
         # Einzelfeld, weil ein neuer Discovery-Zyklus theoretisch starten
         # kann, bevor der vorherige on_discovery-Task (Feed-Reconciliation
         # fuer hunderte Symbole) fertig ist.
-        self._background_tasks: set[asyncio.Task] = set()
+        self._background_tasks: set[asyncio.Task[Any]] = set()
 
     @property
     def last_snapshot(self) -> list[AssetUniverseEntry]:

@@ -64,9 +64,7 @@ class TestHWMManagement:
         cached = await engine.get_hwm("user-1", Decimal("0"))
         assert cached.current_hwm == Decimal("12000")
 
-    async def test_update_hwm_noop_when_new_value_lower(
-        self, engine: PerformanceFeeEngine
-    ) -> None:
+    async def test_update_hwm_noop_when_new_value_lower(self, engine: PerformanceFeeEngine) -> None:
         await engine.get_hwm("user-1", Decimal("10000"))
 
         await engine.update_hwm("user-1", Decimal("8000"))
@@ -159,9 +157,7 @@ class TestCalculateFee:
 
         assert calc.fee_amount == Decimal("200.00")  # 10% of 2000
 
-    def test_calculate_fee_computes_growth_percentage(
-        self, engine: PerformanceFeeEngine
-    ) -> None:
+    def test_calculate_fee_computes_growth_percentage(self, engine: PerformanceFeeEngine) -> None:
         start, end = self._period()
         hwm = HighWaterMark(user_id="user-1", current_hwm=Decimal("10000"))
 
@@ -337,9 +333,7 @@ class TestGeneratePerformanceReport:
         assert report["fee_periods"][0]["fee_amount"] == "100.00"
         assert report["fee_periods"][0]["status"] == FeeStatus.PAID.value
 
-    def test_report_with_no_data_returns_zero_summary(
-        self, engine: PerformanceFeeEngine
-    ) -> None:
+    def test_report_with_no_data_returns_zero_summary(self, engine: PerformanceFeeEngine) -> None:
         report = engine.generate_performance_report("user-1", [], [])
 
         assert report["summary"]["total_fees_paid_usdt"] == "0"

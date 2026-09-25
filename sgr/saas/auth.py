@@ -21,7 +21,7 @@ Security Entscheidungen:
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from sgr.core.config import get_config
 from sgr.core.logging import audit_log, get_logger
@@ -49,7 +49,7 @@ class AuthService:
             from passlib.context import CryptContext
 
             ctx = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=12)
-            return ctx.hash(password)
+            return cast(str, ctx.hash(password))
         except ImportError:
             raise RuntimeError("passlib not installed: pip install passlib[bcrypt]") from None
 
@@ -59,7 +59,7 @@ class AuthService:
             from passlib.context import CryptContext
 
             ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
-            return ctx.verify(plain, hashed)
+            return cast(bool, ctx.verify(plain, hashed))
         except ImportError:
             return False
         except Exception:
@@ -112,10 +112,13 @@ class AuthService:
         if extra_claims:
             claims.update(extra_claims)
 
-        return jwt.encode(
-            claims,
-            self._config.api.secret_key.get_secret_value(),
-            algorithm=self._config.api.algorithm,
+        return cast(
+            str,
+            jwt.encode(
+                claims,
+                self._config.api.secret_key.get_secret_value(),
+                algorithm=self._config.api.algorithm,
+            ),
         )
 
     def create_refresh_token(self, user_id: str) -> str:
@@ -133,10 +136,13 @@ class AuthService:
             "type": "refresh",
         }
 
-        return jwt.encode(
-            claims,
-            self._config.api.secret_key.get_secret_value(),
-            algorithm=self._config.api.algorithm,
+        return cast(
+            str,
+            jwt.encode(
+                claims,
+                self._config.api.secret_key.get_secret_value(),
+                algorithm=self._config.api.algorithm,
+            ),
         )
 
     def decode_token(self, token: str) -> dict[str, Any]:
@@ -155,7 +161,7 @@ class AuthService:
                 self._config.api.secret_key.get_secret_value(),
                 algorithms=[self._config.api.algorithm],
             )
-            return payload
+            return cast(dict[str, Any], payload)
         except JWTError as e:
             raise ValueError(f"Invalid token: {e}") from e
 
@@ -335,9 +341,7 @@ class AuthService:
                 raise ValueError("Invalid 2FA code")
 
         trading_mode = TradingMode(user["trading_mode"])
-        access_token = self.create_access_token(
-            user["id"], trading_mode, is_admin=user["is_admin"]
-        )
+        access_token = self.create_access_token(user["id"], trading_mode, is_admin=user["is_admin"])
         refresh_token = self.create_refresh_token(user["id"])
 
         await repos.users.update_last_login(user["id"])

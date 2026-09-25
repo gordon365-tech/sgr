@@ -253,6 +253,7 @@ def record_live_verification_state(
         approved_by=approved_by, tenant=tenant_id
     ).set(daily_loss_budget_remaining_usd)
 
+
 # Counter: Risk checks performed
 risk_checks_total = Counter(
     "sgr_risk_checks_total",

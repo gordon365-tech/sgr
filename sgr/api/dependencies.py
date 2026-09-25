@@ -154,11 +154,7 @@ async def require_live_2fa(
             )
 
         db_user = await repos.users.get_by_id(user.user_id)
-        if (
-            db_user is None
-            or not db_user.get("is_2fa_enabled")
-            or not db_user.get("totp_secret")
-        ):
+        if db_user is None or not db_user.get("is_2fa_enabled") or not db_user.get("totp_secret"):
             log.warning("live_trading.2fa_not_configured", user_id=user.user_id)
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

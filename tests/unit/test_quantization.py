@@ -77,16 +77,12 @@ class TestQuantizePriceTickSizes:
 
     def test_btc_usdt_tick_0_1_buy_rounds_down(self) -> None:
         """BTC/USDT: realistische Binance-Futures-Tick-Size 0.10 (precision=1)."""
-        price, reason = quantize_price(
-            Decimal("65432.567"), Side.BUY, _limits(price_precision=1)
-        )
+        price, reason = quantize_price(Decimal("65432.567"), Side.BUY, _limits(price_precision=1))
         assert reason is None
         assert price == Decimal("65432.5")
 
     def test_btc_usdt_tick_0_1_sell_rounds_up(self) -> None:
-        price, reason = quantize_price(
-            Decimal("65432.567"), Side.SELL, _limits(price_precision=1)
-        )
+        price, reason = quantize_price(Decimal("65432.567"), Side.SELL, _limits(price_precision=1))
         assert reason is None
         assert price == Decimal("65432.6")
 
@@ -132,9 +128,7 @@ class TestQuantizePriceTickSizes:
         Tick-Size liegt, wird abgelehnt (reason gesetzt), nicht als 0
         durchgereicht - Aufrufer darf niemals eine Order mit Preis 0
         senden."""
-        price, reason = quantize_price(
-            Decimal("0.000000001"), Side.BUY, _limits(price_precision=8)
-        )
+        price, reason = quantize_price(Decimal("0.000000001"), Side.BUY, _limits(price_precision=8))
         assert price == Decimal("0")
         assert reason is not None
 
@@ -159,9 +153,7 @@ class TestQuantizePriceTickSizes:
         assert "maximum" in reason
 
     def test_price_already_on_tick_unchanged(self) -> None:
-        price, reason = quantize_price(
-            Decimal("100.50"), Side.BUY, _limits(price_precision=2)
-        )
+        price, reason = quantize_price(Decimal("100.50"), Side.BUY, _limits(price_precision=2))
         assert reason is None
         assert price == Decimal("100.50")
 

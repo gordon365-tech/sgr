@@ -22,7 +22,7 @@ WICHTIG - Aktivieren/Deaktivieren (aktuelle Einschränkung):
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -40,7 +40,7 @@ class StrategyStatusResponse(BaseModel):
     is_validated: bool
     supported_regimes: list[str]
     deactivation_reason: str | None
-    performance: dict | None
+    performance: dict[str, Any] | None
 
 
 @router.get("/", response_model=list[StrategyStatusResponse])
@@ -82,7 +82,7 @@ async def activate_strategy(
     name: str,
     repos: Annotated[Repositories, Depends(get_repos)],
     user: Annotated[TokenData, Depends(require_admin)],
-) -> dict:
+) -> dict[str, Any]:
     """
     Strategie aktivieren (Admin only).
 
@@ -111,7 +111,7 @@ async def deactivate_strategy(
     user: Annotated[TokenData, Depends(require_auth)],
     repos: Annotated[Repositories, Depends(get_repos)],
     reason: str = "Manual deactivation",
-) -> dict:
+) -> dict[str, Any]:
     """Strategie deaktivieren.
 
     Bewusst require_auth statt require_admin: Deaktivieren ist die

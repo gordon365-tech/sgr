@@ -31,9 +31,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sgr.core.types import MarketRegime, SignalDirection
+from sgr.core.types import MarketRegime, Signal, SignalDirection
 from sgr.market_data.types import MarketContext
-from sgr.strategy.base import BaseStrategy, Signal, StrategyParameters
+from sgr.strategy.base import BaseStrategy, StrategyParameters
 from sgr.strategy.regime_classifier import HIGH_VOLATILITY_ATR_PCT
 from sgr.strategy.registry import StrategyRegistry
 

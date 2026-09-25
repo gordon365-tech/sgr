@@ -162,9 +162,7 @@ class TestGateChecks:
         gate = LiveVerificationGate(_profile(max_loss_usd=Decimal("10")))
         gate.record_realized_loss(Decimal("10"))
 
-        allowed, reason = gate.check_order_allowed(
-            notional_usd=Decimal("5"), leverage=Decimal("1")
-        )
+        allowed, reason = gate.check_order_allowed(notional_usd=Decimal("5"), leverage=Decimal("1"))
 
         assert allowed is False
         assert gate.state.deactivated is True
@@ -339,8 +337,6 @@ class TestObservabilityMetrics:
     def test_no_secrets_in_any_label(self) -> None:
         """approved_by ist eine vom Operator gewaehlte Kennung, niemals
         ein Secret - dieser Test dokumentiert die Erwartung explizit."""
-        gate = LiveVerificationGate(
-            _profile(approved_by="operator:gordon-verification-run-1")
-        )
+        gate = LiveVerificationGate(_profile(approved_by="operator:gordon-verification-run-1"))
         assert "key" not in gate.state.profile.approved_by.lower()
         assert "secret" not in gate.state.profile.approved_by.lower()

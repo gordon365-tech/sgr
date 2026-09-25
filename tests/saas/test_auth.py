@@ -51,9 +51,7 @@ class TestPassword:
     def test_verify_password_returns_false_on_malformed_hash(self, auth: AuthService) -> None:
         assert auth.verify_password("anything", "not-a-real-hash") is False
 
-    def test_validate_password_strength_accepts_strong_password(
-        self, auth: AuthService
-    ) -> None:
+    def test_validate_password_strength_accepts_strong_password(self, auth: AuthService) -> None:
         errors = auth.validate_password_strength("Str0ng!Passw0rd")
         assert errors == []
 
@@ -61,15 +59,11 @@ class TestPassword:
         errors = auth.validate_password_strength("Sh0rt!")
         assert any("12 characters" in e for e in errors)
 
-    def test_validate_password_strength_flags_missing_uppercase(
-        self, auth: AuthService
-    ) -> None:
+    def test_validate_password_strength_flags_missing_uppercase(self, auth: AuthService) -> None:
         errors = auth.validate_password_strength("lowercase123!!!!")
         assert any("uppercase" in e for e in errors)
 
-    def test_validate_password_strength_flags_missing_lowercase(
-        self, auth: AuthService
-    ) -> None:
+    def test_validate_password_strength_flags_missing_lowercase(self, auth: AuthService) -> None:
         errors = auth.validate_password_strength("UPPERCASE123!!!!")
         assert any("lowercase" in e for e in errors)
 
@@ -77,9 +71,7 @@ class TestPassword:
         errors = auth.validate_password_strength("NoDigitsHere!!!!")
         assert any("digit" in e for e in errors)
 
-    def test_validate_password_strength_flags_missing_special_char(
-        self, auth: AuthService
-    ) -> None:
+    def test_validate_password_strength_flags_missing_special_char(self, auth: AuthService) -> None:
         errors = auth.validate_password_strength("NoSpecialChar123")
         assert any("special character" in e for e in errors)
 
@@ -347,9 +339,7 @@ class TestLogin:
         hashed = auth.hash_password("CorrectPass123!")
         repos = MagicMock()
         repos.users.get_by_email = AsyncMock(
-            return_value=_make_user(
-                hashed_password=hashed, is_2fa_enabled=True, totp_secret=""
-            )
+            return_value=_make_user(hashed_password=hashed, is_2fa_enabled=True, totp_secret="")
         )
 
         with patch("sgr.core.repositories.get_repositories", return_value=repos):
@@ -368,9 +358,7 @@ class TestLogin:
 
         with patch("sgr.core.repositories.get_repositories", return_value=repos):
             with pytest.raises(ValueError, match="Invalid 2FA code"):
-                await auth.login(
-                    "trader@example.com", "CorrectPass123!", totp_code="000000"
-                )
+                await auth.login("trader@example.com", "CorrectPass123!", totp_code="000000")
 
     async def test_login_success_with_valid_totp_code(self, auth: AuthService) -> None:
         import pyotp
@@ -389,9 +377,7 @@ class TestLogin:
         repos.users.update_last_login = AsyncMock()
 
         with patch("sgr.core.repositories.get_repositories", return_value=repos):
-            result = await auth.login(
-                "trader@example.com", "CorrectPass123!", totp_code=code
-            )
+            result = await auth.login("trader@example.com", "CorrectPass123!", totp_code=code)
 
         assert result["user_id"] == "user-1"
 

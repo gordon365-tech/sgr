@@ -278,9 +278,7 @@ class TestWsRisk:
 
         with (
             patch("sgr.api.dependencies._decode_token", return_value=self._TOKEN_DATA),
-            patch(
-                "sgr.api.routers.websocket.get_redis_client_or_none", return_value=None
-            ),
+            patch("sgr.api.routers.websocket.get_redis_client_or_none", return_value=None),
         ):
             await ws_router.ws_risk(fake_ws, request, token="valid")
 
@@ -334,9 +332,7 @@ class TestWsRisk:
         assert msg["data"]["stale"] is False
         # tenant_id aus dem Token muss an beide Redis-Reads durchgereicht
         # werden - der zentrale Punkt dieses Audits.
-        mock_metrics.assert_awaited_with(
-            redis_client, TradingMode.PAPER, tenant_id="tenant-abc"
-        )
+        mock_metrics.assert_awaited_with(redis_client, TradingMode.PAPER, tenant_id="tenant-abc")
         mock_ks.assert_awaited_with(redis_client, TradingMode.PAPER, tenant_id="tenant-abc")
 
     async def test_stale_when_no_metrics_written_yet(self):

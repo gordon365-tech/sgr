@@ -765,9 +765,7 @@ class TestPortfolioEngineShortCashAccounting:
         )
         await engine.on_order_filled(short_open)
 
-        buyback = _make_order_result(
-            symbol=sym, qty=open_qty, price=Decimal("48000"), side="buy"
-        )
+        buyback = _make_order_result(symbol=sym, qty=open_qty, price=Decimal("48000"), side="buy")
         await engine.on_order_filled(buyback)
 
         net_pnl = Decimal(engine.trade_history[0]["net_pnl"])
@@ -816,9 +814,7 @@ class TestPortfolioEngineShortCashAccounting:
             await engine.on_order_filled(close_result)
 
             cumulative_net_pnl += Decimal(engine.trade_history[-1]["net_pnl"])
-            assert engine.cash == pytest.approx(
-                float(initial + cumulative_net_pnl), rel=1e-9
-            )
+            assert engine.cash == pytest.approx(float(initial + cumulative_net_pnl), rel=1e-9)
 
 
 # ===========================================================================

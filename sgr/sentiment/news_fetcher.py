@@ -171,6 +171,10 @@ class NewsFetcher:
         """Holt News von CryptoPanic API."""
         if not self._session:
             return []
+        # Aufrufer (fetch_all) ruft dies nur bei gesetztem Key auf - hier
+        # trotzdem explizit geprueft statt implizit angenommen.
+        if not self._cryptopanic_key:
+            return []
 
         params = {
             "auth_token": self._cryptopanic_key,
@@ -272,7 +276,7 @@ class NewsFetcher:
                     link_elem = item.find("{http://www.w3.org/2005/Atom}link")
                 url = ""
                 if link_elem is not None:
-                    url = link_elem.text or link_elem.get("href", "")
+                    url = link_elem.text or link_elem.get("href") or ""
 
                 # Datum
                 date_elem = item.find("pubDate")

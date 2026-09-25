@@ -134,9 +134,7 @@ select = [
     "B",    # flake8-bugbear (z. B. bare except)
 ]
 ignore = [
-    "ANN101", # Fehlendes 'self' Typ-Annotation in Methoden (veraltet)
-    "ANN102", # Fehlendes 'cls' Typ-Annotation in Classmethods
-	"ANN401", # Erlaubt die explizite Nutzung von 'Any' (wichtig für Middleware/Dekoratoren)
+    "ANN401", # Erlaubt die explizite Nutzung von 'Any' (wichtig für Middleware/Dekoratoren)
 ]
 
 [tool.ruff.lint.isort]

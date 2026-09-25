@@ -16,6 +16,7 @@ gebundenem Kapital besteht die Pruefung NICHT.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from sgr.backtesting.grid_simulator import GridBacktestRunResult
 from sgr.backtesting.types import BacktestResult
@@ -107,7 +108,7 @@ def compute_grid_edge_metrics(
     )
 
 
-def _compute_edge_stability(trades: list) -> float:
+def _compute_edge_stability(trades: list[Any]) -> float:
     """
     Grobe Stabilitaets-Heuristik: teilt die Trade-Sequenz in 4 gleich
     grosse Segmente und misst, in wie vielen Segmenten der net_pnl

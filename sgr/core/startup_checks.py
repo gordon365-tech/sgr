@@ -160,9 +160,7 @@ class StartupSafetyChecker:
         Duplikat, andere Zustaendigkeit (Fail-Safe-Sync statt Fail-Fast-
         Gate).
         """
-        kill_switch = get_kill_switch(
-            self._config.trading_mode, tenant_id=self._config.tenant_id
-        )
+        kill_switch = get_kill_switch(self._config.trading_mode, tenant_id=self._config.tenant_id)
         if kill_switch.is_active:
             return StartupCheckResult(
                 name="kill_switch_not_preactivated",
@@ -188,9 +186,7 @@ class StartupSafetyChecker:
         beim ersten Exchange-Connect-Versuch mitten im Boot.
         """
         try:
-            self._config.credentials.get_credentials(
-                ExchangeID.PIONEX.value, TradingMode.LIVE
-            )
+            self._config.credentials.get_credentials(ExchangeID.PIONEX.value, TradingMode.LIVE)
         except ValueError as e:
             return StartupCheckResult(
                 name="live_credentials_present",

@@ -342,9 +342,7 @@ async def optimize_strategy_parameters(
         candidates_tried=len(candidates),
         best_sharpe=round(best.sharpe_ratio, 3),
         best_overrides=best.overrides,
-        median_candidate_sharpe=round(
-            statistics.median([c.sharpe_ratio for c in qualifying]), 3
-        ),
+        median_candidate_sharpe=round(statistics.median([c.sharpe_ratio for c in qualifying]), 3),
     )
 
     return OptimizationResult(

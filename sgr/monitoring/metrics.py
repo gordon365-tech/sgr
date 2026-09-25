@@ -184,9 +184,7 @@ class SGRMetrics:
         # Trading-Vorgabe "nicht unnoetig hochdimensioniert") - Detail
         # auf Positionsebene liefert bereits sgr.position.unrealized_pnl_usd
         # fuer offene Positionen.
-        self.realized_pnl = gauge(
-            "sgr.trading.realized_pnl_usd", "Cumulative realized profit/loss"
-        )
+        self.realized_pnl = gauge("sgr.trading.realized_pnl_usd", "Cumulative realized profit/loss")
 
         # Exit-Grund pro geschlossenem Trade (siehe ExitReason,
         # sgr/core/types.py) - vorher nicht sichtbar, ob ein Trade durch

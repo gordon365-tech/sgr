@@ -215,9 +215,7 @@ async def discover_binance_universe(min_status_rank: str = "tradable") -> list[s
                 price_precision=(
                     int(price_precision_raw) if price_precision_raw is not None else None
                 ),
-                min_amount=(
-                    Decimal(str(min_amount_raw)) if min_amount_raw is not None else None
-                ),
+                min_amount=(Decimal(str(min_amount_raw)) if min_amount_raw is not None else None),
                 min_notional=(
                     Decimal(str(min_notional_raw)) if min_notional_raw is not None else None
                 ),
@@ -514,7 +512,10 @@ class SymbolStrategyValidationRunner:
                 run_end = datetime.fromisoformat(opt_result.validation_window[1])
                 trial_name = f"{strategy.name}__optimized_{uuid4().hex[:6]}"
                 trial_instance = build_trial_strategy(
-                    type(strategy), type(strategy._params), opt_result.best_overrides, trial_name  # noqa: SLF001
+                    type(strategy),
+                    type(strategy._params),
+                    opt_result.best_overrides,
+                    trial_name,  # noqa: SLF001
                 )
                 registry.register_instance(trial_instance)
                 run_strategy_names = [trial_name]

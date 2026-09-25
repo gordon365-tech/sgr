@@ -416,12 +416,8 @@ class RiskEngine:
         # <= max_total_exposure, dynamisch aus der AKTUELLEN Equity
         # (portfolio_value), nicht aus einem einmalig fixierten Betrag.
         if self._limits.max_total_exposure_pct is not None and portfolio_value > 0:
-            max_total_exposure = portfolio_value * Decimal(
-                str(self._limits.max_total_exposure_pct)
-            )
-            existing_exposure = sum(
-                (p.notional_value for p in open_positions), Decimal("0")
-            )
+            max_total_exposure = portfolio_value * Decimal(str(self._limits.max_total_exposure_pct))
+            existing_exposure = sum((p.notional_value for p in open_positions), Decimal("0"))
             prospective_exposure = qty * current_price
             if existing_exposure + prospective_exposure > max_total_exposure:
                 return self._reject(

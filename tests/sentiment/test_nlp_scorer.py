@@ -236,8 +236,7 @@ class TestScoreKeyword:
 class TestClassifyEvent:
     def test_classifies_crisis_pattern(self, scorer: SentimentScorer) -> None:
         assert (
-            scorer.classify_event("Protocol exploit drains millions", 0.0)
-            == EventCategory.CRISIS
+            scorer.classify_event("Protocol exploit drains millions", 0.0) == EventCategory.CRISIS
         )
 
     def test_classifies_flash_crash_as_crisis(self, scorer: SentimentScorer) -> None:
@@ -264,21 +263,16 @@ class TestClassifyEvent:
         )
 
     def test_classifies_bullish_from_score(self, scorer: SentimentScorer) -> None:
-        assert (
-            scorer.classify_event("Some generic positive headline", 0.5)
-            == EventCategory.BULLISH
-        )
+        assert scorer.classify_event("Some generic positive headline", 0.5) == EventCategory.BULLISH
 
     def test_classifies_bearish_from_score(self, scorer: SentimentScorer) -> None:
         assert (
-            scorer.classify_event("Some generic negative headline", -0.5)
-            == EventCategory.BEARISH
+            scorer.classify_event("Some generic negative headline", -0.5) == EventCategory.BEARISH
         )
 
     def test_classifies_neutral_from_score(self, scorer: SentimentScorer) -> None:
         assert (
-            scorer.classify_event("Some generic ambiguous headline", 0.1)
-            == EventCategory.NEUTRAL
+            scorer.classify_event("Some generic ambiguous headline", 0.1) == EventCategory.NEUTRAL
         )
 
     def test_crisis_pattern_takes_priority_over_macro(self, scorer: SentimentScorer) -> None:

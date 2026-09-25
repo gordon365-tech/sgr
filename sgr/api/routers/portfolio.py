@@ -16,7 +16,7 @@ bekannt" melden als eine erfundene/leere Antwort mit Erfolg quittieren).
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -149,7 +149,7 @@ async def get_pnl(
     repos: Annotated[Repositories, Depends(get_repos)],
     trading_mode: Annotated[TradingMode, Depends(get_trading_mode)],
     user: Annotated[TokenData, Depends(require_auth)],
-) -> dict:
+) -> dict[str, Any]:
     """
     PnL-Zusammenfassung. unrealized_pnl aus dem letzten Portfolio-Snapshot,
     realized-seitige Werte aus der vollständigen Trade-History.

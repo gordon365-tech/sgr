@@ -23,7 +23,7 @@ Architektur-Hintergrund (sgr-api Read-Only-Zielarchitektur):
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -45,7 +45,7 @@ class TriggerCycleRequest(BaseModel):
 async def trigger_cycle(
     body: TriggerCycleRequest,
     user: Annotated[TokenData, Depends(require_admin)],
-) -> dict:
+) -> dict[str, Any]:
     """
     Löst manuell einen einzelnen Trading-Zyklus aus.
 

@@ -64,12 +64,14 @@ class HealthResponse(BaseModel):
 
 class LivenessResponse(BaseModel):
     """Liveness Probe: Ist Prozess noch aktiv?"""
+
     status: str = Field(default="alive")
     timestamp: str = Field(default_factory=lambda: datetime.now(tz=UTC).isoformat())
 
 
 class ReadinessResponse(BaseModel):
     """Readiness Probe: Kann Traffic akzeptiert werden?"""
+
     status: str
     db_connected: bool
     redis_connected: bool
@@ -80,6 +82,7 @@ class ReadinessResponse(BaseModel):
 
 class TradingHealthResponse(BaseModel):
     """Trading Health: Ist es sicher zu traden?"""
+
     status: str
     trading_enabled: bool
     kill_switch_active: bool | None
@@ -208,9 +211,7 @@ async def health_trading(request: Request) -> Response:
         and preflight_available != "unknown"
         and risk_engine_available != "unknown"
     )
-    trading_enabled = (
-        kill_switch_active is False and recovery_complete and signals_known
-    )
+    trading_enabled = kill_switch_active is False and recovery_complete and signals_known
 
     status = "healthy" if trading_enabled else "degraded"
     http_status = 200 if trading_enabled else 503

@@ -132,8 +132,7 @@ class TestSave:
         mock_redis.publish.assert_awaited_once()
         channel_arg, payload_arg = mock_redis.publish.call_args[0]
         expected_channel = (
-            f"feature_update:{features.symbol.exchange.value}:"
-            f"{features.symbol.ccxt_symbol}:1h"
+            f"feature_update:{features.symbol.exchange.value}:{features.symbol.ccxt_symbol}:1h"
         )
         assert channel_arg == expected_channel
         assert payload_arg == features.latest_key.encode()
@@ -240,9 +239,7 @@ class TestGetAt:
         mock_redis.get = AsyncMock(return_value=b"garbage")
         store._redis = mock_redis
 
-        result = await store.get_at(
-            "binance:BTC/USDT", "1h", datetime(2026, 1, 1, tzinfo=UTC)
-        )
+        result = await store.get_at("binance:BTC/USDT", "1h", datetime(2026, 1, 1, tzinfo=UTC))
 
         assert result is None
 
@@ -261,9 +258,7 @@ class TestGetManyLatest:
         )
 
         mock_redis = AsyncMock()
-        mock_redis.mget = AsyncMock(
-            return_value=[good_payload, None, b"corrupt-data"]
-        )
+        mock_redis.mget = AsyncMock(return_value=[good_payload, None, b"corrupt-data"])
         store._redis = mock_redis
 
         symbol_keys = ["binance:BTC/USDT", "binance:ETH/USDT", "binance:SOL/USDT"]

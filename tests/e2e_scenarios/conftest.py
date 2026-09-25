@@ -52,13 +52,16 @@ from typing import Any
 
 import pytest
 
-E2E_TEST_TENANT_ID = "61230c37-1cd2-4564-ab12-a0a1180f0cb2"  # test_e5ab3f39@sgr.test, bereits vorhanden
+E2E_TEST_TENANT_ID = (
+    "61230c37-1cd2-4564-ab12-a0a1180f0cb2"  # test_e5ab3f39@sgr.test, bereits vorhanden
+)
 
 from sgr.core.config import get_config  # noqa: E402
 from sgr.core.types import (  # noqa: E402
     AssetClass,
     ExchangeID,
-    MarketRegime,
+    Position,
+    PositionSide,
     Symbol,
     TradingMode,
 )
@@ -83,7 +86,9 @@ from sgr.strategy.trend_following import TrendFollowingStrategy  # noqa: E402
 # Binance) - deckt bei jedem Lauf implizit den futures_mode-Root-Cause-
 # Fix vom 2026-09-17 mit ab (dieses exakte Symbol schlug vor dem Fix mit
 # SymbolNotFoundError fehl).
-E2E_SYMBOL = Symbol(base="HFT", quote="USDT", exchange=ExchangeID.BINANCE, asset_class=AssetClass.FUTURES)
+E2E_SYMBOL = Symbol(
+    base="HFT", quote="USDT", exchange=ExchangeID.BINANCE, asset_class=AssetClass.FUTURES
+)
 E2E_TIMEFRAME = "1h"
 E2E_SYMBOL_KEY = f"{ExchangeID.BINANCE.value}:{E2E_SYMBOL.ccxt_symbol}"
 
@@ -382,7 +387,7 @@ def build_feature_set(*, close: Decimal, direction: str) -> FeatureSet:
     )
 
 
-def build_synthetic_position(index: int) -> "Position":
+def build_synthetic_position(index: int) -> Position:
     """
     Fuer test_position_limit_rejection: identisches Muster wie das
     bestehende tests/integration/test_orchestrator_pipeline.py::
@@ -392,8 +397,6 @@ def build_synthetic_position(index: int) -> "Position":
     Pruefung zu testen, statt das bereits in Phase 1 bewiesene
     Order-Fill-Mechanismus RISK_MAX_OPEN_POSITIONS-mal echt zu wiederholen.
     """
-    from sgr.core.types import Position, PositionSide
-
     now = datetime.now(tz=UTC)
     sym = Symbol(base=f"ALT{index}", quote="USDT", exchange=ExchangeID.BINANCE)
     return Position(

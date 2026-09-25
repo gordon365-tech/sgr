@@ -795,9 +795,7 @@ class TestLoadPublicHistory:
 
         import ccxt.async_support as ccxt_async
 
-        monkeypatch.setattr(
-            ccxt_async, "not_a_real_exchange_xyz", None, raising=False
-        )
+        monkeypatch.setattr(ccxt_async, "not_a_real_exchange_xyz", None, raising=False)
         monkeypatch.delattr(ccxt_async, "not_a_real_exchange_xyz", raising=False)
 
         loader = BacktestDataLoader()
@@ -829,9 +827,7 @@ class TestLoadPublicHistory:
         assert first == second
         holder["instance"].load_markets.assert_awaited_once()
 
-    async def test_futures_only_symbol_falls_back_to_settle_suffixed_key(
-        self, monkeypatch
-    ) -> None:
+    async def test_futures_only_symbol_falls_back_to_settle_suffixed_key(self, monkeypatch) -> None:
         """Live-Fund (Autonomous-Strategy-Universe-Rollout): fuer
         Symbole ohne Spot-Listing (z.B. "1000BONK/USDT") existiert im
         ccxt-markets-Dict nur der Settle-Suffix-Key ("1000BONK/USDT:USDT"),
@@ -858,9 +854,7 @@ class TestLoadPublicHistory:
         first_call_symbol = holder["instance"].fetch_ohlcv.await_args_list[0].args[0]
         assert first_call_symbol == "1000BONK/USDT:USDT"
 
-    async def test_symbol_with_spot_listing_is_not_affected_by_fallback(
-        self, monkeypatch
-    ) -> None:
+    async def test_symbol_with_spot_listing_is_not_affected_by_fallback(self, monkeypatch) -> None:
         """Regressionsschutz in die andere Richtung: wenn der bare Key
         existiert (z.B. BTC/USDT, ETH/USDT - die bereits etablierte,
         validierte Baseline), darf der Fallback NICHT greifen, auch wenn

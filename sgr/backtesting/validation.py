@@ -20,6 +20,7 @@ Beide sind Pflicht im Validierungspfad (Go-Live Gate 2).
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Any
 
 import numpy as np
 
@@ -46,7 +47,7 @@ class WalkForwardAnalyzer:
 
     async def run(
         self,
-        candles_by_symbol: dict,
+        candles_by_symbol: dict[str, Any],
         config: BacktestConfig,
         registry: object,
     ) -> WalkForwardResult:

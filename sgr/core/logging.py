@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import re
 import sys
-from typing import Any
+from typing import Any, cast
 
 import structlog
 from structlog.types import EventDict, WrappedLogger
@@ -157,7 +157,7 @@ def get_logger(name: str) -> structlog.BoundLogger:
         log = get_logger(__name__)
         log.info("engine.started", version="0.1.0")
     """
-    return structlog.get_logger(name)
+    return cast(structlog.BoundLogger, structlog.get_logger(name))
 
 
 # ---------------------------------------------------------------------------

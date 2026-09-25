@@ -71,9 +71,7 @@ class TestDeactivate:
         assert entry.reason == "second reason"
         assert sks.is_active("pionex:BTC/USDT") is False
 
-    async def test_get_deactivated_lists_only_inactive_symbols(
-        self, sks: SymbolKillSwitch
-    ) -> None:
+    async def test_get_deactivated_lists_only_inactive_symbols(self, sks: SymbolKillSwitch) -> None:
         await sks.deactivate("pionex:BTC/USDT", "reason")
         await sks.activate("pionex:ETH/USDT")  # No-op, never deactivated.
 
@@ -104,9 +102,7 @@ class TestActivate:
         await sks.activate("pionex:BTC/USDT")  # Should not raise or create an entry.
         assert sks.get_entry("pionex:BTC/USDT") is None
 
-    async def test_activate_on_already_active_symbol_is_noop(
-        self, sks: SymbolKillSwitch
-    ) -> None:
+    async def test_activate_on_already_active_symbol_is_noop(self, sks: SymbolKillSwitch) -> None:
         await sks.deactivate("pionex:BTC/USDT", "reason")
         await sks.activate("pionex:BTC/USDT")
         await sks.activate("pionex:BTC/USDT")  # Second call: already active, no-op.
@@ -116,9 +112,7 @@ class TestActivate:
 
 @pytest.mark.asyncio
 class TestPersistence:
-    async def test_deactivate_calls_repository_when_injected(
-        self, sks: SymbolKillSwitch
-    ) -> None:
+    async def test_deactivate_calls_repository_when_injected(self, sks: SymbolKillSwitch) -> None:
         from unittest.mock import AsyncMock
 
         repo = AsyncMock()

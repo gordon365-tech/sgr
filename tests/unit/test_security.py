@@ -47,9 +47,7 @@ if TYPE_CHECKING:
 
 
 class TestAuditLog:
-    async def test_audit_log_writes_via_repository(
-        self, mocker: pytest_mock.MockerFixture
-    ) -> None:
+    async def test_audit_log_writes_via_repository(self, mocker: pytest_mock.MockerFixture) -> None:
         mock_repos = MagicMock()
         mock_repos.audit_log.log_action = AsyncMock()
         mocker.patch("sgr.core.security.get_repositories", return_value=mock_repos)
@@ -110,9 +108,7 @@ class TestAPIKeyRotationManager:
     async def test_rotate_key_returns_new_key_and_logs_audit(
         self, mocker: pytest_mock.MockerFixture
     ) -> None:
-        mock_audit = mocker.patch(
-            "sgr.core.security.audit_log", new_callable=AsyncMock
-        )
+        mock_audit = mocker.patch("sgr.core.security.audit_log", new_callable=AsyncMock)
 
         new_key = await APIKeyRotationManager.rotate_key("user-1", "old-key-12345678")
 
@@ -273,9 +269,7 @@ class TestValidateSensitiveAction:
         limiter = AsyncMock()
         limiter.is_allowed.return_value = False
 
-        allowed, error = await validate_sensitive_action(
-            "user-1", "login", rate_limiter=limiter
-        )
+        allowed, error = await validate_sensitive_action("user-1", "login", rate_limiter=limiter)
 
         assert allowed is False
         assert error == "Rate limit exceeded"
@@ -307,16 +301,12 @@ class TestValidateSensitiveAction:
         assert error is None
         mock_audit.assert_called_once()
 
-    async def test_allowed_when_within_rate_limit(
-        self, mocker: pytest_mock.MockerFixture
-    ) -> None:
+    async def test_allowed_when_within_rate_limit(self, mocker: pytest_mock.MockerFixture) -> None:
         limiter = AsyncMock()
         limiter.is_allowed.return_value = True
         mocker.patch("sgr.core.security.audit_log", new_callable=AsyncMock)
 
-        allowed, error = await validate_sensitive_action(
-            "user-1", "login", rate_limiter=limiter
-        )
+        allowed, error = await validate_sensitive_action("user-1", "login", rate_limiter=limiter)
 
         assert allowed is True
         assert error is None

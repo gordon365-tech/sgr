@@ -79,9 +79,7 @@ class TestLoadTenantCredentials:
     async def test_error_message_includes_tenant_and_exchange(self) -> None:
         with patch("sgr.core.database.get_session", return_value=_mock_db_ctx(None)):
             with pytest.raises(ValueError, match=_GORDON_UUID) as exc_info:
-                await load_tenant_credentials(
-                    _GORDON_UUID, ExchangeID.BINANCE, TradingMode.LIVE
-                )
+                await load_tenant_credentials(_GORDON_UUID, ExchangeID.BINANCE, TradingMode.LIVE)
         assert "binance" in str(exc_info.value)
         assert "live" in str(exc_info.value)
 

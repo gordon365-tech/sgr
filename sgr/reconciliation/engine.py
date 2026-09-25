@@ -156,9 +156,7 @@ class ReconciliationEngine:
         #    bereits per restore_from_persistence() beim Startup mit der
         #    DB synchronisiert, daher hier keine zusätzliche DB-Abfrage
         #    nötig; single source of truth bleibt die PortfolioEngine).
-        local_positions = {
-            str(p.symbol): p for p in self._portfolio_engine.positions
-        }
+        local_positions = {str(p.symbol): p for p in self._portfolio_engine.positions}
 
         # 2. Exchange State
         adapter = self._pool.get(self._exchange_id, self._trading_mode)

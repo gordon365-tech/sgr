@@ -25,7 +25,7 @@ def setup_sentry() -> None:
         return
 
     sentry_sdk.init(
-        dsn=config.monitoring.sentry_dsn,
+        dsn=config.monitoring.sentry_dsn.get_secret_value(),
         environment=config.environment.value,
         traces_sample_rate=0.1,  # Sample 10% of transactions
         profiles_sample_rate=0.1,  # Sample 10% of profiling data

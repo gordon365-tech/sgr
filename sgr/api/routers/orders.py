@@ -11,7 +11,7 @@ Frage, kein Workaround.
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends
 
@@ -26,6 +26,6 @@ async def get_order_history(
     repos: Annotated[Repositories, Depends(get_repos)],
     user: Annotated[TokenData, Depends(require_auth)],
     limit: int = 50,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Order-History für den authentifizierten User, neueste zuerst."""
     return await repos.orders.get_by_user(user.user_id, user.trading_mode, limit=limit)

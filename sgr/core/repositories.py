@@ -21,11 +21,13 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from sqlalchemy import and_, desc, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.engine import CursorResult
+from sqlalchemy.sql.elements import ColumnElement
 
 from sgr.core.database import (
     AuditLogModel,
@@ -104,7 +106,10 @@ class CandleRepository:
                 stmt = pg_insert(CandleModel).values(rows)
                 stmt = stmt.on_conflict_do_nothing(constraint="uq_candle")
                 result = await session.execute(stmt)
-                total_inserted += result.rowcount
+                # INSERT via session.execute() liefert zur Laufzeit immer
+                # einen CursorResult (mit rowcount); Result[*tuple[Any,...]]
+                # ist nur der generische SELECT-Obertyp im Stub.
+                total_inserted += cast(CursorResult[Any], result).rowcount
 
         log.debug("candle_repo.upserted", count=total_inserted, total=len(candles))
         return total_inserted
@@ -413,9 +418,7 @@ class PositionRepository:
                     if k not in ("id", "symbol", "exchange", "trading_mode", "opened_at")
                 }
                 update_stmt = (
-                    update(PositionModel)
-                    .where(PositionModel.id == existing.id)
-                    .values(**updates)
+                    update(PositionModel).where(PositionModel.id == existing.id).values(**updates)
                 )
                 await session.execute(update_stmt)
                 return str(existing.id)
@@ -670,7 +673,6 @@ class TradeRepository:
                     sum(winners) / abs(sum(losers)) if losers and sum(losers) != 0 else float("inf")
                 ),
             }
-
 
     async def get_recent(
         self,
@@ -1028,7 +1030,9 @@ class StrategySymbolValidationRepository:
         self, *, batch_id: str | None = None, limit: int = 1000
     ) -> list[dict[str, Any]]:
         async with get_session() as session:
-            conditions = [StrategySymbolValidationModel.is_best_for_symbol.is_(True)]
+            conditions: list[ColumnElement[bool]] = [
+                StrategySymbolValidationModel.is_best_for_symbol.is_(True)
+            ]
             if batch_id:
                 conditions.append(StrategySymbolValidationModel.batch_id == batch_id)
             stmt = (
@@ -1126,7 +1130,9 @@ class StrategySymbolValidationRepository:
         """Verteilung der Strategien unter den ACTIVE-Ergebnissen (fuer
         den Final Report - Phase 21 'Strategy distribution')."""
         async with get_session() as session:
-            conditions = [StrategySymbolValidationModel.is_best_for_symbol.is_(True)]
+            conditions: list[ColumnElement[bool]] = [
+                StrategySymbolValidationModel.is_best_for_symbol.is_(True)
+            ]
             if batch_id:
                 conditions.append(StrategySymbolValidationModel.batch_id == batch_id)
             stmt = (
@@ -1151,7 +1157,9 @@ class StrategySymbolValidationRepository:
             "robustness": StrategySymbolValidationModel.robustness_score,
         }
         async with get_session() as session:
-            conditions = [StrategySymbolValidationModel.is_best_for_symbol.is_(True)]
+            conditions: list[ColumnElement[bool]] = [
+                StrategySymbolValidationModel.is_best_for_symbol.is_(True)
+            ]
             if batch_id:
                 conditions.append(StrategySymbolValidationModel.batch_id == batch_id)
             if order_by in column_map:
@@ -1285,10 +1293,8 @@ class UserRepository:
             mit dieser Email existiert.
         """
         async with get_session() as session:
-            stmt = (
-                update(UserModel).where(UserModel.email == email).values(is_admin=is_admin)
-            )
-            result = await session.execute(stmt)
+            stmt = update(UserModel).where(UserModel.email == email).values(is_admin=is_admin)
+            result = cast(CursorResult[Any], await session.execute(stmt))
             return bool(result.rowcount and result.rowcount > 0)
 
 

@@ -99,7 +99,7 @@ class PortfolioState:
 
     @property
     def unrealized_pnl(self) -> Decimal:
-        return sum(p.unrealized_pnl for p in self._positions.values())
+        return sum((p.unrealized_pnl for p in self._positions.values()), Decimal("0"))
 
     @property
     def peak_value(self) -> Decimal:
@@ -139,7 +139,7 @@ class PortfolioEngine:
         # tatsaechlich injiziert wurde UND die Order LIVE war.
         self._live_verification_gate: Any = live_verification_gate
         self._state = PortfolioState(trading_mode, initial_cash)
-        self._trade_history: list[dict] = []  # Closed trades
+        self._trade_history: list[dict[str, Any]] = []  # Closed trades
         # Optional: PositionRepository fuer Crash-Recovery und Phase 7B
         # Reconciliation. None = rein in-memory (Tests, Backtesting).
         self._position_repo: Any = position_repository
@@ -313,14 +313,26 @@ class PortfolioEngine:
 
     async def _open_position(self, result: OrderResult, symbol_key: str) -> None:
         """Öffnet neue Position nach Fill."""
+        # Invariante bereits durch den Aufrufer (handle_fill) garantiert:
+        # average_fill_price ist fuer FILLED/PARTIALLY_FILLED nie None
+        # (siehe dortiger Guard). Hier trotzdem explizit geprueft statt
+        # stillschweigend uebergangen, damit diese Methode auch isoliert
+        # typsicher und korrekt bleibt.
+        if result.average_fill_price is None:
+            raise ValueError(
+                f"OrderResult ohne average_fill_price kann keine Position eroeffnen: "
+                f"{result.request_id}"
+            )
+        fill_price = result.average_fill_price
+
         side = PositionSide.LONG if self._infer_side(result) == Side.BUY else PositionSide.SHORT
 
         position = Position(
             symbol=result.symbol,
             side=side,
             quantity=result.filled_quantity,
-            entry_price=result.average_fill_price,  # type: ignore[arg-type]
-            current_price=result.average_fill_price,  # type: ignore[arg-type]
+            entry_price=fill_price,
+            current_price=fill_price,
             opened_at=datetime.now(tz=UTC),
             strategy_name=str(result.raw_response.get("strategy", "unknown")),
             trading_mode=self._trading_mode,
@@ -336,7 +348,7 @@ class PortfolioEngine:
         # analoger, bereits behobener Bug in
         # sgr/backtesting/simulator.py::_open_position (Commit 1584e08,
         # docs/ANALYSIS-mean-reversion-v1-schritt16-fundamental-suitability.md).
-        notional = result.filled_quantity * result.average_fill_price  # type: ignore[operator]
+        notional = result.filled_quantity * fill_price
         if side == PositionSide.LONG:
             self._state._cash -= notional + result.fees
         else:
@@ -401,7 +413,15 @@ class PortfolioEngine:
             # Trade um die Entry-Fee zu gut ausgewiesen).
             side_factor = Decimal("1") if existing.side == PositionSide.LONG else Decimal("-1")
             entry = existing.entry_price
-            exit_price = result.average_fill_price  # type: ignore[assignment]
+            # Invariante bereits durch handle_fill garantiert (siehe
+            # _open_position); hier ebenfalls explizit geprueft statt
+            # stillschweigend uebergangen.
+            if result.average_fill_price is None:
+                raise ValueError(
+                    f"OrderResult ohne average_fill_price kann Position nicht "
+                    f"schliessen/reduzieren: {result.request_id}"
+                )
+            exit_price = result.average_fill_price
             remaining_entry_fee = self._entry_fees.get(symbol_key, Decimal(0))
             entry_fee_share = (
                 remaining_entry_fee * (close_qty / existing.quantity)
@@ -598,9 +618,7 @@ class PortfolioEngine:
         # Fehler hier darf das Schliessen der Position niemals verhindern
         # (Fail-Safe-Prinzip wie ueberall sonst in sgr/monitoring/).
         try:
-            cumulative = sum(
-                (Decimal(t["realized_pnl"]) for t in self._trade_history), Decimal(0)
-            )
+            cumulative = sum((Decimal(t["realized_pnl"]) for t in self._trade_history), Decimal(0))
             record_trade_executed(
                 side=position.side.value,
                 pnl=realized_pnl,
@@ -744,13 +762,13 @@ class PortfolioEngine:
         return self._state.positions
 
     @property
-    def trade_history(self) -> list[dict]:
+    def trade_history(self) -> list[dict[str, Any]]:
         return list(self._trade_history)
 
     def get_position(self, symbol: Symbol) -> Position | None:
         return self._state._positions.get(str(symbol))
 
-    def summary(self) -> dict:
+    def summary(self) -> dict[str, Any]:
         """Portfolio Summary für Dashboard / API."""
         return {
             "portfolio_value": str(self._state.portfolio_value),

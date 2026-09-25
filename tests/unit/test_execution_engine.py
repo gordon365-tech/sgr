@@ -1132,8 +1132,6 @@ class TestMetricsRecording:
         assert after == before + 1
 
 
-
-
 class TestLiveVerificationGateIntegration:
     """Phase C (2026-09-24, explizite Anweisung: 'Wenn LiveVerificationGate
     nicht integriert ist, integriere es'): ExecutionEngine.execute() prueft

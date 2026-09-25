@@ -19,7 +19,7 @@ vorliegen.
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from redis.asyncio import Redis
@@ -41,7 +41,7 @@ async def get_ticker(
     symbol: str,
     user: Annotated[TokenData, Depends(require_auth)],
     redis_client: Annotated[Redis, Depends(get_redis_client)],
-) -> dict:
+) -> dict[str, Any]:
     """
     Aktueller Ticker für ein Symbol, aus dem Redis-Cache (siehe
     Modul-Docstring). symbol wird wie bei /features/{symbol} normalisiert
@@ -68,7 +68,7 @@ async def get_features(
     user: Annotated[TokenData, Depends(require_auth)],
     store: Annotated[FeatureStore, Depends(get_feature_store_connection)],
     timeframe: str = Query(default="1h", pattern="^(1m|5m|15m|1h|4h|1d)$"),
-) -> dict:
+) -> dict[str, Any]:
     """Aktuelle berechnete Features für ein Symbol (bereits Redis-nativ)."""
     symbol_key = f"binance:{symbol.upper().replace('-', '/')}"
     features = await store.get_latest(symbol_key, timeframe)

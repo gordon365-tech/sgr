@@ -51,7 +51,7 @@ class CircuitBreaker:
         self.success_count = 0
         self.last_failure_time: datetime | None = None
 
-    async def call(self, func: Callable, *args: Any, **kwargs: Any) -> Any:
+    async def call(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         """
         Executes function through circuit breaker.
 
@@ -130,6 +130,7 @@ class CircuitBreaker:
 
 class CircuitBreakerError(Exception):
     """Raised when circuit breaker is open."""
+
     pass
 
 
@@ -148,7 +149,7 @@ class GracefulShutdownManager:
     def __init__(self, grace_period_seconds: int = 30) -> None:
         self.grace_period_seconds = grace_period_seconds
         self.shutdown_event = asyncio.Event()
-        self.active_tasks: set[asyncio.Task] = set()
+        self.active_tasks: set[asyncio.Task[Any]] = set()
 
     async def shutdown(self) -> None:
         """Initiates graceful shutdown."""
@@ -184,7 +185,7 @@ class GracefulShutdownManager:
                 except Exception as e:
                     log.error("shutdown.task_error", error=str(e))
 
-    def register_task(self, task: asyncio.Task) -> None:
+    def register_task(self, task: asyncio.Task[Any]) -> None:
         """Registers a task for graceful shutdown tracking."""
         self.active_tasks.add(task)
         task.add_done_callback(self.active_tasks.discard)

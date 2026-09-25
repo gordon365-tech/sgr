@@ -317,6 +317,7 @@ class TestDirectionalExposureWiring:
 
     def test_portfolio_engine_error_returns_none_not_raises(self) -> None:
         portfolio = MagicMock()
+
         def _raise(self: Any) -> Any:
             raise RuntimeError("db down")
 

@@ -30,9 +30,10 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, ParamSpec, TypeVar
 
 from tenacity import (
     retry,
@@ -86,8 +87,18 @@ log = get_logger(__name__)
 _RETRYABLE = lambda e: isinstance(e, ExchangeError) and e.retryable  # noqa: E731
 
 
-def _retryable_exchange_call(max_attempts: int = 3) -> Any:
+_P = ParamSpec("_P")
+_T = TypeVar("_T")
+
+
+def _retryable_exchange_call(
+    max_attempts: int = 3,
+) -> Callable[[Callable[_P, Coroutine[Any, Any, _T]]], Callable[_P, Coroutine[Any, Any, _T]]]:
     """Decorator factory for retrying transient exchange errors."""
+    # tenacity.retry() ist selbst nur als `-> Any` getypt; die explizite
+    # Rueckgabe-Signatur hier sorgt dafuer, dass mypy die Signatur der
+    # dekorierten Methoden (get_ticker, place_order, ...) erhaelt, statt
+    # sie stillschweigend auf Any zu degradieren.
     return retry(
         retry=retry_if_exception(_RETRYABLE),
         stop=stop_after_attempt(max_attempts),
@@ -107,7 +118,28 @@ class CCXTBaseAdapter:
 
     exchange_id: ExchangeID
     _ccxt_id: str
-    _testnet_urls: dict[str, str] = {}
+    # Werte sind reine ccxt-Passthrough-Daten (teils verschachtelt, z.B.
+    # Binance "api": {"public": ..., "private": ...}) und werden von uns
+    # nie interpretiert - nur .keys() fuers Logging und Truthiness als
+    # "ist ein Testnet konfiguriert?"-Sentinel (siehe connect()).
+    _testnet_urls: dict[str, Any] = {}
+
+    @classmethod
+    def from_config(
+        cls,
+        trading_mode: TradingMode,
+        futures_mode: bool = False,
+    ) -> CCXTBaseAdapter:
+        """
+        Factory method: laedt Credentials aus der SGR-Konfiguration.
+        Muss von jedem konkreten Adapter (BinanceAdapter, PionexAdapter, ...)
+        ueberschrieben werden - siehe ExchangeFactory.create_with_credentials(),
+        die ausschliesslich hierueber Adapter instanziiert.
+        """
+        raise NotImplementedError(
+            f"{cls.__name__} muss from_config() implementieren, um ueber "
+            "die ExchangeFactory instanziierbar zu sein."
+        )
 
     def __init__(
         self,
@@ -857,7 +889,7 @@ class CCXTBaseAdapter:
             return None
         if not existing:
             return None
-        return existing
+        return dict(existing)
 
     async def _simulate_order(self, order: OrderRequest) -> OrderResult:
         """
@@ -914,9 +946,12 @@ class CCXTBaseAdapter:
         # dringlicher, nicht-ruhender Exit.
         is_grid_maker_fill = order.metadata.get("grid_fill_type") == "level_cross"
         risk_limits = get_config().risk_limits
-        fee_rate = Decimal(
-            str(risk_limits.paper_maker_fee_pct if is_grid_maker_fill else risk_limits.paper_taker_fee_pct)
+        paper_fee_pct = (
+            risk_limits.paper_maker_fee_pct
+            if is_grid_maker_fill
+            else risk_limits.paper_taker_fee_pct
         )
+        fee_rate = Decimal(str(paper_fee_pct))
         fees = order.quantity * fill_price * fee_rate
 
         now = datetime.now(tz=UTC)
@@ -995,7 +1030,7 @@ class CCXTBaseAdapter:
             from uuid import uuid4
 
             mock_request = OrderRequest(
-                id=raw.get("clientOrderId") or str(uuid4()),  # type: ignore[arg-type]
+                id=raw.get("clientOrderId") or str(uuid4()),
                 signal_id=uuid4(),
                 symbol=self._parse_symbol(symbol),
                 side=Side(raw.get("side", "buy")),
@@ -1192,7 +1227,6 @@ class CCXTBaseAdapter:
         try:
             import ccxt
 
-            type(exc).__name__
             exc_str = str(exc).lower()
 
             # IP-Ban-Erkennung (z.B. Binance HTTP 418 / Code -1003
@@ -1208,9 +1242,7 @@ class CCXTBaseAdapter:
             # Docstring fuer die Konsequenz (Retry-Sturm gegen aktiven Ban).
             ban_match = re.search(r"banned until (\d+)", exc_str)
             if ban_match:
-                banned_until = datetime.fromtimestamp(
-                    int(ban_match.group(1)) / 1000, tz=UTC
-                )
+                banned_until = datetime.fromtimestamp(int(ban_match.group(1)) / 1000, tz=UTC)
                 return ExchangeBannedError(self.exchange_id.value, banned_until, str(exc))
 
             if isinstance(exc, ccxt.RateLimitExceeded):

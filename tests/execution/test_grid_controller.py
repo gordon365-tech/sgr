@@ -477,7 +477,11 @@ class TestSymbolKillSwitchBlocksGrid:
         )
 
         result = await controller.open_grid(
-            _decision(), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            _decision(),
+            _symbol(),
+            "futures_grid_long_v1",
+            account,
+            _snapshot(),
             current_price=Decimal("50000"),
         )
 
@@ -501,7 +505,11 @@ class TestSymbolKillSwitchBlocksGrid:
         )
 
         result = await controller.open_grid(
-            _decision(), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            _decision(),
+            _symbol(),
+            "futures_grid_long_v1",
+            account,
+            _snapshot(),
             current_price=Decimal("50000"),
         )
 
@@ -529,7 +537,11 @@ class TestSymbolKillSwitchBlocksGrid:
             symbol_kill_switch=sks,
         )
         result = await controller.open_grid(
-            _decision(), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            _decision(),
+            _symbol(),
+            "futures_grid_long_v1",
+            account,
+            _snapshot(),
             current_price=Decimal("50000"),
         )
         grid = result.grid
@@ -571,7 +583,11 @@ class TestSymbolKillSwitchBlocksGrid:
             engine, TradingMode.PAPER, tenant_id="gordon", compliance_engine=compliance
         )
         result = await controller.open_grid(
-            _decision(), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            _decision(),
+            _symbol(),
+            "futures_grid_long_v1",
+            account,
+            _snapshot(),
             current_price=Decimal("50000"),
         )
         grid = result.grid
@@ -597,7 +613,11 @@ class TestSymbolKillSwitchBlocksGrid:
             engine, TradingMode.PAPER, tenant_id="gordon", compliance_engine=compliance
         )
         result = await controller.open_grid(
-            _decision(), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            _decision(),
+            _symbol(),
+            "futures_grid_long_v1",
+            account,
+            _snapshot(),
             current_price=Decimal("50000"),
         )
         adapter.ticker_price = Decimal("49000")
@@ -633,7 +653,11 @@ class TestSymbolKillSwitchBlocksGrid:
         sks.register_deactivation_hook(controller.close_all_grids_for_symbol)
 
         result = await controller.open_grid(
-            _decision(), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            _decision(),
+            _symbol(),
+            "futures_grid_long_v1",
+            account,
+            _snapshot(),
             current_price=Decimal("50000"),
         )
         adapter.ticker_price = Decimal("49000")
@@ -679,7 +703,11 @@ class TestHedgeModeCompatibility:
         )
 
         result = await controller.open_grid(
-            _decision(), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            _decision(),
+            _symbol(),
+            "futures_grid_long_v1",
+            account,
+            _snapshot(),
             current_price=Decimal("50000"),
         )
 
@@ -714,7 +742,11 @@ class TestHedgeModeCompatibility:
         )
 
         result = await controller.open_grid(
-            _decision(), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            _decision(),
+            _symbol(),
+            "futures_grid_long_v1",
+            account,
+            _snapshot(),
             current_price=Decimal("50000"),
         )
 
@@ -759,7 +791,11 @@ class TestHedgeModeCompatibility:
         )
 
         result = await controller.open_grid(
-            _decision(), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            _decision(),
+            _symbol(),
+            "futures_grid_long_v1",
+            account,
+            _snapshot(),
             current_price=Decimal("50000"),
         )
 
@@ -799,7 +835,11 @@ class TestHedgeModeCompatibility:
         )
 
         result = await controller.open_grid(
-            _decision(), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            _decision(),
+            _symbol(),
+            "futures_grid_long_v1",
+            account,
+            _snapshot(),
             current_price=Decimal("50000"),
         )
 
@@ -841,19 +881,25 @@ class TestHedgeModeCompatibility:
         )
 
         result = await controller.open_grid(
-            _decision(), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            _decision(),
+            _symbol(),
+            "futures_grid_long_v1",
+            account,
+            _snapshot(),
             current_price=Decimal("50000"),
         )
 
         assert result.approved is True
 
-    async def test_paper_mode_skips_hedge_check(
-        self, controller: GridController, account
-    ) -> None:
+    async def test_paper_mode_skips_hedge_check(self, controller: GridController, account) -> None:
         """PAPER simuliert keinen echten Account-Modus - der Check greift
         nur fuer LIVE (siehe open_grid() Kommentar)."""
         result = await controller.open_grid(
-            _decision(), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            _decision(),
+            _symbol(),
+            "futures_grid_long_v1",
+            account,
+            _snapshot(),
             current_price=Decimal("50000"),
         )
         assert result.approved is True
@@ -1003,9 +1049,7 @@ def _controller_for_recovery(
 
 
 class TestGridRecoveryBasics:
-    async def test_restore_without_repository_returns_empty(
-        self, pool: ExchangePool
-    ) -> None:
+    async def test_restore_without_repository_returns_empty(self, pool: ExchangePool) -> None:
         engine = ExecutionEngine(pool, TradingMode.PAPER)
         controller = GridController(engine, TradingMode.PAPER, tenant_id="gordon")
 
@@ -1021,9 +1065,7 @@ class TestGridRecoveryBasics:
 
         assert restored == []
 
-    async def test_restore_load_failure_returns_empty_not_raises(
-        self, pool: ExchangePool
-    ) -> None:
+    async def test_restore_load_failure_returns_empty_not_raises(self, pool: ExchangePool) -> None:
         repo = FailingGetOpenGridsRepo()
         controller = _controller_for_recovery(pool, repo)
 
@@ -1046,9 +1088,7 @@ class TestGridRecoveryBasics:
         assert all(not lv.is_filled for lv in grid.levels)
         assert controller.get_grid(_G1) is grid
 
-    async def test_crash_before_order_submission_no_ledger_entry(
-        self, pool: ExchangePool
-    ) -> None:
+    async def test_crash_before_order_submission_no_ledger_entry(self, pool: ExchangePool) -> None:
         """Szenario B: Crash bevor ueberhaupt eine Order gesendet wurde -
         kein Ledger-Eintrag existiert, Level bleibt unfilled - identisch
         zum sauberen Restart aus Rekonstruktions-Sicht."""
@@ -1172,9 +1212,7 @@ class TestGridRecoveryLedgerReplay:
 
 
 class TestGridRecoveryFailClosed:
-    async def test_ledger_load_failure_excludes_grid_fail_closed(
-        self, pool: ExchangePool
-    ) -> None:
+    async def test_ledger_load_failure_excludes_grid_fail_closed(self, pool: ExchangePool) -> None:
         """Ein Fehler beim Laden des Fill-Ledgers darf das Grid NIEMALS
         blind als 'alles unfilled' wiederherstellen - fail-closed."""
         row = _grid_row(_G1)
@@ -1186,9 +1224,7 @@ class TestGridRecoveryFailClosed:
         assert restored == []
         assert controller.get_grid(_G1) is None
 
-    async def test_fill_referencing_unfilled_order_excludes_grid(
-        self, pool: ExchangePool
-    ) -> None:
+    async def test_fill_referencing_unfilled_order_excludes_grid(self, pool: ExchangePool) -> None:
         """Szenario: Order-Status ist NICHT 'filled' (z.B. noch pending
         oder fehlgeschlagen) - unklarer Zustand, GESAMTES Grid wird nicht
         wiederhergestellt, kein Teilzustand, kein Raten."""
@@ -1203,9 +1239,7 @@ class TestGridRecoveryFailClosed:
 
         assert restored == []
 
-    async def test_fill_referencing_missing_order_excludes_grid(
-        self, pool: ExchangePool
-    ) -> None:
+    async def test_fill_referencing_missing_order_excludes_grid(self, pool: ExchangePool) -> None:
         """Order-ID im Ledger, aber KEIN entsprechender Order-Repository-
         Eintrag auffindbar - unklarer Zustand, fail-closed."""
         order_id = str(uuid4())
@@ -1414,14 +1448,16 @@ class TestPartialFillHandling:
 
     async def _open_grid_and_get_execution_double(self, controller, account):
         result = await controller.open_grid(
-            _decision(), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            _decision(),
+            _symbol(),
+            "futures_grid_long_v1",
+            account,
+            _snapshot(),
             current_price=Decimal("50000"),
         )
         return result.grid
 
-    def _result(
-        self, order, status, filled_quantity=Decimal("0"), price=Decimal("49500")
-    ) -> Any:
+    def _result(self, order, status, filled_quantity=Decimal("0"), price=Decimal("49500")) -> Any:
         from sgr.core.types import OrderResult
 
         return OrderResult(
@@ -1432,9 +1468,7 @@ class TestPartialFillHandling:
             filled_quantity=filled_quantity,
             average_fill_price=price if filled_quantity > 0 else None,
             fees=(
-                filled_quantity * price * Decimal("0.0005")
-                if filled_quantity > 0
-                else Decimal("0")
+                filled_quantity * price * Decimal("0.0005") if filled_quantity > 0 else Decimal("0")
             ),
             submitted_at=datetime.now(tz=UTC),
             trading_mode=order.trading_mode,
@@ -1515,7 +1549,11 @@ class TestPartialFillHandling:
         das Level muss mit der Restmenge offen bleiben (is_filled=True),
         nicht faelschlich als komplett geschlossen gelten."""
         result = await controller.open_grid(
-            _decision(), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            _decision(),
+            _symbol(),
+            "futures_grid_long_v1",
+            account,
+            _snapshot(),
             current_price=Decimal("50000"),
         )
         grid = result.grid
@@ -1530,7 +1568,9 @@ class TestPartialFillHandling:
         partial_close_qty = full_qty * Decimal("0.4")
         controller._execution.execute = AsyncMock(
             side_effect=lambda order, **kw: self._result(
-                order, OrderStatus.PARTIALLY_FILLED, filled_quantity=partial_close_qty,
+                order,
+                OrderStatus.PARTIALLY_FILLED,
+                filled_quantity=partial_close_qty,
                 price=Decimal("50000"),
             )
         )
@@ -1636,7 +1676,11 @@ class TestLiveVerificationGateLossAccounting:
 
     async def _open_and_get_grid(self, controller, account):
         result = await controller.open_grid(
-            _decision(), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            _decision(),
+            _symbol(),
+            "futures_grid_long_v1",
+            account,
+            _snapshot(),
             current_price=Decimal("50000"),
         )
         return result.grid
@@ -1766,7 +1810,11 @@ class TestRateLimiterIntegration:
             rate_limiter=rate_limiter,
         )
         result = await controller.open_grid(
-            _decision(), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            _decision(),
+            _symbol(),
+            "futures_grid_long_v1",
+            account,
+            _snapshot(),
             current_price=Decimal("50000"),
         )
         grid = result.grid
@@ -1783,7 +1831,11 @@ class TestRateLimiterIntegration:
     ) -> None:
         """Default (kein rate_limiter) - exaktes Vor-Aenderungs-Verhalten."""
         result = await controller.open_grid(
-            _decision(), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            _decision(),
+            _symbol(),
+            "futures_grid_long_v1",
+            account,
+            _snapshot(),
             current_price=Decimal("50000"),
         )
         adapter.ticker_price = Decimal("49500")
@@ -1802,7 +1854,11 @@ class TestGridMarkToMarket:
         self, controller: GridController, account
     ) -> None:
         result = await controller.open_grid(
-            _decision(), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            _decision(),
+            _symbol(),
+            "futures_grid_long_v1",
+            account,
+            _snapshot(),
             current_price=Decimal("50000"),
         )
         assert result.grid.unrealized_pnl == Decimal("0")
@@ -1812,7 +1868,11 @@ class TestGridMarkToMarket:
         self, controller: GridController, account, adapter: MockExchangeAdapter
     ) -> None:
         result = await controller.open_grid(
-            _decision(GridDirection.LONG), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            _decision(GridDirection.LONG),
+            _symbol(),
+            "futures_grid_long_v1",
+            account,
+            _snapshot(),
             current_price=Decimal("50000"),
         )
         # Level 1 (49500) oeffnen (Preisabfall).
@@ -1829,7 +1889,11 @@ class TestGridMarkToMarket:
         self, controller: GridController, account, adapter: MockExchangeAdapter
     ) -> None:
         result = await controller.open_grid(
-            _decision(GridDirection.LONG), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            _decision(GridDirection.LONG),
+            _symbol(),
+            "futures_grid_long_v1",
+            account,
+            _snapshot(),
             current_price=Decimal("50000"),
         )
         adapter.ticker_price = Decimal("49500")
@@ -1844,8 +1908,12 @@ class TestGridMarkToMarket:
     ) -> None:
         """SHORT-Grid: Preisverfall NACH Entry ist ein Gewinn (gespiegelt zu LONG)."""
         result = await controller.open_grid(
-            _decision(GridDirection.SHORT), _symbol(), "futures_grid_short_v1", account,
-            _snapshot(), current_price=Decimal("50000"),
+            _decision(GridDirection.SHORT),
+            _symbol(),
+            "futures_grid_short_v1",
+            account,
+            _snapshot(),
+            current_price=Decimal("50000"),
         )
         # SHORT: Level oeffnet bei STEIGENDEM Preis (siehe on_price_tick()
         # Cell-Modell, gespiegelt zu LONG).
@@ -1861,7 +1929,11 @@ class TestGridMarkToMarket:
         self, controller: GridController, account, adapter: MockExchangeAdapter
     ) -> None:
         result = await controller.open_grid(
-            _decision(GridDirection.LONG), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            _decision(GridDirection.LONG),
+            _symbol(),
+            "futures_grid_long_v1",
+            account,
+            _snapshot(),
             current_price=Decimal("50000"),
         )
         adapter.ticker_price = Decimal("49500")
@@ -1881,7 +1953,11 @@ class TestGridMarkToMarket:
         self, controller: GridController, account, adapter: MockExchangeAdapter
     ) -> None:
         result = await controller.open_grid(
-            _decision(GridDirection.LONG), _symbol(), "futures_grid_long_v1", account, _snapshot(),
+            _decision(GridDirection.LONG),
+            _symbol(),
+            "futures_grid_long_v1",
+            account,
+            _snapshot(),
             current_price=Decimal("50000"),
         )
         adapter.ticker_price = Decimal("49500")

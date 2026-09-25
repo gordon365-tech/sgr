@@ -1074,9 +1074,7 @@ class GridController:
             return []
 
         try:
-            rows = await self._grid_repo.get_open_grids(
-                self._trading_mode, user_id=self._tenant_id
-            )
+            rows = await self._grid_repo.get_open_grids(self._trading_mode, user_id=self._tenant_id)
         except Exception as e:
             log.error("grid_controller.restore_load_open_grids_failed", error=str(e))
             return []
@@ -1125,9 +1123,7 @@ class GridController:
         try:
             fills = await self._grid_repo.get_fills(str(row["id"]))
         except Exception as e:
-            log.error(
-                "grid_controller.restore_fills_load_failed", grid_id=row["id"], error=str(e)
-            )
+            log.error("grid_controller.restore_fills_load_failed", grid_id=row["id"], error=str(e))
             return None  # fail-closed: ohne Ledger-Zugriff keine sichere Rekonstruktion
 
         levels_by_index = {lv.index: lv for lv in grid.levels}

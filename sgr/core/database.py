@@ -31,6 +31,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import (
     Boolean,
@@ -128,7 +129,7 @@ class OrderModel(Base):
     strategy_name: Mapped[str] = mapped_column(String(100), nullable=False)
     submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     filled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    raw_response: Mapped[dict] = mapped_column(
+    raw_response: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
     user_id: Mapped[str | None] = mapped_column(
@@ -235,9 +236,7 @@ class PortfolioSnapshotModel(Base):
         PG_UUID(as_uuid=False), ForeignKey("users.id"), nullable=True
     )
     trading_mode: Mapped[str] = mapped_column(String(10), nullable=False)
-    portfolio_value: Mapped[Decimal] = mapped_column(
-        Numeric(precision=28, scale=8), nullable=False
-    )
+    portfolio_value: Mapped[Decimal] = mapped_column(Numeric(precision=28, scale=8), nullable=False)
     cash: Mapped[Decimal] = mapped_column(Numeric(precision=28, scale=8), nullable=False)
     unrealized_pnl: Mapped[Decimal] = mapped_column(
         Numeric(precision=28, scale=8), nullable=False, default=0, server_default="0"
@@ -288,7 +287,7 @@ class TradeModel(Base):
     trading_mode: Mapped[str] = mapped_column(String(10), nullable=False)
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     closed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    trade_metadata: Mapped[dict] = mapped_column(
+    trade_metadata: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
     user_id: Mapped[str | None] = mapped_column(
@@ -314,10 +313,10 @@ class StrategyModel(Base):
     is_validated: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
-    supported_regimes: Mapped[list] = mapped_column(
+    supported_regimes: Mapped[list[Any]] = mapped_column(
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
     )
-    parameters: Mapped[dict] = mapped_column(
+    parameters: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
     # Performance metrics (updated by learning loop)
@@ -344,7 +343,7 @@ class RiskEventModel(Base):
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     trading_mode: Mapped[str] = mapped_column(String(10), nullable=False)
-    metrics_snapshot: Mapped[dict] = mapped_column(
+    metrics_snapshot: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -374,7 +373,7 @@ class AuditLogModel(Base):
     user_id: Mapped[str] = mapped_column(
         String(100), nullable=False, default="system", server_default="system"
     )
-    details: Mapped[dict] = mapped_column(
+    details: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -484,16 +483,16 @@ class StrategySymbolValidationModel(Base):
     is_best_for_symbol: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
-    parameters: Mapped[dict] = mapped_column(
+    parameters: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
-    metrics: Mapped[dict] = mapped_column(
+    metrics: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
-    data_quality: Mapped[dict] = mapped_column(
+    data_quality: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
-    regime_profile: Mapped[dict] = mapped_column(
+    regime_profile: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
     score: Mapped[float | None] = mapped_column(Numeric(precision=10, scale=4))
@@ -543,7 +542,7 @@ class GridModel(Base):
     trading_mode: Mapped[str] = mapped_column(String(10), nullable=False)
     direction: Mapped[str] = mapped_column(String(10), nullable=False)  # long | short
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
-    parameters: Mapped[dict] = mapped_column(
+    parameters: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
     net_position_qty: Mapped[Decimal] = mapped_column(
@@ -580,7 +579,7 @@ class GridModel(Base):
     # Zeilen (aktuell 0, siehe Analysebericht) - kein Backfill moeglich,
     # da der In-Memory-Zustand nach einem Neustart ohnehin nicht mehr
     # existiert.
-    levels: Mapped[list] = mapped_column(
+    levels: Mapped[list[Any]] = mapped_column(
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
     )
     # Crossing-Erkennungs-Anker (Migration 0009, siehe GridState.last_price

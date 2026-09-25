@@ -52,9 +52,7 @@ class TestListSymbolKillSwitches:
     def test_list_includes_deactivated_symbols(self, app: FastAPI) -> None:
         import asyncio
 
-        asyncio.run(
-            get_symbol_kill_switch().deactivate("pionex:BTC/USDT", "manual stop")
-        )
+        asyncio.run(get_symbol_kill_switch().deactivate("pionex:BTC/USDT", "manual stop"))
 
         client = TestClient(app)
         response = client.get("/api/v1/risk/symbol-kill-switch")

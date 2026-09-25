@@ -360,9 +360,7 @@ class TestOptimizeStrategyParameters:
             # nicht im Suchraum dieses Tests): Sharpes 0.5, 2.5 (bester,
             # qualifiziert), 5.0 (bester ROH-Wert, aber disqualifiziert
             # wegen zu weniger Trades) - der Gewinner MUSS 2.5 sein.
-            engine = _FakeEngine(
-                [_report(0.5, 30), _report(2.5, 30), _report(5.0, 2)]
-            )
+            engine = _FakeEngine([_report(0.5, 30), _report(2.5, 30), _report(5.0, 2)])
 
             result = await optimize_strategy_parameters(
                 engine=engine,

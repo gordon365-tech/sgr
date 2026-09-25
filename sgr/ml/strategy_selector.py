@@ -145,7 +145,8 @@ class StrategySelector:
             self._models[strategy_name] = model
 
             # Validation Accuracy
-            y_pred = (model.predict(test_matrix.X) > 0.5).astype(int)
+            predictions = np.asarray(model.predict(test_matrix.X))
+            y_pred = (predictions > 0.5).astype(int)
             accuracy = float(np.mean(y_pred == y_test))
             validation_results[strategy_name] = accuracy
 

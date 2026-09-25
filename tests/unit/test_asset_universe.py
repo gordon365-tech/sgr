@@ -439,9 +439,7 @@ class TestDynamicBinanceSubscription:
     die urspruenglich kuratierten (siehe Task-Vorgabe 'keine kuenstliche
     Reduzierung auf die bereits bestehenden Subscriptions')."""
 
-    async def test_tradable_symbol_outside_safety_net_is_auto_subscribed(
-        self, monkeypatch
-    ) -> None:
+    async def test_tradable_symbol_outside_safety_net_is_auto_subscribed(self, monkeypatch) -> None:
         """Ein Symbol, das NICHT in der urspruenglichen Sicherheitsnetz-
         Liste steht, aber alle TRADABLE-Kriterien erfuellt, muss trotzdem
         automatisch SUBSCRIBED erreichen (Zwei-Pass-Klassifikation)."""

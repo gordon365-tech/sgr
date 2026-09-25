@@ -168,8 +168,18 @@ class PerformanceAnalyzer:
     def _cagr(self, initial: float, final: float, days: int) -> float:
         if initial <= 0 or days <= 0:
             return 0.0
+        if final <= 0:
+            # Totalverlust (oder Equity <= 0): (final/initial) ist negativ,
+            # eine fraktionale Potenz davon liefert in Python eine complex
+            # Zahl statt eines Fehlers - das wuerde hier stillschweigend
+            # eine falsche CAGR erzeugen. -100% ist der korrekte Fall.
+            return -100.0
         years = days / 365.25
-        return ((final / initial) ** (1 / years) - 1) * 100
+        # final > 0 und initial > 0 sind hier bereits garantiert (siehe
+        # Guards oben), die Potenz bleibt also immer reell - float()
+        # macht das auch für mypy explizit (float.__pow__ ist wegen des
+        # complex-Sonderfalls bei negativer Basis als Any getypt).
+        return float((final / initial) ** (1 / years) - 1) * 100
 
     def _max_drawdown(
         self,

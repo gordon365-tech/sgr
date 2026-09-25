@@ -18,15 +18,12 @@ from uuid import uuid4
 import pytest
 
 from sgr.core.types import (
-    AssetClass,
-    ExchangeID,
     MarketRegime,
     OrderRequest,
     OrderStatus,
     OrderType,
     RiskDecision,
     Side,
-    Symbol,
     TradingCycleStatus,
     TradingMode,
 )
@@ -200,7 +197,8 @@ async def test_duplicate_order_protection(execution_engine: ExecutionEngine) -> 
         symbol=E2E_SYMBOL,
         side=Side.BUY,
         order_type=OrderType.MARKET,
-        quantity=Decimal("3500"),  # ~$19-20 Notional bei HFT/USDT-Testnet-Preis, ueber der Exchange-Mindestnotional von $5
+        quantity=Decimal("3500"),  # ~$19-20 Notional bei HFT/USDT-Testnet-Preis,
+        # ueber der Exchange-Mindestnotional von $5
         trading_mode=TradingMode.PAPER,
     )
 
@@ -260,7 +258,8 @@ async def test_unknown_order_state_on_submit_failure(
         symbol=E2E_SYMBOL,
         side=Side.BUY,
         order_type=OrderType.MARKET,
-        quantity=Decimal("3500"),  # ~$19-20 Notional bei HFT/USDT-Testnet-Preis, ueber der Exchange-Mindestnotional von $5
+        quantity=Decimal("3500"),  # ~$19-20 Notional bei HFT/USDT-Testnet-Preis,
+        # ueber der Exchange-Mindestnotional von $5
         trading_mode=TradingMode.PAPER,
     )
 

@@ -45,9 +45,7 @@ GORDON_ID = "a47d994d-35cc-4619-83bb-86fd0cb48447"
 SUMO_ID = "144f7bb0-113d-4c66-b5d3-7a34ab1d551a"
 
 
-def _position_row(
-    user_id: str, symbol: str = "BTC/USDT:USDT", exchange: str = "binance"
-) -> dict:
+def _position_row(user_id: str, symbol: str = "BTC/USDT:USDT", exchange: str = "binance") -> dict:
     return {
         "id": str(uuid4()),
         "symbol": symbol,
@@ -79,9 +77,7 @@ def repo() -> PositionRepository:
 
 
 class TestPositionIsolationAcrossTenants:
-    async def test_get_open_positions_filters_by_user_id(
-        self, repo: PositionRepository
-    ) -> None:
+    async def test_get_open_positions_filters_by_user_id(self, repo: PositionRepository) -> None:
         """Kernbeweis: gleiche trading_mode, zwei Tenants, jeder sieht nur
         die eigene Position - genau das Szenario, das
         restore_from_persistence() bei einem Worker-Neustart durchlaeuft."""

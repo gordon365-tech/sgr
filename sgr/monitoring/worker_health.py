@@ -97,9 +97,7 @@ async def publish_worker_health(
                 "updated_at": datetime.now(tz=UTC).isoformat(),
             }
         )
-        await redis_client.set(
-            _redis_key(trading_mode, tenant_id), payload, ex=_HEALTH_TTL_SECONDS
-        )
+        await redis_client.set(_redis_key(trading_mode, tenant_id), payload, ex=_HEALTH_TTL_SECONDS)
     except Exception as e:
         log.error("worker_health.redis_publish_failed", error=str(e))
 

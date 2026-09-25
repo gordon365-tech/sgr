@@ -252,9 +252,7 @@ class TestStrategySymbolValidationRepositoryResumeSemantics:
             is_best=False,
         )
 
-        processed = await repos.strategy_symbol_validations.get_processed_symbols(
-            batch_id=batch_id
-        )
+        processed = await repos.strategy_symbol_validations.get_processed_symbols(batch_id=batch_id)
 
         assert "INTERRUPTED/USDT" not in processed
 
@@ -271,9 +269,7 @@ class TestStrategySymbolValidationRepositoryResumeSemantics:
             is_best=True,
         )
 
-        processed = await repos.strategy_symbol_validations.get_processed_symbols(
-            batch_id=batch_id
-        )
+        processed = await repos.strategy_symbol_validations.get_processed_symbols(batch_id=batch_id)
 
         assert "FINISHED/USDT" in processed
 
@@ -296,9 +292,7 @@ class TestStrategySymbolValidationRepositoryResumeSemantics:
                 is_best=False,
             )
 
-        processed = await repos.strategy_symbol_validations.get_processed_symbols(
-            batch_id=batch_id
-        )
+        processed = await repos.strategy_symbol_validations.get_processed_symbols(batch_id=batch_id)
 
         assert "MULTI_CANDIDATE/USDT" not in processed
 
@@ -331,9 +325,7 @@ class TestStrategySymbolValidationRepositoryResumeSemantics:
         # adjusted_momentum_v1 wurden nie evaluiert, die finale Row nie
         # geschrieben.
 
-        processed = await repos.strategy_symbol_validations.get_processed_symbols(
-            batch_id=batch_id
-        )
+        processed = await repos.strategy_symbol_validations.get_processed_symbols(batch_id=batch_id)
 
         assert "KILLED_MIDWAY/USDT" not in processed
 
@@ -368,15 +360,11 @@ class TestStrategySymbolValidationRepositoryResumeSemantics:
             is_best=True,
         )
 
-        processed = await repos.strategy_symbol_validations.get_processed_symbols(
-            batch_id=batch_id
-        )
+        processed = await repos.strategy_symbol_validations.get_processed_symbols(batch_id=batch_id)
 
         assert "COMPLETE/USDT" in processed
 
-    async def test_rerunning_a_completed_batch_creates_no_duplicate_final_rows(
-        self, repos
-    ) -> None:
+    async def test_rerunning_a_completed_batch_creates_no_duplicate_final_rows(self, repos) -> None:
         """Test 6: ein erneuter upsert() fuer dieselbe (symbol, exchange,
         timeframe, strategy, batch_id)-Kombination (z.B. weil ein
         vollstaendig abgeschlossener Batch versehentlich erneut

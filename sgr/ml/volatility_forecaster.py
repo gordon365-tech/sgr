@@ -72,7 +72,7 @@ class VolatilityForecaster:
     def metadata(self) -> ModelMetadata:
         return self._metadata
 
-    def fit(self, returns: np.ndarray) -> dict[str, float]:
+    def fit(self, returns: np.ndarray) -> dict[str, float | str]:
         """
         Schätzt GARCH(1,1) Parameter via Maximum Likelihood.
 
@@ -90,10 +90,10 @@ class VolatilityForecaster:
 
             am = arch_model(
                 returns * 100,  # arch erwartet Prozent-Returns
-                vol="Garch",
+                vol="GARCH",
                 p=1,
                 q=1,
-                dist="Normal",
+                dist="normal",
                 rescale=False,
             )
             res = am.fit(disp="off", show_warning=False)
@@ -133,7 +133,7 @@ class VolatilityForecaster:
             self._metadata.trained_at = datetime.now(tz=UTC)
             self._metadata.training_samples = len(returns)
 
-            params = {
+            params: dict[str, float | str] = {
                 "omega": self._omega,
                 "alpha": self._alpha,
                 "beta": self._beta,
@@ -157,7 +157,7 @@ class VolatilityForecaster:
             )
             return self._fit_ewma(returns)
 
-    def _fit_ewma(self, returns: np.ndarray) -> dict[str, float]:
+    def _fit_ewma(self, returns: np.ndarray) -> dict[str, float | str]:
         """
         EWMA-Fallback wenn arch nicht installiert.
         Einfacher aber weniger präzise.
@@ -225,7 +225,7 @@ class VolatilityForecaster:
         horizon_vol_pct = float(np.sqrt(horizon_var)) * 100
 
         # Konfidenz-Intervall (Normalverteilung: z * σ)
-        from scipy import stats  # type: ignore[import-untyped]
+        from scipy import stats
 
         z = stats.norm.ppf((1 + confidence_level) / 2)
         lower = horizon_vol_pct * (1 - (z - 1) * 0.2)

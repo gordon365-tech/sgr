@@ -43,8 +43,10 @@ from sgr.exchanges.ccxt_base import CCXTBaseAdapter
 
 log = get_logger(__name__)
 
-# Type alias for adapter constructor
-AdapterConstructor = Callable[..., CCXTBaseAdapter]
+# Type alias for adapter constructor. type[CCXTBaseAdapter] statt einem
+# generischen Callable, damit mypy weiss, dass jeder registrierte Adapter
+# from_config() erbt (siehe CCXTBaseAdapter.from_config).
+AdapterConstructor = type[CCXTBaseAdapter]
 
 # ---------------------------------------------------------------------------
 # Registry
@@ -118,12 +120,7 @@ class ExchangeFactory:
             )
 
         adapter_class = _REGISTRY[exchange_id]
-
-        # Use from_config factory method if available
-        if hasattr(adapter_class, "from_config"):
-            return adapter_class.from_config(trading_mode=trading_mode, **kwargs)
-
-        raise ValueError(f"Adapter {adapter_class.__name__} has no from_config method")
+        return adapter_class.from_config(trading_mode=trading_mode, **kwargs)
 
     @staticmethod
     def create_with_credentials(

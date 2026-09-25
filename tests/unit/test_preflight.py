@@ -349,9 +349,7 @@ class TestLiveCredentialsAndConnection:
         result = await validator.validate(_make_order(trading_mode=TradingMode.LIVE))
 
         assert result.eligible is False
-        assert any(
-            c.name == "exchange_credentials_and_connection" for c in result.failures
-        )
+        assert any(c.name == "exchange_credentials_and_connection" for c in result.failures)
         # fail-closed heisst: keine nachgelagerten Live-Checks mehr, keine
         # falschen "passed"-Ergebnisse fuer Checks, die nie liefen.
         ran_names = {c.name for c in result.checks}
@@ -361,9 +359,7 @@ class TestLiveCredentialsAndConnection:
         self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
     ) -> None:
         _pool, adapter = mock_pool
-        adapter.ping = AsyncMock(
-            side_effect=ExchangeError("timeout", exchange="binance")
-        )
+        adapter.ping = AsyncMock(side_effect=ExchangeError("timeout", exchange="binance"))
         validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
 
         result = await validator.validate(_make_order(trading_mode=TradingMode.LIVE))
@@ -437,9 +433,7 @@ class TestLiveMarketStatus:
         self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
     ) -> None:
         _pool, adapter = mock_pool
-        adapter.get_market_status = AsyncMock(
-            side_effect=ExchangeError("down", exchange="binance")
-        )
+        adapter.get_market_status = AsyncMock(side_effect=ExchangeError("down", exchange="binance"))
         validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
 
         result = await validator.validate(_make_order(trading_mode=TradingMode.LIVE))
@@ -495,15 +489,11 @@ class TestLivePositionModeConsistency:
         _pool, adapter = mock_pool
         adapter.positions = [_make_position(quantity=Decimal("1.0"))]
         adapter.get_positions = AsyncMock(return_value=adapter.positions)
-        adapter.get_position_mode = AsyncMock(
-            return_value=_make_position_mode_info(hedged=True)
-        )
+        adapter.get_position_mode = AsyncMock(return_value=_make_position_mode_info(hedged=True))
         validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
 
         result = await validator.validate(
-            _make_order(
-                trading_mode=TradingMode.LIVE, reduce_only=True, quantity=Decimal("0.5")
-            )
+            _make_order(trading_mode=TradingMode.LIVE, reduce_only=True, quantity=Decimal("0.5"))
         )
 
         adapter.get_position_mode.assert_awaited_once()
@@ -517,15 +507,11 @@ class TestLivePositionModeConsistency:
         _pool, adapter = mock_pool
         adapter.positions = [_make_position(quantity=Decimal("1.0"))]
         adapter.get_positions = AsyncMock(return_value=adapter.positions)
-        adapter.get_position_mode = AsyncMock(
-            side_effect=ExchangeError("down", exchange="binance")
-        )
+        adapter.get_position_mode = AsyncMock(side_effect=ExchangeError("down", exchange="binance"))
         validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
 
         result = await validator.validate(
-            _make_order(
-                trading_mode=TradingMode.LIVE, reduce_only=True, quantity=Decimal("0.5")
-            )
+            _make_order(trading_mode=TradingMode.LIVE, reduce_only=True, quantity=Decimal("0.5"))
         )
 
         assert result.eligible is False
@@ -546,9 +532,7 @@ class TestLivePositionModeConsistency:
         validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
 
         result = await validator.validate(
-            _make_order(
-                trading_mode=TradingMode.LIVE, reduce_only=True, quantity=Decimal("0.5")
-            )
+            _make_order(trading_mode=TradingMode.LIVE, reduce_only=True, quantity=Decimal("0.5"))
         )
 
         check = next(c for c in result.checks if c.name == "position_mode_consistency")
@@ -580,9 +564,7 @@ class TestLiveSymbolAvailability:
         self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
     ) -> None:
         _pool, adapter = mock_pool
-        adapter.get_exchange_info = AsyncMock(
-            side_effect=ExchangeError("down", exchange="binance")
-        )
+        adapter.get_exchange_info = AsyncMock(side_effect=ExchangeError("down", exchange="binance"))
         validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
 
         result = await validator.validate(_make_order(trading_mode=TradingMode.LIVE))
@@ -634,9 +616,7 @@ class TestSymbolPrecisionAndLimits:
         _pool, adapter = mock_pool
         adapter.get_exchange_info = AsyncMock(
             return_value=_make_exchange_info(
-                symbol_limits={
-                    _make_symbol().ccxt_symbol: SymbolLimits(min_amount=Decimal("1.0"))
-                }
+                symbol_limits={_make_symbol().ccxt_symbol: SymbolLimits(min_amount=Decimal("1.0"))}
             )
         )
         validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
@@ -655,9 +635,7 @@ class TestSymbolPrecisionAndLimits:
         _pool, adapter = mock_pool
         adapter.get_exchange_info = AsyncMock(
             return_value=_make_exchange_info(
-                symbol_limits={
-                    _make_symbol().ccxt_symbol: SymbolLimits(max_amount=Decimal("1.0"))
-                }
+                symbol_limits={_make_symbol().ccxt_symbol: SymbolLimits(max_amount=Decimal("1.0"))}
             )
         )
         validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
@@ -755,9 +733,7 @@ class TestSymbolPrecisionAndLimits:
         self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
     ) -> None:
         _pool, adapter = mock_pool
-        adapter.get_exchange_info = AsyncMock(
-            side_effect=ExchangeError("down", exchange="binance")
-        )
+        adapter.get_exchange_info = AsyncMock(side_effect=ExchangeError("down", exchange="binance"))
         validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
 
         result = await validator.validate(_make_order(trading_mode=TradingMode.LIVE))
@@ -780,27 +756,21 @@ class TestOrderQuantity:
         self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
     ) -> None:
         validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
-        result = validator._check_order_quantity_positive(
-            _make_order(quantity=Decimal("0"))
-        )
+        result = validator._check_order_quantity_positive(_make_order(quantity=Decimal("0")))
         assert result.passed is False
 
     def test_negative_quantity_fails(
         self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
     ) -> None:
         validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
-        result = validator._check_order_quantity_positive(
-            _make_order(quantity=Decimal("-1"))
-        )
+        result = validator._check_order_quantity_positive(_make_order(quantity=Decimal("-1")))
         assert result.passed is False
 
     def test_positive_quantity_passes(
         self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
     ) -> None:
         validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
-        result = validator._check_order_quantity_positive(
-            _make_order(quantity=Decimal("0.001"))
-        )
+        result = validator._check_order_quantity_positive(_make_order(quantity=Decimal("0.001")))
         assert result.passed is True
 
 
@@ -826,9 +796,7 @@ class TestBalanceAndCapital:
         result = await validator.validate(order)
 
         assert result.eligible is False
-        assert any(
-            c.name == "balance_and_available_capital" for c in result.failures
-        )
+        assert any(c.name == "balance_and_available_capital" for c in result.failures)
 
     async def test_sufficient_free_balance_with_limit_price_passes(
         self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
@@ -859,25 +827,19 @@ class TestBalanceAndCapital:
         )
 
         assert result.eligible is False
-        assert any(
-            c.name == "balance_and_available_capital" for c in result.failures
-        )
+        assert any(c.name == "balance_and_available_capital" for c in result.failures)
 
     async def test_balance_fetch_failure_fails_closed(
         self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
     ) -> None:
         _pool, adapter = mock_pool
-        adapter.get_balance = AsyncMock(
-            side_effect=ExchangeError("down", exchange="binance")
-        )
+        adapter.get_balance = AsyncMock(side_effect=ExchangeError("down", exchange="binance"))
         validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
 
         result = await validator.validate(_make_order(trading_mode=TradingMode.LIVE))
 
         assert result.eligible is False
-        assert any(
-            c.name == "balance_and_available_capital" for c in result.failures
-        )
+        assert any(c.name == "balance_and_available_capital" for c in result.failures)
 
 
 # ---------------------------------------------------------------------------
@@ -901,9 +863,7 @@ class TestLeverage:
         self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
     ) -> None:
         _pool, adapter = mock_pool
-        adapter.get_positions = AsyncMock(
-            return_value=[_make_position(leverage=Decimal("3"))]
-        )
+        adapter.get_positions = AsyncMock(return_value=[_make_position(leverage=Decimal("3"))])
         validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
 
         result = await validator.validate(_make_order(trading_mode=TradingMode.LIVE))
@@ -914,9 +874,7 @@ class TestLeverage:
         self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
     ) -> None:
         _pool, adapter = mock_pool
-        adapter.get_positions = AsyncMock(
-            return_value=[_make_position(leverage=Decimal("50"))]
-        )
+        adapter.get_positions = AsyncMock(return_value=[_make_position(leverage=Decimal("50"))])
         validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
 
         result = await validator.validate(_make_order(trading_mode=TradingMode.LIVE))
@@ -928,9 +886,7 @@ class TestLeverage:
         self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
     ) -> None:
         _pool, adapter = mock_pool
-        adapter.get_positions = AsyncMock(
-            side_effect=ExchangeError("down", exchange="binance")
-        )
+        adapter.get_positions = AsyncMock(side_effect=ExchangeError("down", exchange="binance"))
         validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
 
         result = await validator.validate(_make_order(trading_mode=TradingMode.LIVE))
@@ -972,9 +928,7 @@ class TestReduceOnlySafety:
         self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
     ) -> None:
         _pool, adapter = mock_pool
-        adapter.get_positions = AsyncMock(
-            return_value=[_make_position(quantity=Decimal("0.05"))]
-        )
+        adapter.get_positions = AsyncMock(return_value=[_make_position(quantity=Decimal("0.05"))])
         validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
 
         result = await validator.validate(
@@ -992,9 +946,7 @@ class TestReduceOnlySafety:
         self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
     ) -> None:
         _pool, adapter = mock_pool
-        adapter.get_positions = AsyncMock(
-            return_value=[_make_position(quantity=Decimal("1.0"))]
-        )
+        adapter.get_positions = AsyncMock(return_value=[_make_position(quantity=Decimal("1.0"))])
         validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
 
         result = await validator.validate(
@@ -1011,9 +963,7 @@ class TestReduceOnlySafety:
         self, mock_pool: tuple[MagicMock, AsyncMock], fake_kill_switch: MagicMock
     ) -> None:
         _pool, adapter = mock_pool
-        adapter.get_positions = AsyncMock(
-            side_effect=ExchangeError("down", exchange="binance")
-        )
+        adapter.get_positions = AsyncMock(side_effect=ExchangeError("down", exchange="binance"))
         validator = _make_validator(mock_pool, fake_kill_switch, TradingMode.LIVE)
 
         result = await validator.validate(

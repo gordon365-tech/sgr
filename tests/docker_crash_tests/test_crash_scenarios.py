@@ -154,8 +154,7 @@ class TestApiContainerRestart:
         # Restarts - ein Test, der das nicht verifiziert, koennte einen
         # No-Op-Restart nicht von einem echten unterscheiden.
         assert any(o != 200 for o in outcomes), (
-            f"Erwartet mindestens eine Stoerung waehrend des Restarts, "
-            f"bekam nur 200er: {outcomes}"
+            f"Erwartet mindestens eine Stoerung waehrend des Restarts, bekam nur 200er: {outcomes}"
         )
 
         await await_container_status(docker_client, CONTAINER_API, "running", timeout=60)
@@ -593,8 +592,7 @@ class TestExchangeTimeoutDuringOrderProcessing:
             db_row = await _get_order_row(order_id)
             assert db_row is not None
             assert db_row["status"] == "pending", (
-                "Bei Unknown State darf KEIN erfundener Endstatus "
-                "persistiert werden"
+                "Bei Unknown State darf KEIN erfundener Endstatus persistiert werden"
             )
             assert db_row["exchange_order_id"] is None
             assert await _count_order_rows(order_id) == 1
@@ -668,8 +666,7 @@ class TestNetworkPartitionDuringOrderProcessing:
             attached_ids = set(network.attrs.get("Containers", {}).keys())
             container.reload()
             assert container.id not in attached_ids, (
-                "network.disconnect() hat den Container nicht wirklich "
-                "vom Netzwerk getrennt"
+                "network.disconnect() hat den Container nicht wirklich vom Netzwerk getrennt"
             )
 
             # Transiente Partition: lange genug, um mindestens einen

@@ -128,7 +128,8 @@ class CapitalAllocationEngine:
                         allocated_fraction=0.0,
                         allocated_capital=Decimal("0"),
                         reason=(
-                            "Nicht validiert" if not c.is_validated
+                            "Nicht validiert"
+                            if not c.is_validated
                             else f"Score {s:.3f} unter Mindestschwelle {min_score_threshold}"
                         ),
                     )
@@ -148,9 +149,9 @@ class CapitalAllocationEngine:
                     exchange=c.exchange,
                     score=round(s, 4),
                     allocated_fraction=round(fraction, 4),
-                    allocated_capital=(
-                        total_capital * Decimal(str(fraction))
-                    ).quantize(Decimal("0.01")),
+                    allocated_capital=(total_capital * Decimal(str(fraction))).quantize(
+                        Decimal("0.01")
+                    ),
                     reason="",
                 )
             )

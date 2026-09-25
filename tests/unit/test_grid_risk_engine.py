@@ -326,9 +326,7 @@ class TestCostGuard:
         problemlos, aber nicht mehr beim (in RiskLimitsConfig zulaessigen)
         Maximum von 1% Slippage je Seite (Round-Trip-Kosten inkl. Marge
         dann (0.02%+0.05%+2%)*1.5 = 3.105%)."""
-        monkeypatch.setattr(
-            "sgr.core.config.get_config", lambda: _config_with_costs(slippage=0.01)
-        )
+        monkeypatch.setattr("sgr.core.config.get_config", lambda: _config_with_costs(slippage=0.01))
         engine = GridRiskEngine()
         params = _params(
             grid_lower_price=Decimal("100"), grid_upper_price=Decimal("103"), grid_count=2
@@ -559,7 +557,9 @@ class TestCombinedExposureFailClosed:
         engine = GridRiskEngine(limits)
 
         result = engine.evaluate_new_grid(
-            _params(), _snapshot(), current_price=Decimal("100"),
+            _params(),
+            _snapshot(),
+            current_price=Decimal("100"),
             directional_exposure_usd=None,
         )
 
@@ -572,7 +572,9 @@ class TestCombinedExposureFailClosed:
         engine = GridRiskEngine()  # max_combined_exposure_usd default None
 
         result = engine.evaluate_new_grid(
-            _params(), _snapshot(), current_price=Decimal("100"),
+            _params(),
+            _snapshot(),
+            current_price=Decimal("100"),
             directional_exposure_usd=None,
         )
 
@@ -585,7 +587,9 @@ class TestCombinedExposureFailClosed:
         engine = GridRiskEngine(limits)
 
         result = engine.evaluate_new_grid(
-            _params(), _snapshot(), current_price=Decimal("100"),
+            _params(),
+            _snapshot(),
+            current_price=Decimal("100"),
             directional_exposure_usd=Decimal("0"),
         )
 
@@ -607,7 +611,9 @@ class TestDynamicTotalExposurePct:
         engine = GridRiskEngine(limits)
 
         result = engine.evaluate_new_grid(
-            _params(), _snapshot(), current_price=Decimal("100"),
+            _params(),
+            _snapshot(),
+            current_price=Decimal("100"),
             directional_exposure_usd=Decimal("2200"),
         )
 
@@ -619,7 +625,9 @@ class TestDynamicTotalExposurePct:
         engine = GridRiskEngine(limits)
 
         result = engine.evaluate_new_grid(
-            _params(), _snapshot(), current_price=Decimal("100"),
+            _params(),
+            _snapshot(),
+            current_price=Decimal("100"),
             directional_exposure_usd=Decimal("2300"),
         )
 
@@ -634,14 +642,18 @@ class TestDynamicTotalExposurePct:
 
         # 250 (Grid) + 4700 (direktional) = 4950 <= 5000 -> PASS
         approved = engine.evaluate_new_grid(
-            _params(), snapshot, current_price=Decimal("100"),
+            _params(),
+            snapshot,
+            current_price=Decimal("100"),
             directional_exposure_usd=Decimal("4700"),
         )
         assert approved.approved is True
 
         # 250 + 4800 = 5050 > 5000 -> REJECT
         rejected = engine.evaluate_new_grid(
-            _params(), snapshot, current_price=Decimal("100"),
+            _params(),
+            snapshot,
+            current_price=Decimal("100"),
             directional_exposure_usd=Decimal("4800"),
         )
         assert rejected.approved is False
@@ -659,7 +671,9 @@ class TestDynamicTotalExposurePct:
         # 250 + 2300 = 2550: unter dem absoluten 3000-Limit, aber ueber
         # dem dynamischen 2500-Limit - muss trotzdem ablehnen.
         result = engine.evaluate_new_grid(
-            _params(), _snapshot(), current_price=Decimal("100"),
+            _params(),
+            _snapshot(),
+            current_price=Decimal("100"),
             directional_exposure_usd=Decimal("2300"),
         )
 
@@ -677,7 +691,9 @@ class TestDynamicTotalExposurePct:
         snapshot = GridPortfolioSnapshot(open_grids=[], portfolio_value=Decimal("0"))
 
         result = engine.evaluate_new_grid(
-            _params(), snapshot, current_price=Decimal("100"),
+            _params(),
+            snapshot,
+            current_price=Decimal("100"),
             directional_exposure_usd=Decimal("999999"),
         )
 

@@ -147,7 +147,7 @@ class VaRCalculator:
         VaR = μ - z * σ (wo z = z-score für Konfidenz)
         Schnell aber unzuverlässig bei Fat Tails (Crypto!).
         """
-        from scipy import stats  # type: ignore[import-untyped]
+        from scipy import stats
 
         mu = float(np.mean(returns))
         sigma = float(np.std(returns, ddof=1))
@@ -173,7 +173,7 @@ class VaRCalculator:
 
         z_cf = z + (z²-1)·S/6 + (z³-3z)·(K-3)/24 - (2z³-5z)·S²/36
         """
-        from scipy import stats  # type: ignore[import-untyped]
+        from scipy import stats
 
         mu = float(np.mean(returns))
         sigma = float(np.std(returns, ddof=1))

@@ -26,7 +26,7 @@ Hinweis zu Indikatoren:
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import numpy as np
 
@@ -49,7 +49,7 @@ class OHLCV(NamedTuple):
     low: np.ndarray
     close: np.ndarray
     volume: np.ndarray
-    timestamps: list  # datetime list (nicht numpy für timezone handling)
+    timestamps: list[Any]  # datetime list (nicht numpy für timezone handling)
 
 
 def candles_to_arrays(candles: list[Candle]) -> OHLCV:
@@ -325,7 +325,7 @@ def calc_obv(close: np.ndarray, volume: np.ndarray) -> np.ndarray:
 def calc_orderbook_features(ob: OrderBook) -> OrderBookFeatures:
     """Berechnet Orderbook-Features aus einem OrderBook Snapshot."""
 
-    def _depth_levels(levels: list, n: int) -> tuple[float, float]:
+    def _depth_levels(levels: list[Any], n: int) -> tuple[float, float]:
         """Summe von Volumen und USDT-Wert der top-n Levels."""
         total_qty = sum(float(level.size) for level in levels[:n])
         total_usdt = sum(float(level.price) * float(level.size) for level in levels[:n])

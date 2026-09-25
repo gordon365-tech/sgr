@@ -180,15 +180,11 @@ class TestRefreshToken:
         )
 
         with (
-            patch(
-                "sgr.saas.routers._auth.verify_refresh_token", return_value="user-1"
-            ),
+            patch("sgr.saas.routers._auth.verify_refresh_token", return_value="user-1"),
             patch(
                 "sgr.saas.routers._auth.create_access_token", return_value="new-access"
             ) as mock_create_access,
-            patch(
-                "sgr.saas.routers._auth.create_refresh_token", return_value="new-refresh"
-            ),
+            patch("sgr.saas.routers._auth.create_refresh_token", return_value="new-refresh"),
             patch("sgr.core.repositories.get_repositories", return_value=repos),
         ):
             client = TestClient(auth_app)
@@ -202,18 +198,14 @@ class TestRefreshToken:
         assert body["user_id"] == "user-1"
         assert body["trading_mode"] == "live"
         repos.users.get_by_id.assert_awaited_once_with("user-1")
-        mock_create_access.assert_called_once_with(
-            "user-1", TradingMode.LIVE, is_admin=True
-        )
+        mock_create_access.assert_called_once_with("user-1", TradingMode.LIVE, is_admin=True)
 
     def test_refresh_token_rejects_deactivated_user(self, auth_app: FastAPI) -> None:
         repos = MagicMock()
         repos.users.get_by_id = AsyncMock(return_value=self._db_user(is_active=False))
 
         with (
-            patch(
-                "sgr.saas.routers._auth.verify_refresh_token", return_value="user-1"
-            ),
+            patch("sgr.saas.routers._auth.verify_refresh_token", return_value="user-1"),
             patch("sgr.core.repositories.get_repositories", return_value=repos),
         ):
             client = TestClient(auth_app)
@@ -229,9 +221,7 @@ class TestRefreshToken:
         repos.users.get_by_id = AsyncMock(return_value=None)
 
         with (
-            patch(
-                "sgr.saas.routers._auth.verify_refresh_token", return_value="user-1"
-            ),
+            patch("sgr.saas.routers._auth.verify_refresh_token", return_value="user-1"),
             patch("sgr.core.repositories.get_repositories", return_value=repos),
         ):
             client = TestClient(auth_app)
@@ -248,17 +238,13 @@ class TestRefreshToken:
             side_effect=ValueError("Invalid token"),
         ):
             client = TestClient(auth_app)
-            response = client.post(
-                "/api/v1/auth/refresh", json={"refresh_token": "garbage"}
-            )
+            response = client.post("/api/v1/auth/refresh", json={"refresh_token": "garbage"})
 
         assert response.status_code == 401
 
 
 class TestSetup2FA:
-    def test_setup_2fa_returns_totp_uri(
-        self, auth_app: FastAPI, token_data: TokenData
-    ) -> None:
+    def test_setup_2fa_returns_totp_uri(self, auth_app: FastAPI, token_data: TokenData) -> None:
         auth_app.dependency_overrides[require_auth] = lambda: token_data
 
         with (
@@ -288,9 +274,7 @@ class TestEnable2FA:
         assert response.status_code == 200
         assert response.json()["2fa_enabled"] is True
 
-    def test_enable_2fa_failure_returns_400(
-        self, auth_app: FastAPI, token_data: TokenData
-    ) -> None:
+    def test_enable_2fa_failure_returns_400(self, auth_app: FastAPI, token_data: TokenData) -> None:
         auth_app.dependency_overrides[require_auth] = lambda: token_data
 
         with patch("sgr.saas.routers._auth.enable_2fa", AsyncMock(return_value=False)):
@@ -381,9 +365,7 @@ class TestListAPIKeys:
         assert "api_key" not in body[0]
         assert "secret" not in body[0]
 
-    def test_list_api_keys_serializes_last_used_at_when_present(
-        self, apikey_app: FastAPI
-    ) -> None:
+    def test_list_api_keys_serializes_last_used_at_when_present(self, apikey_app: FastAPI) -> None:
         from datetime import UTC, datetime
 
         key = MagicMock()
@@ -477,9 +459,7 @@ class TestFeeSummary:
         hwm.cumulative_fees_paid = Decimal("25.00")
         hwm.currency = "USDT"
 
-        with patch(
-            "sgr.saas.routers._fee_engine.get_hwm", AsyncMock(return_value=hwm)
-        ):
+        with patch("sgr.saas.routers._fee_engine.get_hwm", AsyncMock(return_value=hwm)):
             client = TestClient(billing_app)
             response = client.get("/api/v1/billing/fees")
 

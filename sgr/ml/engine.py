@@ -212,7 +212,7 @@ class MLEngine:
     async def _update_registry(
         self,
         regime_pred: RegimePrediction,
-        strategy_scores: list,
+        strategy_scores: list[Any],
     ) -> None:
         """
         Aktualisiert Strategy Registry basierend auf ML-Empfehlung.

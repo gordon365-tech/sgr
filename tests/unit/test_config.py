@@ -8,6 +8,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
+from pydantic import ValidationError
 
 from sgr.core.config import (
     EncryptionConfig,
@@ -27,15 +28,15 @@ class TestRiskLimitsConfig:
         assert limits.max_single_position_pct == 0.10
 
     def test_drawdown_bounds(self) -> None:
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             RiskLimitsConfig(max_portfolio_drawdown=0.0)  # below min
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             RiskLimitsConfig(max_portfolio_drawdown=0.99)  # above max
 
 
 class TestEncryptionConfig:
     def test_short_key_raises(self) -> None:
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             EncryptionConfig(master_key="short")  # type: ignore
 
 
@@ -48,7 +49,7 @@ class TestSGRConfig:
 
     def test_production_live_requires_changed_secrets(self) -> None:
         """Production + Live must not use default secrets."""
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             SGRConfig(
                 environment=Environment.PRODUCTION,
                 trading_mode=TradingMode.LIVE,
@@ -84,9 +85,9 @@ class TestPaperInitialCapital:
         assert config.paper_initial_capital == Decimal("25000")
 
     def test_zero_or_negative_capital_rejected(self) -> None:
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             SGRConfig(paper_initial_capital=Decimal("0"))
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             SGRConfig(paper_initial_capital=Decimal("-100"))
 
 

@@ -13,7 +13,7 @@ sgr-api/sgr-worker-Trennung ohnehin nicht mehr sinnvoll befuellt).
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
@@ -83,9 +83,7 @@ async def get_system_status(
             redis_client, trading_mode, tenant_id=user.user_id
         )
         components["kill_switch"] = (
-            "unknown"
-            if ks_state is None
-            else ("ACTIVE" if ks_state["is_active"] else "standby")
+            "unknown" if ks_state is None else ("ACTIVE" if ks_state["is_active"] else "standby")
         )
 
     return SystemStatusResponse(
@@ -101,7 +99,7 @@ async def get_system_status(
 @router.get("/config")
 async def get_safe_config(
     user: Annotated[TokenData, Depends(require_admin)],
-) -> dict:
+) -> dict[str, Any]:
     """
     Nicht-sensitive Config-Parameter.
     Nur für Admins. Secrets werden NIEMALS zurückgegeben.

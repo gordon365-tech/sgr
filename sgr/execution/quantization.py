@@ -56,8 +56,7 @@ def quantize_and_validate(
 
     if quantized <= 0:
         return Decimal("0"), (
-            f"Quantity {quantity} rounds down to 0 at exchange precision "
-            f"{limits.amount_precision}"
+            f"Quantity {quantity} rounds down to 0 at exchange precision {limits.amount_precision}"
         )
 
     if limits.min_amount is not None and quantized < limits.min_amount:
@@ -132,14 +131,11 @@ def quantize_price(
 
     if quantized <= 0:
         return Decimal("0"), (
-            f"Price {price} rounds to {quantized} at exchange precision "
-            f"{limits.price_precision}"
+            f"Price {price} rounds to {quantized} at exchange precision {limits.price_precision}"
         )
 
     if limits.min_price is not None and quantized < limits.min_price:
-        return Decimal("0"), (
-            f"Price {quantized} below exchange minimum price {limits.min_price}"
-        )
+        return Decimal("0"), (f"Price {quantized} below exchange minimum price {limits.min_price}")
 
     if limits.max_price is not None and quantized > limits.max_price:
         return Decimal("0"), (

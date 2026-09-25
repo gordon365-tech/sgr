@@ -123,9 +123,7 @@ class KillSwitch:
         # Kill Switch seit Prozessstart nie ausgeloest wurde - fuer ein
         # sicherheitskritisches Signal ("ist der Kill Switch aktiv?")
         # ist "keine Daten" in Grafana irrefuehrend, nicht neutral.
-        record_kill_switch_activation(
-            trading_mode=trading_mode.value, active=self._state.is_active
-        )
+        record_kill_switch_activation(trading_mode=trading_mode.value, active=self._state.is_active)
 
     def inject_exchange_pool(self, pool: Any) -> None:
         """Injiziert Exchange Pool für Order-Cancellation."""
@@ -201,12 +199,8 @@ class KillSwitch:
             if is_active == self._state.is_active:
                 return  # Bereits synchron, nichts zu tun
             if is_active:
-                self._state.trigger(
-                    payload.get("reason") or "remote_trigger", self._trading_mode
-                )
-                record_kill_switch_activation(
-                    trading_mode=self._trading_mode.value, active=True
-                )
+                self._state.trigger(payload.get("reason") or "remote_trigger", self._trading_mode)
+                record_kill_switch_activation(trading_mode=self._trading_mode.value, active=True)
                 log.warning(
                     "kill_switch.remote_state_applied",
                     is_active=True,
@@ -214,9 +208,7 @@ class KillSwitch:
                 )
             else:
                 self._state.reset()
-                record_kill_switch_activation(
-                    trading_mode=self._trading_mode.value, active=False
-                )
+                record_kill_switch_activation(trading_mode=self._trading_mode.value, active=False)
                 log.warning("kill_switch.remote_state_applied", is_active=False)
 
     async def _publish_to_redis(self) -> None:
@@ -239,9 +231,7 @@ class KillSwitch:
         )
         try:
             await self._redis.set(_redis_key(self._trading_mode, self._tenant_id), payload)
-            await self._redis.publish(
-                _redis_channel(self._trading_mode, self._tenant_id), payload
-            )
+            await self._redis.publish(_redis_channel(self._trading_mode, self._tenant_id), payload)
         except Exception as e:
             log.error("kill_switch.redis_publish_failed", error=str(e))
 

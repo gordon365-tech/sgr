@@ -527,8 +527,7 @@ class PreflightValidator:
                     name="balance_and_available_capital",
                     passed=False,
                     detail=(
-                        f"Insufficient free balance: required~{required}, "
-                        f"available={balance.free}"
+                        f"Insufficient free balance: required~{required}, available={balance.free}"
                     ),
                 )
             return PreflightCheckResult(
@@ -569,9 +568,7 @@ class PreflightValidator:
                 detail=f"Could not fetch positions: {e}",
             )
 
-        existing: Position | None = next(
-            (p for p in positions if p.symbol == order.symbol), None
-        )
+        existing: Position | None = next((p for p in positions if p.symbol == order.symbol), None)
         if existing is None:
             return PreflightCheckResult(
                 name="leverage_within_limit",

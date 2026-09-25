@@ -65,7 +65,7 @@ def _json_safe(obj: Any) -> Any:
     return obj
 
 
-async def _send_json(ws: WebSocket, data: dict) -> bool:
+async def _send_json(ws: WebSocket, data: dict[str, Any]) -> bool:
     """Sendet JSON-Message. Returns False bei Disconnect."""
     try:
         await ws.send_text(json.dumps(_json_safe(data)))

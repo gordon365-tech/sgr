@@ -175,9 +175,7 @@ async def main() -> int:
         await redis_client.set(
             f"{signal_key}:exchange_order_id", result.exchange_order_id or "", ex=180
         )
-        await redis_client.set(
-            f"{signal_key}:raw_response", str(dict(result.raw_response)), ex=180
-        )
+        await redis_client.set(f"{signal_key}:raw_response", str(dict(result.raw_response)), ex=180)
     except Exception as e:  # noqa: BLE001
         print(
             f"crashtest: reporting result to redis failed (order processing itself "

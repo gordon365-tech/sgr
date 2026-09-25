@@ -16,7 +16,7 @@ werden kann.
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -28,7 +28,7 @@ router = APIRouter()
 @router.post("/run")
 async def trigger_reconciliation(
     user: Annotated[TokenData, Depends(require_admin)],
-) -> dict:
+) -> dict[str, Any]:
     """
     Löst manuell einen Reconciliation-Lauf aus (Exchange- vs. lokaler State).
 

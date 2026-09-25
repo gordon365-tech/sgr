@@ -50,9 +50,7 @@ class TestExchangePoolInitializeWithCredentials:
             ) as mock_create_with_creds,
             patch("sgr.exchanges.factory.ExchangeFactory.create") as mock_create_plain,
         ):
-            await pool.initialize(
-                [ExchangeID.PIONEX], TradingMode.PAPER, credentials=creds
-            )
+            await pool.initialize([ExchangeID.PIONEX], TradingMode.PAPER, credentials=creds)
 
         mock_create_with_creds.assert_called_once_with(
             exchange_id=ExchangeID.PIONEX,

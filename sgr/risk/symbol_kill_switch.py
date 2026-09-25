@@ -234,7 +234,6 @@ class SymbolKillSwitch:
             )
 
 
-
 # ---------------------------------------------------------------------------
 # Singletons (eine Instanz pro Tenant - siehe Klassen-Docstring oben und
 # das identische Muster in sgr/risk/kill_switch.py._kill_switches)

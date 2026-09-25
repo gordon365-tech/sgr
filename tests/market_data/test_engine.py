@@ -339,9 +339,7 @@ class TestSymbolFeedInitializeDbCache:
         ebenfalls fail-safe auf Exchange-only zurückfallen."""
         db_candles = make_candles(3)
         candles = make_candles(5)
-        repo = FakeCandleRepository(
-            existing=db_candles, get_ohlcv_raises=RuntimeError("db down")
-        )
+        repo = FakeCandleRepository(existing=db_candles, get_ohlcv_raises=RuntimeError("db down"))
         feed, pool = make_feed(adapter_responses=[candles], candle_repository=repo)
 
         await feed.initialize(pool)
@@ -403,9 +401,7 @@ class TestSymbolFeedUpdateDbPersistence:
         initial = make_candles(3)
         new = make_candles(2, start=initial[-1].timestamp + timedelta(hours=1))
         repo = FakeCandleRepository(existing=[])
-        feed, pool = make_feed(
-            adapter_responses=[initial, new], candle_repository=repo
-        )
+        feed, pool = make_feed(adapter_responses=[initial, new], candle_repository=repo)
         await feed.initialize(pool)
         repo.upsert_calls.clear()  # nur den update()-Call betrachten
 
@@ -419,9 +415,7 @@ class TestSymbolFeedUpdateDbPersistence:
         initial = make_candles(3)
         new = make_candles(2, start=initial[-1].timestamp + timedelta(hours=1))
         repo = FakeCandleRepository(existing=[])
-        feed, pool = make_feed(
-            adapter_responses=[initial, new], candle_repository=repo
-        )
+        feed, pool = make_feed(adapter_responses=[initial, new], candle_repository=repo)
         await feed.initialize(pool)
 
         with patch("sgr.market_data.engine.record_candle_received") as mock_record:
@@ -437,9 +431,7 @@ class TestSymbolFeedUpdateDbPersistence:
         initial = make_candles(3)
         new = make_candles(2, start=initial[-1].timestamp + timedelta(hours=1))
         repo = FakeCandleRepository(upsert_raises=RuntimeError("db down"))
-        feed, pool = make_feed(
-            adapter_responses=[initial, new], candle_repository=repo
-        )
+        feed, pool = make_feed(adapter_responses=[initial, new], candle_repository=repo)
         await feed.initialize(pool)
 
         result = await feed.update(pool)

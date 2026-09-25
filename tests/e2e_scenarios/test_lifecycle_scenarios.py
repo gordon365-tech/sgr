@@ -134,7 +134,9 @@ async def test_short_entry(
         RiskDecision.APPROVED,
         RiskDecision.REDUCED,
     ), result
-    assert result.order_result is not None and result.order_result.status == OrderStatus.FILLED, result
+    assert result.order_result is not None and result.order_result.status == OrderStatus.FILLED, (
+        result
+    )
     assert len(portfolio_engine.positions) == 1
 
     position = portfolio_engine.positions[0]
@@ -142,7 +144,9 @@ async def test_short_entry(
     assert position.quantity > 0
     assert position.entry_price > 0
     assert position.stop_loss_price is not None and position.stop_loss_price > position.entry_price
-    assert position.take_profit_price is not None and position.take_profit_price < position.entry_price
+    assert (
+        position.take_profit_price is not None and position.take_profit_price < position.entry_price
+    )
 
 
 @pytest.mark.asyncio

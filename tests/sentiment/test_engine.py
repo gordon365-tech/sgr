@@ -478,9 +478,7 @@ class TestCollectionLoops:
 
     async def test_macro_loop_exits_cleanly_on_cancelled_error(self) -> None:
         engine = SentimentEngine()
-        engine._macro_monitor.fetch_recent_events = AsyncMock(
-            side_effect=asyncio.CancelledError()
-        )
+        engine._macro_monitor.fetch_recent_events = AsyncMock(side_effect=asyncio.CancelledError())
         engine._running = True
 
         await engine._macro_loop()  # Should exit via `break`, not propagate.

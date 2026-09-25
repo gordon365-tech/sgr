@@ -250,15 +250,11 @@ class TestSignalMetricsWiring:
             signal = await engine.process("binance:BTC/USDT", "1h")
 
             assert signal is None
-            record_rejected_mock.assert_called_once_with(
-                "binance:BTC/USDT", "conflicting_signals"
-            )
+            record_rejected_mock.assert_called_once_with("binance:BTC/USDT", "conflicting_signals")
         finally:
             registry.clear()
 
-    async def test_evaluation_is_recorded_even_without_active_strategies(
-        self, monkeypatch
-    ) -> None:
+    async def test_evaluation_is_recorded_even_without_active_strategies(self, monkeypatch) -> None:
         registry = _fresh_registry()
         try:
             fs = _feature_set(_trending_indicators())

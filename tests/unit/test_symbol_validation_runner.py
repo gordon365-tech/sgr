@@ -434,14 +434,10 @@ class TestParameterOptimizationIntegration:
         # Default (1.0) - siehe _FakeOptParams.threshold Default.
         assert best_upserts[0]["parameters"]["threshold"] == 42.0
         assert best_upserts[0]["metrics"]["optimization"]["performed"] is True
-        assert best_upserts[0]["metrics"]["optimization"]["best_overrides"] == {
-            "threshold": 42.0
-        }
+        assert best_upserts[0]["metrics"]["optimization"]["best_overrides"] == {"threshold": 42.0}
         assert outcome.status == SymbolValidationStatus.ACTIVE
 
-    async def test_default_params_used_when_optimization_not_performed(
-        self, monkeypatch
-    ) -> None:
+    async def test_default_params_used_when_optimization_not_performed(self, monkeypatch) -> None:
         """Fallback-Pfad: wenn optimize_strategy_parameters() performed=
         False liefert (z.B. zu wenig Historie), muss die Default-
         Instanz validiert werden - unveraendertes Verhalten."""

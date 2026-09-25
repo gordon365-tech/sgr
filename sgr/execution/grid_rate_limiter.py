@@ -90,7 +90,7 @@ class GridRateLimiter:
 
         key = self._key(exchange, tenant_id, category)
         try:
-            count = await self._redis.incr(key)
+            count = int(await self._redis.incr(key))
             if count == 1:
                 await self._redis.expire(key, self._window_seconds)
         except Exception as e:

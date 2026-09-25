@@ -348,7 +348,8 @@ class TestGridAwareLiquidation:
         compliance = ComplianceEngine()
         compliance.register_rule(
             ProductAvailabilityRule(
-                exchange=EID.BINANCE, product_type=ProductType.FUTURES_GRID,
+                exchange=EID.BINANCE,
+                product_type=ProductType.FUTURES_GRID,
                 jurisdictions_allowed=["DE"],
             )
         )
@@ -380,7 +381,10 @@ class TestGridAwareLiquidation:
         )
         symbol = _symbol()
         open_result = await grid_controller.open_grid(
-            decision, symbol, "futures_grid_long_v1", account,
+            decision,
+            symbol,
+            "futures_grid_long_v1",
+            account,
             GridPortfolioSnapshot(open_grids=[], portfolio_value=Decimal("10000")),
             current_price=Decimal("50000"),
         )

@@ -50,6 +50,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 import numpy as np
 
@@ -99,7 +100,7 @@ class GridBacktestRunResult:
     fills_count: int
     max_concurrent_open_cells: int
     liquidated: bool = False
-    metadata: dict = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class GridBacktestSimulator:
@@ -124,8 +125,12 @@ class GridBacktestSimulator:
     def run(self, candles: list[Candle]) -> GridBacktestRunResult:
         if len(candles) < 2:
             return GridBacktestRunResult(
-                trades=[], equity_curve=[], close_reason="insufficient_data",
-                total_funding_paid=Decimal("0"), fills_count=0, max_concurrent_open_cells=0,
+                trades=[],
+                equity_curve=[],
+                close_reason="insufficient_data",
+                total_funding_paid=Decimal("0"),
+                fills_count=0,
+                max_concurrent_open_cells=0,
             )
 
         regimes = self._precompute_regimes(candles)
@@ -155,9 +160,7 @@ class GridBacktestSimulator:
         breakout_upper = self._params.grid_upper_price + buffer
 
         bar_minutes = _TIMEFRAME_MINUTES.get(self._config.timeframe, 60)
-        funding_interval_bars = max(
-            1, int(self._config.funding_interval_hours * 60 / bar_minutes)
-        )
+        funding_interval_bars = max(1, int(self._config.funding_interval_hours * 60 / bar_minutes))
 
         start_time = candles[0].timestamp
         close_reason = "backtest_end"
@@ -277,8 +280,12 @@ class GridBacktestSimulator:
             # offenen Cells zum letzten Close schliessen.
             last_bar = candles[-1]
             close_trades, delta = self._force_close_all(
-                cells, last_bar.close, last_bar.timestamp, len(candles) - 1,
-                regimes[-1], "backtest_end",
+                cells,
+                last_bar.close,
+                last_bar.timestamp,
+                len(candles) - 1,
+                regimes[-1],
+                "backtest_end",
             )
             trades.extend(close_trades)
             realized_pnl += delta
