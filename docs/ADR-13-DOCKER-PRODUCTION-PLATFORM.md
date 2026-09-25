@@ -284,8 +284,6 @@ sgr_portfolio_drawdown > 0.15
 
 ### Reference Implementation
 
-See: `DOCKER_IMPLEMENTATION_REPORT.md`
-
 Files to review:
 - `docker/Dockerfile.prod` – Production image
 - `docker/docker-compose.prod.yml` – Full stack
