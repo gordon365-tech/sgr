@@ -65,10 +65,10 @@ test.describe('Error handling', () => {
     await page.goto('/');
     await expect(page.locator('h1:has-text("Project SGR")')).toBeVisible();
 
+    // Going offline breaks any *new* navigation/fetch (the browser has no
+    // network), so this checks that the already-rendered shell survives
+    // losing connectivity - not that a fresh page.goto() still works.
     await context.setOffline(true);
-    await page.goto('/', { waitUntil: 'domcontentloaded' }).catch(() => {});
-    // The static shell (header/branding) is server-rendered markup, not
-    // dependent on the WebSocket connection, so it should still be there.
     await expect(page.locator('h1:has-text("Project SGR")')).toBeVisible();
 
     await context.setOffline(false);
