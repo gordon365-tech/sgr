@@ -1,4 +1,4 @@
-# Next.js config for SGR Dashboard
+// Next.js config for SGR Dashboard
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {

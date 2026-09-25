@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect } from 'react';
-import useWebSocket from 'use-websocket';
+import useWebSocket from 'react-use-websocket';
 import { useTradingStore } from '@/lib/store';
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000/ws';

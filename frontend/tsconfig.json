@@ -11,11 +11,18 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
-    "jsx": "react-jsx",
+    "jsx": "preserve",
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
-    "types": ["node"]
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./*"]
+    },
+    "allowJs": true,
+    "incremental": true,
+    "plugins": [{ "name": "next" }]
   },
-  "include": ["app/**/*", "components/**/*", "lib/**/*"],
+  "include": ["app/**/*", "components/**/*", "lib/**/*", ".next/types/**/*.ts"],
   "exclude": ["node_modules"]
 }
