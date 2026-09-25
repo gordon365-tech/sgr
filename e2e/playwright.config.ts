@@ -33,10 +33,17 @@ export default defineConfig({
     },
   ],
 
-  webServer: {
-    command: 'npm run dev',
-    url: 'http://localhost:3000',
-    reuseExistingServer: !process.env.CI,
-    cwd: '../frontend',
-  },
+  // In CI the frontend is already running via `docker compose up -d`
+  // (see .github/workflows/ci-cd.yml), so Playwright must not try to spawn
+  // its own dev server there - `npm run dev` would also fail in that job
+  // anyway since only e2e/'s dependencies are installed, not frontend/'s.
+  // Locally, spin one up if nothing is listening yet.
+  webServer: process.env.CI
+    ? undefined
+    : {
+        command: 'npm run dev',
+        url: 'http://localhost:3000',
+        reuseExistingServer: true,
+        cwd: '../frontend',
+      },
 });
