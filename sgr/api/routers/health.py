@@ -18,14 +18,27 @@ Migrationsstand (sgr-api Read-Only-Zielarchitektur):
     Redis) und Redis-gelesene Zustände (Kill Switch), nicht mehr über
     die Anwesenheit von In-Memory-Engines in app.state.
 
-    /health/trading: exchange_connected, preflight_available und
-    risk_engine_available sind Worker-interne Zustände ohne aktuelle
-    Redis/DB-Repräsentation (kein Push-Mechanismus vom Worker analog
-    zum Kill Switch). Sie werden bewusst als "unknown" statt "ok"/
-    "degraded" gemeldet, bis ein Folge-Commit den Worker dazu bringt,
-    diese Zustände nach Redis zu publizieren. trading_enabled bleibt
-    dabei konservativ False, solange irgendein Signal unknown ist
-    (Fail-Safe-Prinzip dieses Moduls).
+    /health/trading (Fix 2026-09-25, dynamisches 25%-Exposure-Limit-
+    Vorhaben, Phase 5): exchange_connected, preflight_available,
+    risk_engine_available und market_data_active werden jetzt aus einem
+    periodischen Redis-Heartbeat gelesen, den der Worker-Prozess selbst
+    schreibt (sgr.monitoring.engine.MonitoringEngine._collect(), alle
+    ~10s, siehe sgr/monitoring/worker_health.py Modul-Docstring). Kein
+    Worker-Heartbeat vorhanden (frischer Start, Worker down, TTL
+    abgelaufen) -> weiterhin "unknown" (Fail-Safe-Prinzip dieses
+    Moduls), kein erfundener Zustand.
+
+    SYSTEM HEALTH != ORDER ADMISSION BLOCKED: trading_enabled bildet
+    ausschliesslich die tatsaechliche Systemgesundheit ab (Worker/API
+    laufen, Kernkomponenten verfuegbar) und ist bewusst UNABHAENGIG vom
+    Kill Switch - ein aktiver Kill Switch bedeutet nicht, dass das
+    System kaputt ist, sondern dass Order-Annahme bewusst pausiert ist.
+    Das zusaetzliche Feld order_admission (plus order_admission_reason)
+    beantwortet stattdessen "wird JETZT tatsaechlich eine neue Order
+    angenommen" - kombiniert Systemgesundheit UND Kill-Switch-Zustand.
+    Beispiel: trading_enabled=true, order_admission=false,
+    order_admission_reason="kill_switch" - das System ist gesund, aber
+    aktuell werden bewusst keine neuen Orders angenommen.
 
     WICHTIGER FUND (bereits vor der Migration bestehender Bug): die
     alte /health/ready-Implementierung prüfte "db_connected" fälschlich
@@ -46,6 +59,7 @@ from sgr.api.dependencies import get_redis_client_or_none
 from sgr.core.config import get_config
 from sgr.core.database import get_session
 from sgr.core.logging import get_logger
+from sgr.monitoring.worker_health import read_worker_health_from_redis
 from sgr.risk.kill_switch import read_kill_switch_state_from_redis
 
 log = get_logger(__name__)
@@ -90,6 +104,12 @@ class TradingHealthResponse(BaseModel):
     exchange_connected: str
     preflight_available: str
     risk_engine_available: str
+    market_data_active: str
+    # Siehe Modul-Docstring "SYSTEM HEALTH != ORDER ADMISSION BLOCKED".
+    # Additiv - bestehende Felder oben bleiben unveraendert im Response-
+    # Shape, kein Breaking Change fuer bestehende Konsumenten.
+    order_admission: bool
+    order_admission_reason: str | None = None
     details: dict[str, Any] = Field(default_factory=dict)
     timestamp: str = Field(default_factory=lambda: datetime.now(tz=UTC).isoformat())
 
@@ -159,14 +179,19 @@ async def health_trading(request: Request) -> Response:
     """
     Trading Health: Ist es sicher zu traden?
 
-    Prüft:
-    - Kill Switch nicht aktiv (aus Redis, vom Worker geschrieben)
+    trading_enabled (SYSTEM HEALTH, siehe Modul-Docstring):
     - Recovery abgeschlossen
-    - Exchange-Verbindung, Preflight, Risk Engine: siehe Modul-Docstring
-      - diese drei sind aktuell "unknown" (Worker-interne Zustände ohne
-        Redis-Repräsentation, Folge-Commit geplant).
+    - Exchange-Verbindung, Preflight, Risk Engine, Market Data: aus dem
+      periodischen Worker-Heartbeat (Redis) - "unknown" statt "unhealthy",
+      solange kein/kein aktueller Heartbeat vorliegt.
 
-    Returns 200 wenn trading_enabled, 503 wenn disabled.
+    order_admission (ORDER ADMISSION BLOCKED, siehe Modul-Docstring):
+    - trading_enabled UND Kill Switch nicht aktiv (aus Redis, vom Worker
+      geschrieben). order_admission_reason benennt den Grund, falls False.
+
+    Returns 200 wenn trading_enabled, 503 wenn disabled. HTTP-Status
+    bildet SYSTEM HEALTH ab, nicht order_admission (ein aktiver Kill
+    Switch bei sonst gesundem System bleibt daher 200/healthy).
     Nicht für Load Balancer Decisions, sondern für UI/Monitoring.
     """
     config = get_config()
@@ -188,35 +213,63 @@ async def health_trading(request: Request) -> Response:
     recovery_complete = True  # Im Lifespan bereits abgeschlossen
     details["recovery_complete"] = recovery_complete
 
-    # Worker-interne Zustände ohne aktuelle Redis-Repraesentation - siehe
-    # Modul-Docstring. Bewusst "unknown" statt erfunden/geraten.
-    exchange_connected = "unknown"
-    preflight_available = "unknown"
-    risk_engine_available = "unknown"
+    # Worker-Health-Heartbeat lesen (siehe Modul-Docstring). Ohne Redis
+    # oder ohne (noch/mehr) gueltigen Heartbeat bleibt jedes Signal
+    # "unknown" - Fail-Safe-Prinzip, kein erfundener Zustand.
+    worker_health: dict[str, Any] | None = None
+    if redis_client is not None:
+        worker_health = await read_worker_health_from_redis(
+            redis_client, trading_mode, tenant_id=config.tenant_id
+        )
+
+    def _tri_state(value: Any) -> str:
+        return "unknown" if value is None else str(bool(value)).lower()
+
+    if worker_health is None:
+        exchange_connected = "unknown"
+        preflight_available = "unknown"
+        risk_engine_available = "unknown"
+        market_data_active = "unknown"
+    else:
+        exchange_connected = _tri_state(worker_health.get("exchange_connected"))
+        preflight_available = _tri_state(worker_health.get("preflight_available"))
+        risk_engine_available = _tri_state(worker_health.get("risk_engine_available"))
+        market_data_active = _tri_state(worker_health.get("market_data_active"))
+
     details["exchange_connected"] = exchange_connected
     details["preflight_available"] = preflight_available
     details["risk_engine_available"] = risk_engine_available
+    details["market_data_active"] = market_data_active
 
-    # Fail-safe (siehe Modul-Docstring-Prinzip: unbekannt -> False).
-    # exchange_connected/preflight_available/risk_engine_available sind
-    # aktuell durchgehend "unknown" (siehe oben) - trading_enabled kann
-    # daher derzeit nie True werden, bis der Folge-Commit diese Signale
-    # verlaesslich aus Redis liefert. Das ist eine bewusste, dokumentierte
-    # Konsequenz des Zwischenstands, keine Regression: der alte Code
-    # konnte diese Signale zwar auf True setzen, aber nur ueber
-    # In-Memory-Engines, die im Read-Only-API-Prozess nicht mehr existieren
-    # wuerden - "immer optimistisch True" waere die eigentliche Regression.
-    signals_known = (
-        exchange_connected != "unknown"
-        and preflight_available != "unknown"
-        and risk_engine_available != "unknown"
+    # SYSTEM HEALTH (siehe Modul-Docstring) - bewusst UNABHAENGIG vom Kill
+    # Switch. Fail-safe: jedes "unknown" Signal haelt trading_enabled auf
+    # False, identisch zum bisherigen Fail-Safe-Prinzip dieses Moduls.
+    system_healthy = (
+        risk_engine_available == "true"
+        and preflight_available == "true"
+        and exchange_connected == "true"
+        and market_data_active == "true"
     )
-    trading_enabled = kill_switch_active is False and recovery_complete and signals_known
+    trading_enabled = system_healthy and recovery_complete
+
+    # ORDER ADMISSION (siehe Modul-Docstring) - zusaetzlich kill-switch-
+    # abhaengig. order_admission_reason benennt den konkreten Grund, wenn
+    # order_admission False ist, sonst None.
+    order_admission_reason: str | None = None
+    if not trading_enabled:
+        order_admission_reason = "system_unhealthy"
+    elif kill_switch_active is None:
+        order_admission_reason = "kill_switch_unknown"
+    elif kill_switch_active:
+        order_admission_reason = "kill_switch"
+    order_admission = trading_enabled and kill_switch_active is False
 
     status = "healthy" if trading_enabled else "degraded"
     http_status = 200 if trading_enabled else 503
 
     details["trading_mode"] = trading_mode.value
+    details["order_admission"] = order_admission
+    details["order_admission_reason"] = order_admission_reason
 
     response_data = TradingHealthResponse(
         status=status,
@@ -226,6 +279,9 @@ async def health_trading(request: Request) -> Response:
         exchange_connected=exchange_connected,
         preflight_available=preflight_available,
         risk_engine_available=risk_engine_available,
+        market_data_active=market_data_active,
+        order_admission=order_admission,
+        order_admission_reason=order_admission_reason,
         details=details,
     )
 

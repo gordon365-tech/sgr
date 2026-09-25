@@ -589,6 +589,96 @@ class TestMonitoringEngineCollect:
             registry.clear()
 
 
+class TestMonitoringEngineWorkerHealth:
+    """_publish_worker_health() - siehe sgr/monitoring/worker_health.py und
+    /health/trading-Fix (2026-09-25, Phase 5). Alle vier Signale muessen
+    aus echten Komponenten-Referenzen abgeleitet werden, nie erfunden."""
+
+    async def test_publish_worker_health_is_noop_without_redis(self) -> None:
+        """Ohne redis_client ist publish_worker_health() ein no-op (siehe
+        dessen Docstring) - _collect() darf dabei trotzdem nicht werfen."""
+        engine = MonitoringEngine(risk_engine=MagicMock())
+        await engine._collect()  # must not raise
+
+    async def test_publish_worker_health_derives_true_signals_from_components(self) -> None:
+        redis_client = AsyncMock()
+        execution_engine = MagicMock()
+        adapter = AsyncMock()
+        adapter.ping = AsyncMock(return_value=12.3)
+        exchange_pool = MagicMock()
+        exchange_pool.get.return_value = adapter
+        market_data_engine = MagicMock()
+        market_data_engine._running = True
+
+        engine = MonitoringEngine(
+            risk_engine=MagicMock(),
+            execution_engine=execution_engine,
+            exchange_pool=exchange_pool,
+            market_data_engine=market_data_engine,
+            redis_client=redis_client,
+            tenant_id="gordon",
+        )
+
+        with patch(
+            "sgr.monitoring.engine.publish_worker_health", AsyncMock()
+        ) as mock_publish:
+            await engine._collect()
+
+        mock_publish.assert_called_once()
+        _, kwargs = mock_publish.call_args
+        assert kwargs["risk_engine_available"] is True
+        assert kwargs["preflight_available"] is True
+        assert kwargs["exchange_connected"] is True
+        assert kwargs["market_data_active"] is True
+        assert kwargs["tenant_id"] == "gordon"
+
+    async def test_publish_worker_health_false_signals_without_components(self) -> None:
+        redis_client = AsyncMock()
+        engine = MonitoringEngine(redis_client=redis_client)
+
+        with patch(
+            "sgr.monitoring.engine.publish_worker_health", AsyncMock()
+        ) as mock_publish:
+            await engine._collect()
+
+        _, kwargs = mock_publish.call_args
+        assert kwargs["risk_engine_available"] is False
+        assert kwargs["preflight_available"] is False
+        assert kwargs["exchange_connected"] is None  # kein Pool injiziert -> unknown, nicht False
+        assert kwargs["market_data_active"] is False
+
+    async def test_publish_worker_health_exchange_ping_failure_is_false_not_unknown(self) -> None:
+        """Ein injizierter Pool, dessen Ping fehlschlaegt, ist ein echtes
+        'nicht verbunden' (False) - nicht dasselbe wie 'kein Pool
+        injiziert' (None/unknown, siehe Test oben)."""
+        redis_client = AsyncMock()
+        exchange_pool = MagicMock()
+        adapter = AsyncMock()
+        adapter.ping = AsyncMock(side_effect=RuntimeError("connection refused"))
+        exchange_pool.get.return_value = adapter
+
+        engine = MonitoringEngine(exchange_pool=exchange_pool, redis_client=redis_client)
+
+        with patch(
+            "sgr.monitoring.engine.publish_worker_health", AsyncMock()
+        ) as mock_publish:
+            await engine._collect()
+
+        _, kwargs = mock_publish.call_args
+        assert kwargs["exchange_connected"] is False
+
+    async def test_publish_worker_health_error_is_swallowed(self) -> None:
+        """Ein Fehler beim Heartbeat-Publish darf _collect() nie zum
+        Absturz bringen (identisches Fail-Safe-Prinzip wie die anderen
+        _collect()-Teilschritte)."""
+        engine = MonitoringEngine(redis_client=AsyncMock())
+        with patch(
+            "sgr.monitoring.engine.publish_worker_health",
+            AsyncMock(side_effect=RuntimeError("redis down")),
+        ):
+            await engine._collect()  # must not raise
+
+
 class TestMetricsAppAndMiddleware:
     def test_create_metrics_app_returns_asgi_app(self) -> None:
         app = create_metrics_app()

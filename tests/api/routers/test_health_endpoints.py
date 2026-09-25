@@ -12,11 +12,13 @@ Migrationsstand (sgr-api Read-Only-Zielarchitektur, Commit 3):
 Testziele:
 1. /health/live = pure liveness (200 always)
 2. /health/ready = 200 if DB+Redis ready, else 503
-3. /health/trading = 200 nur wenn Kill Switch nachweislich inaktiv ist
-   UND die (aktuell noch "unknown") Worker-Signale bekannt sind -
-   siehe sgr/api/routers/health.py Modul-Docstring: diese drei Signale
-   sind bis zu einem Folge-Commit durchgehend "unknown", daher liefert
-   /health/trading in diesem Zwischenstand IMMER 503/trading_enabled=False.
+3. /health/trading = 200 (trading_enabled) nur wenn alle vier
+   Worker-Health-Signale (aus dem Redis-Heartbeat, siehe
+   sgr/monitoring/worker_health.py) "true" sind - UNABHAENGIG vom Kill
+   Switch (SYSTEM HEALTH != ORDER ADMISSION BLOCKED, siehe
+   sgr/api/routers/health.py Modul-Docstring, Fix 2026-09-25). Ohne
+   Heartbeat bleiben die Signale "unknown" und trading_enabled bleibt
+   fail-safe False. order_admission ist zusaetzlich kill-switch-abhaengig.
 4. Backward compatibility: /health endpoint works
 """
 
@@ -147,30 +149,42 @@ class TestHealthReady:
         assert body["components_initialized"] is False
 
 
+_HEALTHY_WORKER_HEARTBEAT = {
+    "risk_engine_available": True,
+    "preflight_available": True,
+    "exchange_connected": True,
+    "market_data_active": True,
+    "updated_at": "2026-09-25T00:00:00+00:00",
+}
+
+
 class TestHealthTrading:
     """
     GET /health/trading - Trading pipeline operational.
 
-    Wichtig: exchange_connected/preflight_available/risk_engine_available
-    sind im aktuellen Zwischenstand (Commit 3) durchgehend "unknown" -
-    siehe Modul-Docstring von sgr/api/routers/health.py. Der Endpoint
-    liefert daher fail-safe IMMER trading_enabled=False/503, bis ein
-    Folge-Commit diese drei Signale verlässlich aus Redis liefert. Das
-    ist kein Test-Bug, sondern die dokumentierte, bewusste Konsequenz
-    der Read-Only-Migration.
+    SYSTEM HEALTH (trading_enabled) wird aus dem Worker-Health-Heartbeat
+    (Redis, siehe sgr/monitoring/worker_health.py) abgeleitet und ist
+    bewusst UNABHAENGIG vom Kill Switch. ORDER ADMISSION (order_admission)
+    ist zusaetzlich kill-switch-abhaengig - siehe Modul-Docstring von
+    sgr/api/routers/health.py (Fix 2026-09-25).
     """
 
-    def test_health_trading_reports_unknown_worker_signals(self) -> None:
-        """Solange kein Folge-Commit die Worker-Signale nach Redis
-        published, meldet der Endpoint sie fail-safe als 'unknown' und
-        bleibt konservativ bei trading_enabled=False."""
+    def test_health_trading_reports_unknown_without_worker_heartbeat(self) -> None:
+        """Kein (noch kein/abgelaufener) Worker-Heartbeat -> alle vier
+        Signale bleiben fail-safe 'unknown', trading_enabled bleibt False."""
         app = create_app()
         redis_client = _mock_redis_ok()
         app.state.feature_store = _mock_feature_store(redis_client)
 
-        with patch(
-            "sgr.api.routers.health.read_kill_switch_state_from_redis",
-            AsyncMock(return_value={"is_active": False, "reason": None}),
+        with (
+            patch(
+                "sgr.api.routers.health.read_kill_switch_state_from_redis",
+                AsyncMock(return_value={"is_active": False, "reason": None}),
+            ),
+            patch(
+                "sgr.api.routers.health.read_worker_health_from_redis",
+                AsyncMock(return_value=None),
+            ),
         ):
             client = TestClient(app)
             response = client.get("/health/trading")
@@ -181,17 +195,92 @@ class TestHealthTrading:
         assert body["exchange_connected"] == "unknown"
         assert body["risk_engine_available"] == "unknown"
         assert body["preflight_available"] == "unknown"
+        assert body["market_data_active"] == "unknown"
         assert body["kill_switch_active"] is False
+        assert body["order_admission"] is False
+        assert body["order_admission_reason"] == "system_unhealthy"
 
-    def test_health_trading_returns_503_when_kill_switch_active(self) -> None:
-        """Trading probe returns 503 when kill switch is active."""
+    def test_health_trading_enabled_true_when_healthy_and_kill_switch_inactive(self) -> None:
+        """Alle vier Worker-Signale 'true' und Kill Switch inaktiv ->
+        trading_enabled=True (200), order_admission=True."""
         app = create_app()
         redis_client = _mock_redis_ok()
         app.state.feature_store = _mock_feature_store(redis_client)
 
-        with patch(
-            "sgr.api.routers.health.read_kill_switch_state_from_redis",
-            AsyncMock(return_value={"is_active": True, "reason": "manual"}),
+        with (
+            patch(
+                "sgr.api.routers.health.read_kill_switch_state_from_redis",
+                AsyncMock(return_value={"is_active": False, "reason": None}),
+            ),
+            patch(
+                "sgr.api.routers.health.read_worker_health_from_redis",
+                AsyncMock(return_value=dict(_HEALTHY_WORKER_HEARTBEAT)),
+            ),
+        ):
+            client = TestClient(app)
+            response = client.get("/health/trading")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "healthy"
+        assert body["trading_enabled"] is True
+        assert body["exchange_connected"] == "true"
+        assert body["risk_engine_available"] == "true"
+        assert body["preflight_available"] == "true"
+        assert body["market_data_active"] == "true"
+        assert body["order_admission"] is True
+        assert body["order_admission_reason"] is None
+
+    def test_health_trading_system_healthy_but_order_admission_blocked_by_kill_switch(
+        self,
+    ) -> None:
+        """SYSTEM HEALTH != ORDER ADMISSION BLOCKED: ein aktiver Kill
+        Switch bei sonst gesundem System haelt trading_enabled=True/200,
+        blockiert aber order_admission mit reason='kill_switch'."""
+        app = create_app()
+        redis_client = _mock_redis_ok()
+        app.state.feature_store = _mock_feature_store(redis_client)
+
+        with (
+            patch(
+                "sgr.api.routers.health.read_kill_switch_state_from_redis",
+                AsyncMock(return_value={"is_active": True, "reason": "manual"}),
+            ),
+            patch(
+                "sgr.api.routers.health.read_worker_health_from_redis",
+                AsyncMock(return_value=dict(_HEALTHY_WORKER_HEARTBEAT)),
+            ),
+        ):
+            client = TestClient(app)
+            response = client.get("/health/trading")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "healthy"
+        assert body["trading_enabled"] is True
+        assert body["kill_switch_active"] is True
+        assert body["order_admission"] is False
+        assert body["order_admission_reason"] == "kill_switch"
+
+    def test_health_trading_returns_503_when_kill_switch_active_and_system_unhealthy(
+        self,
+    ) -> None:
+        """Kill Switch aktiv UND kein Worker-Heartbeat -> weiterhin 503,
+        Grund ist aber 'system_unhealthy' (nicht der Kill Switch), da
+        trading_enabled bereits an den fehlenden Signalen scheitert."""
+        app = create_app()
+        redis_client = _mock_redis_ok()
+        app.state.feature_store = _mock_feature_store(redis_client)
+
+        with (
+            patch(
+                "sgr.api.routers.health.read_kill_switch_state_from_redis",
+                AsyncMock(return_value={"is_active": True, "reason": "manual"}),
+            ),
+            patch(
+                "sgr.api.routers.health.read_worker_health_from_redis",
+                AsyncMock(return_value=None),
+            ),
         ):
             client = TestClient(app)
             response = client.get("/health/trading")
@@ -201,6 +290,37 @@ class TestHealthTrading:
         assert body["status"] == "degraded"
         assert body["trading_enabled"] is False
         assert body["kill_switch_active"] is True
+        assert body["order_admission"] is False
+        assert body["order_admission_reason"] == "system_unhealthy"
+
+    def test_health_trading_partial_worker_signals_keep_trading_disabled(self) -> None:
+        """Nur EIN Signal false (z.B. exchange_connected) reicht, um
+        trading_enabled auf False zu halten - kein Teil-Gesundheitsbonus."""
+        app = create_app()
+        redis_client = _mock_redis_ok()
+        app.state.feature_store = _mock_feature_store(redis_client)
+        heartbeat = dict(_HEALTHY_WORKER_HEARTBEAT)
+        heartbeat["exchange_connected"] = False
+
+        with (
+            patch(
+                "sgr.api.routers.health.read_kill_switch_state_from_redis",
+                AsyncMock(return_value={"is_active": False, "reason": None}),
+            ),
+            patch(
+                "sgr.api.routers.health.read_worker_health_from_redis",
+                AsyncMock(return_value=heartbeat),
+            ),
+        ):
+            client = TestClient(app)
+            response = client.get("/health/trading")
+
+        assert response.status_code == 503
+        body = response.json()
+        assert body["trading_enabled"] is False
+        assert body["exchange_connected"] == "false"
+        assert body["risk_engine_available"] == "true"
+        assert body["order_admission_reason"] == "system_unhealthy"
 
     def test_health_trading_kill_switch_unknown_when_redis_unavailable(self) -> None:
         """Kein Redis -> Kill-Switch-Status ist 'unknown', nicht 'inaktiv'

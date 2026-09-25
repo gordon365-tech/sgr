@@ -903,6 +903,15 @@ async def lifespan(app: FastAPI, role: LifespanRole = "worker") -> AsyncIterator
             portfolio_engine=portfolio_engine,
             strategy_registry=registry,
             trading_mode=config.trading_mode.value,
+            # Worker-Health-Heartbeat (2026-09-25, /health/trading-
+            # Reparatur, siehe sgr/monitoring/worker_health.py) - dieselben
+            # Referenzen, die bereits weiter oben in diesem role="worker"-
+            # Block instanziiert wurden, kein neuer Konstruktionspfad.
+            execution_engine=execution_engine,
+            exchange_pool=pool,
+            market_data_engine=md_engine,
+            redis_client=feature_store.redis_client,
+            tenant_id=config.tenant_id,
         )
         await monitoring_engine.start()
         app.state.monitoring_engine = monitoring_engine

@@ -25,12 +25,14 @@ from prometheus_client import make_asgi_app
 
 from sgr.core.config import get_config
 from sgr.core.logging import get_logger
+from sgr.core.types import TradingMode
 from sgr.monitoring.metrics import (
     get_metrics,
     record_portfolio_snapshot,
     record_position_snapshot,
     record_risk_snapshot,
 )
+from sgr.monitoring.worker_health import publish_worker_health
 
 log = get_logger(__name__)
 
@@ -49,12 +51,28 @@ class MonitoringEngine:
         strategy_registry: Any = None,
         trading_mode: str = "paper",
         interval_seconds: float = 10.0,
+        execution_engine: Any = None,
+        exchange_pool: Any = None,
+        market_data_engine: Any = None,
+        redis_client: Any = None,
+        tenant_id: str | None = None,
     ) -> None:
         self._risk_engine = risk_engine
         self._portfolio_engine = portfolio_engine
         self._strategy_registry = strategy_registry
         self._trading_mode = trading_mode
         self._interval = interval_seconds
+        # Worker-Health-Heartbeat (2026-09-25, Health-Endpoint-Reparatur -
+        # siehe sgr/monitoring/worker_health.py Modul-Docstring und
+        # sgr/api/routers/health.py). Alle vier rein additiv, Default None:
+        # ohne Injektion bleibt _collect() unveraendert, nur der neue
+        # publish_worker_health()-Aufruf am Ende wird uebersprungen
+        # (redis_client=None ist dort ohnehin ein no-op).
+        self._execution_engine = execution_engine
+        self._exchange_pool = exchange_pool
+        self._market_data_engine = market_data_engine
+        self._redis_client = redis_client
+        self._tenant_id = tenant_id
         self._task: asyncio.Task[Any] | None = None
         self._running = False
         # Merkt sich die Label-Kombination (symbol, side, exchange) aller
@@ -221,6 +239,52 @@ class MonitoringEngine:
                     )
             except Exception as e:
                 log.debug("monitoring.strategy_error", error=str(e))
+
+        # Worker-Health-Heartbeat (siehe __init__ Docstring). Bewusst als
+        # letzter, eigener try/except-Block: ein Fehler hier darf keinen
+        # der obigen, bereits etablierten Collect-Schritte verhindern,
+        # und umgekehrt darf ein Fehler dort (z.B. fehlender
+        # StrategyRegistry) den Heartbeat nicht verhindern - jeder
+        # Health-Heartbeat ist wertvoller als gar keiner.
+        try:
+            await self._publish_worker_health()
+        except Exception as e:
+            log.debug("monitoring.worker_health_error", error=str(e))
+
+    async def _publish_worker_health(self) -> None:
+        """Ermittelt die vier Health-Signale aus echten Komponenten-
+        Referenzen (kein Hardcoding, siehe Health-Router-Docstring) und
+        schreibt sie ueber publish_worker_health() nach Redis."""
+        risk_engine_available = self._risk_engine is not None
+
+        # ExecutionEngine konstruiert seinen PreflightValidator
+        # unbedingt in __init__ (siehe sgr/execution/engine.py) - die
+        # blosse Praesenz der ExecutionEngine ist daher ein ehrliches,
+        # nicht erfundenes Signal fuer "Preflight verfuegbar".
+        preflight_available = self._execution_engine is not None
+
+        exchange_connected: bool | None = None
+        if self._exchange_pool is not None:
+            try:
+                config = get_config()
+                adapter = self._exchange_pool.get(config.primary_exchange)
+                await adapter.ping()
+                exchange_connected = True
+            except Exception as e:
+                exchange_connected = False
+                log.debug("monitoring.exchange_ping_failed", error=str(e))
+
+        market_data_active = bool(getattr(self._market_data_engine, "_running", False))
+
+        await publish_worker_health(
+            self._redis_client,
+            TradingMode(self._trading_mode),
+            risk_engine_available=risk_engine_available,
+            preflight_available=preflight_available,
+            exchange_connected=exchange_connected,
+            market_data_active=market_data_active,
+            tenant_id=self._tenant_id,
+        )
 
     def _collect_position_metrics(self) -> None:
         """Schreibt eine Gauge-Zeile pro aktuell offener Position.
