@@ -109,6 +109,36 @@ class SGRMetrics:
         self.open_positions_count = gauge("sgr.risk.open_positions", "Number of open positions")
         self.var_95 = gauge("sgr.risk.var_95_pct", "Value at Risk (95% confidence)")
 
+        # Globaler Exposure-/Capital-Allocation-Cap (2026-09-26, Phase 6 des
+        # "dynamisches 25%-Exposure-Limit"-Vorhabens - siehe
+        # RiskLimitsConfig.max_total_exposure_pct). current_total_exposure_
+        # usd/risk_per_trade_pct/max_open_positions sind unabhaengig vom Cap
+        # immer aussagekraeftig (auch wenn der Cap deaktiviert ist); max_
+        # allowed_exposure_usd/exposure_utilization_pct ergeben nur einen
+        # Sinn, wenn der Cap tatsaechlich konfiguriert ist (siehe
+        # record_exposure_snapshot() - werden sonst bewusst nicht gesetzt,
+        # keine vorgetaeuschte "0%").
+        self.current_total_exposure = gauge(
+            "sgr.risk.current_total_exposure_usd",
+            "Sum of notional value of all currently open directional positions",
+        )
+        self.max_allowed_exposure = gauge(
+            "sgr.risk.max_allowed_exposure_usd",
+            "Dynamic max total exposure (equity * max_total_exposure_pct)",
+        )
+        self.exposure_utilization_pct = gauge(
+            "sgr.risk.exposure_utilization_pct",
+            "current_total_exposure_usd / max_allowed_exposure_usd * 100",
+        )
+        self.risk_per_trade_pct_config = gauge(
+            "sgr.risk.risk_per_trade_pct_config",
+            "Configured max loss per trade as percentage of equity",
+        )
+        self.max_open_positions_config = gauge(
+            "sgr.risk.max_open_positions_config",
+            "Configured maximum number of simultaneously open positions",
+        )
+
         # Position Metrics (Asset/Position Breakdown im Grafana-Dashboard,
         # siehe monitoring/grafana/dashboards/sgr-trading.json): eine
         # Zeitreihe pro offener Position, gelabelt mit symbol/side/
@@ -410,6 +440,27 @@ def record_risk_snapshot(
     m.leverage.set(leverage, {"status": "live"})
     m.open_positions_count.set(open_positions, {"status": "live"})
     m.var_95.set(var_95_pct, {"status": "live"})
+
+
+def record_exposure_snapshot(
+    current_total_exposure_usd: Decimal,
+    risk_per_trade_pct: float,
+    max_open_positions: int,
+    max_allowed_exposure_usd: Decimal | None = None,
+    exposure_utilization_pct: float | None = None,
+) -> None:
+    """Records the global exposure cap state (siehe RiskLimitsConfig.
+    max_total_exposure_pct Docstring). max_allowed_exposure_usd/
+    exposure_utilization_pct bleiben ungesetzt, wenn der Cap deaktiviert
+    ist (max_total_exposure_pct=None) - keine vorgetaeuschte Zahl."""
+    m = get_metrics()
+    m.current_total_exposure.set(float(current_total_exposure_usd), {"status": "live"})
+    m.risk_per_trade_pct_config.set(risk_per_trade_pct, {"status": "live"})
+    m.max_open_positions_config.set(max_open_positions, {"status": "live"})
+    if max_allowed_exposure_usd is not None:
+        m.max_allowed_exposure.set(float(max_allowed_exposure_usd), {"status": "live"})
+    if exposure_utilization_pct is not None:
+        m.exposure_utilization_pct.set(exposure_utilization_pct, {"status": "live"})
 
 
 def record_trade_executed(

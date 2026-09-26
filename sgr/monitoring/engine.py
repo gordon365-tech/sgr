@@ -28,6 +28,7 @@ from sgr.core.logging import get_logger
 from sgr.core.types import TradingMode
 from sgr.monitoring.metrics import (
     get_metrics,
+    record_exposure_snapshot,
     record_portfolio_snapshot,
     record_position_snapshot,
     record_risk_snapshot,
@@ -182,6 +183,11 @@ class MonitoringEngine:
             except Exception as e:
                 log.debug("monitoring.risk_error", error=str(e))
 
+            try:
+                self._collect_exposure_metrics()
+            except Exception as e:
+                log.debug("monitoring.exposure_error", error=str(e))
+
         if self._portfolio_engine:
             try:
                 self._collect_position_metrics()
@@ -284,6 +290,42 @@ class MonitoringEngine:
             exchange_connected=exchange_connected,
             market_data_active=market_data_active,
             tenant_id=self._tenant_id,
+        )
+
+    def _collect_exposure_metrics(self) -> None:
+        """Globaler Exposure-Cap-Zustand (siehe RiskLimitsConfig.
+        max_total_exposure_pct Docstring, Phase 6 des "dynamisches
+        25%-Exposure-Limit"-Vorhabens). current_total_exposure_usd wird
+        direkt aus den offenen Positionen summiert (nicht aus
+        portfolio_heat abgeleitet) - identische Grundlage wie der
+        Risk-Engine-Check selbst (sgr/risk/engine.py Schritt 7c)."""
+        positions = self._portfolio_engine.positions
+        current_total_exposure = sum(
+            (p.notional_value for p in positions), Decimal("0")
+        )
+
+        # RiskEngine._limits ist bereits das etablierte Zugriffsmuster in
+        # dieser Klasse (siehe _compute_metrics()-Aufrufe oben) - kein
+        # neuer, oeffentlicher Accessor auf der RiskEngine noetig.
+        limits = self._risk_engine._limits
+        max_total_exposure_pct = getattr(limits, "max_total_exposure_pct", None)
+
+        max_allowed_exposure: Decimal | None = None
+        exposure_utilization_pct: float | None = None
+        portfolio_value = self._portfolio_engine.portfolio_value
+        if max_total_exposure_pct is not None and portfolio_value > 0:
+            max_allowed_exposure = portfolio_value * Decimal(str(max_total_exposure_pct))
+            if max_allowed_exposure > 0:
+                exposure_utilization_pct = float(
+                    current_total_exposure / max_allowed_exposure
+                ) * 100
+
+        record_exposure_snapshot(
+            current_total_exposure_usd=current_total_exposure,
+            risk_per_trade_pct=float(getattr(limits, "risk_per_trade_pct", 0.0)) * 100,
+            max_open_positions=int(getattr(limits, "max_open_positions", 0)),
+            max_allowed_exposure_usd=max_allowed_exposure,
+            exposure_utilization_pct=exposure_utilization_pct,
         )
 
     def _collect_position_metrics(self) -> None:

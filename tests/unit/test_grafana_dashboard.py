@@ -175,8 +175,10 @@ class TestDashboardIsFocusedNotBloated:
     Panels (siehe Task-Vorgabe 'Grafana Design').
 
     Budget bewusst von <=20 auf <=26 (Autonomous-Paper-Trading-Rollout,
-    Abschnitt 'Grafana') und weiter auf <=34 (Autonomous-Strategy-
-    Universe-Rollout, Phase 16 'Grafana') angehoben: die Task-Vorgabe
+    Abschnitt 'Grafana'), weiter auf <=34 (Autonomous-Strategy-
+    Universe-Rollout, Phase 16 'Grafana') und weiter auf <=36 (2026-09-26,
+    Phase 6 des "dynamisches 25%-Exposure-Limit"-Vorhabens, Reihe "Global
+    Exposure Cap (dynamic 25% limit)") angehoben: die Task-Vorgabe
     verlangt explizit zusaetzliche Sichtbarkeit - zuerst fuer den
     autonomen Betrieb (aktiv analysierte Symbole, Marktregime, aktive
     Strategie, generierte/abgelehnte Signale, durch Risk blockierte
@@ -185,13 +187,19 @@ class TestDashboardIsFocusedNotBloated:
     Strategievalidierung (Total/Validated/Active/No-Valid-Strategy/
     Data-Insufficient/Success-Rate, Best-Strategy-Distribution,
     Avg-Sharpe/Return/Drawdown je Strategie - Reihe "Strategy Universe
-    Validation"). Kein pauschales Aufweichen - jede neue Reihe deckt
-    genau die dafuer geforderten Punkte ab, nicht mehr."""
+    Validation"), zuletzt fuer den neuen globalen Exposure-Cap (Current
+    vs Max Exposure USD, Exposure Utilization % - bewusst nur 2 statt 5
+    denkbarer Panels: risk_per_trade_pct/max_open_positions bleiben
+    reine, unveraenderliche Config-Werte ohne eigenen Zeitverlauf und
+    sind bereits im Phase-10-Abschlussbericht sowie ueber /metrics
+    abfragbar, kein zusaetzliches Panel noetig). Kein pauschales
+    Aufweichen - jede neue Reihe deckt genau die dafuer geforderten
+    Punkte ab, nicht mehr."""
 
     def test_content_panel_count_is_reasonable(self, dashboard: dict) -> None:
         content_panels = _all_panels(dashboard)
-        assert 0 < len(content_panels) <= 34, (
-            f"Expected a focused dashboard (<=34 content panels), got {len(content_panels)}"
+        assert 0 < len(content_panels) <= 36, (
+            f"Expected a focused dashboard (<=36 content panels), got {len(content_panels)}"
         )
 
     def test_no_duplicate_panel_titles(self, dashboard: dict) -> None:

@@ -2799,6 +2799,163 @@
           "refId": "B"
         }
       ]
+    },
+    {
+      "collapsed": false,
+      "datasource": "Prometheus",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 96
+      },
+      "id": 43,
+      "panels": [],
+      "title": "Global Exposure Cap (dynamic 25% limit)",
+      "type": "row"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "Sum of open directional notional (solid) vs. the dynamic cap = current equity * max_total_exposure_pct (dashed target line via the second query). No data on the _max series = cap disabled. See RiskLimitsConfig.max_total_exposure_pct.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 97
+      },
+      "id": 44,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_risk_current_total_exposure_usd{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\"}",
+          "legendFormat": "Gordon current",
+          "refId": "A"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_risk_max_allowed_exposure_usd{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\"}",
+          "legendFormat": "Gordon max",
+          "refId": "B"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_risk_current_total_exposure_usd{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\"}",
+          "legendFormat": "Sumo current",
+          "refId": "C"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_risk_max_allowed_exposure_usd{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\"}",
+          "legendFormat": "Sumo max",
+          "refId": "D"
+        }
+      ],
+      "title": "Exposure Cap: Current vs Max (USD)",
+      "type": "stat"
+    },
+    {
+      "datasource": "Prometheus",
+      "description": "current_total_exposure_usd / max_allowed_exposure_usd * 100. No data = cap disabled (RiskLimitsConfig.max_total_exposure_pct not configured).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 70
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
+          },
+          "unit": "percent",
+          "noValue": "disabled"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 97
+      },
+      "id": 45,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_risk_exposure_utilization_pct{tenant=\"a47d994d-35cc-4619-83bb-86fd0cb48447\"}",
+          "legendFormat": "Gordon",
+          "refId": "A"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "sgr_risk_exposure_utilization_pct{tenant=\"144f7bb0-113d-4c66-b5d3-7a34ab1d551a\"}",
+          "legendFormat": "Sumo",
+          "refId": "B"
+        }
+      ],
+      "title": "Exposure Utilization",
+      "type": "gauge"
     }
   ],
   "refresh": "30s",

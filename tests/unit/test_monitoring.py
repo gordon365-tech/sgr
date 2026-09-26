@@ -589,6 +589,103 @@ class TestMonitoringEngineCollect:
             registry.clear()
 
 
+class TestMonitoringEngineExposureMetrics:
+    """_collect_exposure_metrics() - siehe RiskLimitsConfig.
+    max_total_exposure_pct Docstring, Phase 6 des "dynamisches
+    25%-Exposure-Limit"-Vorhabens. current_total_exposure_usd wird direkt
+    aus den offenen Positionen summiert (identische Grundlage wie der
+    Risk-Engine-Check selbst, sgr/risk/engine.py Schritt 7c)."""
+
+    def _make_portfolio_engine(self, *notionals: str, portfolio_value: str = "10000") -> MagicMock:
+        pe = MagicMock()
+        pe.portfolio_value = Decimal(portfolio_value)
+        pe.cash = Decimal(portfolio_value)
+        pe.positions = [MagicMock(notional_value=Decimal(n)) for n in notionals]
+        return pe
+
+    def _make_risk_engine(
+        self,
+        *,
+        max_total_exposure_pct: float | None,
+        risk_per_trade_pct: float = 0.02,
+        max_open_positions: int = 15,
+    ) -> MagicMock:
+        import types
+
+        re_ = MagicMock()
+        re_._limits = types.SimpleNamespace(
+            max_total_exposure_pct=max_total_exposure_pct,
+            risk_per_trade_pct=risk_per_trade_pct,
+            max_open_positions=max_open_positions,
+        )
+        re_._compute_metrics.return_value = MagicMock(
+            drawdown_from_peak=0.0, var_95=0.0, portfolio_heat=0.0, daily_pnl_pct=0.0,
+        )
+        return re_
+
+    async def test_computes_sum_and_dynamic_cap_when_enabled(self) -> None:
+        pe = self._make_portfolio_engine("800", "700", portfolio_value="10000")
+        re_ = self._make_risk_engine(max_total_exposure_pct=0.25)
+        engine = MonitoringEngine(risk_engine=re_, portfolio_engine=pe)
+
+        with patch(
+            "sgr.monitoring.engine.record_exposure_snapshot", MagicMock()
+        ) as mock_record:
+            await engine._collect()
+
+        mock_record.assert_called_once()
+        _, kwargs = mock_record.call_args
+        assert kwargs["current_total_exposure_usd"] == Decimal("1500")
+        assert kwargs["max_allowed_exposure_usd"] == Decimal("2500.00")
+        assert kwargs["exposure_utilization_pct"] == pytest.approx(60.0)
+        assert kwargs["risk_per_trade_pct"] == pytest.approx(2.0)
+        assert kwargs["max_open_positions"] == 15
+
+    async def test_disabled_cap_leaves_max_and_utilization_unset(self) -> None:
+        """max_total_exposure_pct=None (Default/deaktiviert) darf
+        max_allowed_exposure_usd/exposure_utilization_pct nicht auf eine
+        erfundene Zahl setzen - current_total_exposure_usd bleibt trotzdem
+        aussagekraeftig."""
+        pe = self._make_portfolio_engine("800", portfolio_value="10000")
+        re_ = self._make_risk_engine(max_total_exposure_pct=None)
+        engine = MonitoringEngine(risk_engine=re_, portfolio_engine=pe)
+
+        with patch(
+            "sgr.monitoring.engine.record_exposure_snapshot", MagicMock()
+        ) as mock_record:
+            await engine._collect()
+
+        _, kwargs = mock_record.call_args
+        assert kwargs["current_total_exposure_usd"] == Decimal("800")
+        assert kwargs["max_allowed_exposure_usd"] is None
+        assert kwargs["exposure_utilization_pct"] is None
+
+    async def test_zero_portfolio_value_does_not_divide_by_zero(self) -> None:
+        pe = self._make_portfolio_engine("0", portfolio_value="0")
+        re_ = self._make_risk_engine(max_total_exposure_pct=0.25)
+        engine = MonitoringEngine(risk_engine=re_, portfolio_engine=pe)
+
+        with patch(
+            "sgr.monitoring.engine.record_exposure_snapshot", MagicMock()
+        ) as mock_record:
+            await engine._collect()  # must not raise (ZeroDivisionError)
+
+        _, kwargs = mock_record.call_args
+        assert kwargs["max_allowed_exposure_usd"] is None
+        assert kwargs["exposure_utilization_pct"] is None
+
+    async def test_exposure_error_is_swallowed(self) -> None:
+        """Ein Fehler in _collect_exposure_metrics() (z.B. kaputte _limits)
+        darf _collect() nie zum Absturz bringen."""
+        pe = self._make_portfolio_engine("800")
+        re_ = MagicMock()
+        re_._limits = None  # getattr(None, "max_total_exposure_pct", None) -> kein Crash,
+        # aber .positions-Zugriff o.ae. koennte in Zukunft brechen - Fail-Safe pruefen.
+        re_._compute_metrics.side_effect = RuntimeError("boom")
+        engine = MonitoringEngine(risk_engine=re_, portfolio_engine=pe)
+        await engine._collect()  # must not raise
+
+
 class TestMonitoringEngineWorkerHealth:
     """_publish_worker_health() - siehe sgr/monitoring/worker_health.py und
     /health/trading-Fix (2026-09-25, Phase 5). Alle vier Signale muessen
