@@ -356,6 +356,62 @@ class TestHealthTrading:
         assert body["kill_switch_active"] is None
         assert body["trading_enabled"] is False
 
+    def test_health_trading_tenant_id_query_param_scopes_both_reads(self) -> None:
+        """sgr-api ist ein gemeinsamer Prozess fuer mehrere Worker (Gordon/
+        Sumo, jeweils eigene tenant_id) - ?tenant_id=<uuid> muss sowohl
+        den Kill-Switch- als auch den Worker-Health-Read auf genau diesen
+        Tenant scopen, nicht auf config.tenant_id (None fuer sgr-api)."""
+        app = create_app()
+        redis_client = _mock_redis_ok()
+        app.state.feature_store = _mock_feature_store(redis_client)
+
+        with (
+            patch(
+                "sgr.api.routers.health.read_kill_switch_state_from_redis",
+                AsyncMock(return_value={"is_active": False, "reason": None}),
+            ) as mock_ks,
+            patch(
+                "sgr.api.routers.health.read_worker_health_from_redis",
+                AsyncMock(return_value=dict(_HEALTHY_WORKER_HEARTBEAT)),
+            ) as mock_wh,
+        ):
+            client = TestClient(app)
+            response = client.get(
+                "/health/trading?tenant_id=a47d994d-35cc-4619-83bb-86fd0cb48447"
+            )
+
+        assert response.status_code == 200
+        assert response.json()["trading_enabled"] is True
+        assert response.json()["details"]["tenant_id"] == "a47d994d-35cc-4619-83bb-86fd0cb48447"
+        mock_ks.assert_awaited_once()
+        assert mock_ks.await_args.kwargs["tenant_id"] == "a47d994d-35cc-4619-83bb-86fd0cb48447"
+        mock_wh.assert_awaited_once()
+        assert mock_wh.await_args.kwargs["tenant_id"] == "a47d994d-35cc-4619-83bb-86fd0cb48447"
+
+    def test_health_trading_without_tenant_id_falls_back_to_default_key(self) -> None:
+        """Ohne ?tenant_id bleibt das Verhalten identisch zu vorher (kein
+        Breaking Change): tenant_id=None wird durchgereicht."""
+        app = create_app()
+        redis_client = _mock_redis_ok()
+        app.state.feature_store = _mock_feature_store(redis_client)
+
+        with (
+            patch(
+                "sgr.api.routers.health.read_kill_switch_state_from_redis",
+                AsyncMock(return_value={"is_active": False, "reason": None}),
+            ) as mock_ks,
+            patch(
+                "sgr.api.routers.health.read_worker_health_from_redis",
+                AsyncMock(return_value=None),
+            ) as mock_wh,
+        ):
+            client = TestClient(app)
+            response = client.get("/health/trading")
+
+        assert response.json()["details"]["tenant_id"] == "default"
+        assert mock_ks.await_args.kwargs["tenant_id"] is None
+        assert mock_wh.await_args.kwargs["tenant_id"] is None
+
 
 class TestHealthBackwardCompatibility:
     """GET /health - Backward compatible alias."""

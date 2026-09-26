@@ -556,6 +556,23 @@ services:
       # position_protection.py Modul-Docstring und Deployment-Entscheidung:
       # Cleanup erfolgt separat, erst nach bestaetigtem E2E-Beweis).
       RISK_PROTECTION_CUTOVER_AT: "2026-09-16T10:40:36+00:00"
+      # 2026-09-26, operative Anweisung ("dynamisches 25-Prozent-Exposure-
+      # Limit"): globaler, equity-relativer Cap ueber ALLE gleichzeitig
+      # offenen Positionen (direktional UND Grid kombiniert) - siehe
+      # RiskLimitsConfig.max_total_exposure_pct und GridRiskLimitsConfig.
+      # max_total_exposure_pct Docstrings. Beide auf denselben Wert
+      # gesetzt (0.25 = 25%), da beide zusammen das EINE geforderte
+      # Gesamt-Cap bilden sollen, nicht zwei unabhaengige Limits. Faengt
+      # bei aktueller Konfiguration (position_size_usd=50 x max_open_
+      # positions=15 = max. 750 USD direktional) aktuell nicht real, weil
+      # dieser strukturelle Ceiling deutlich unter 25% von 10000 USD
+      # Startkapital (2500 USD) liegt - siehe Phase-10-Abschlussbericht
+      # fuer die vollstaendige Herleitung. Bewusst NICHT durch ein
+      # blindes Anheben von max_open_positions/position_size_usd
+      # "erzwungen" (explizite Anweisung: keine anderen Limits blind
+      # aendern, nur um 25% zu erreichen).
+      RISK_MAX_TOTAL_EXPOSURE_PCT: "0.25"
+      GRID_RISK_MAX_TOTAL_EXPOSURE_PCT: "0.25"
 
       SENTRY_DSN: ${SENTRY_DSN:-}
       
@@ -700,6 +717,10 @@ services:
       RISK_RISK_PER_TRADE_PCT: "0.02"
       RISK_MAX_ORDER_NOTIONAL: "200"
       RISK_PROTECTION_CUTOVER_AT: "2026-09-17T22:40:46+00:00"
+      # 2026-09-26, operative Anweisung ("dynamisches 25-Prozent-Exposure-
+      # Limit") - identische Begruendung wie im worker-gordon-Service oben.
+      RISK_MAX_TOTAL_EXPOSURE_PCT: "0.25"
+      GRID_RISK_MAX_TOTAL_EXPOSURE_PCT: "0.25"
 
       SENTRY_DSN: ${SENTRY_DSN:-}
       

@@ -175,7 +175,7 @@ async def health_ready(request: Request) -> Response:
 
 
 @router.get("/health/trading", response_model=TradingHealthResponse)
-async def health_trading(request: Request) -> Response:
+async def health_trading(request: Request, tenant_id: str | None = None) -> Response:
     """
     Trading Health: Ist es sicher zu traden?
 
@@ -189,6 +189,17 @@ async def health_trading(request: Request) -> Response:
     - trading_enabled UND Kill Switch nicht aktiv (aus Redis, vom Worker
       geschrieben). order_admission_reason benennt den Grund, falls False.
 
+    tenant_id (optionaler Query-Parameter, z.B. "?tenant_id=<uuid>"):
+    dieser Prozess (sgr-api) bedient mehrere Worker (Gordon/Sumo), die
+    JEWEILS unter ihrer eigenen tenant_id nach Redis schreiben (siehe
+    sgr/risk/kill_switch.py und sgr/monitoring/worker_health.py Redis-Key-
+    Schema). Ohne diesen Parameter faellt der Check auf config.tenant_id
+    zurueck (None in einem Multi-Tenant-Deployment wie diesem, da die
+    sgr-api-Instanz selbst keine eigene tenant_id hat) - das ist bewusst
+    identisch zum bisherigen, ungescopten Verhalten dieses Endpoints,
+    kein Breaking Change. Um den tatsaechlichen Zustand EINES konkreten
+    Workers zu sehen, tenant_id explizit mitgeben.
+
     Returns 200 wenn trading_enabled, 503 wenn disabled. HTTP-Status
     bildet SYSTEM HEALTH ab, nicht order_admission (ein aktiver Kill
     Switch bei sonst gesundem System bleibt daher 200/healthy).
@@ -196,6 +207,7 @@ async def health_trading(request: Request) -> Response:
     """
     config = get_config()
     trading_mode = config.trading_mode
+    effective_tenant_id = tenant_id if tenant_id is not None else config.tenant_id
     details: dict[str, Any] = {}
 
     redis_client = get_redis_client_or_none(request)
@@ -204,7 +216,9 @@ async def health_trading(request: Request) -> Response:
         kill_switch_active = None
         details["kill_switch_active"] = "unknown"
     else:
-        ks_state = await read_kill_switch_state_from_redis(redis_client, trading_mode)
+        ks_state = await read_kill_switch_state_from_redis(
+            redis_client, trading_mode, tenant_id=effective_tenant_id
+        )
         kill_switch_active = bool(ks_state["is_active"]) if ks_state is not None else None
         details["kill_switch_active"] = (
             "unknown" if kill_switch_active is None else kill_switch_active
@@ -219,7 +233,7 @@ async def health_trading(request: Request) -> Response:
     worker_health: dict[str, Any] | None = None
     if redis_client is not None:
         worker_health = await read_worker_health_from_redis(
-            redis_client, trading_mode, tenant_id=config.tenant_id
+            redis_client, trading_mode, tenant_id=effective_tenant_id
         )
 
     def _tri_state(value: Any) -> str:
@@ -268,6 +282,7 @@ async def health_trading(request: Request) -> Response:
     http_status = 200 if trading_enabled else 503
 
     details["trading_mode"] = trading_mode.value
+    details["tenant_id"] = effective_tenant_id or "default"
     details["order_admission"] = order_admission
     details["order_admission_reason"] = order_admission_reason
 
