@@ -225,6 +225,16 @@ class StrategyEngine:
 
         # 3. Aktive Strategien für dieses Regime
         active = self._registry.get_active(regime=regime)
+
+        # Siehe SGRConfig.paper_test_strategy_allowlist Docstring: isoliert
+        # genau eine (oder mehrere) Strategie(n) fuer PAPER-Test-Profile
+        # (z.B. Profile F "Trend Following"), ohne andere global aktive
+        # Strategien tatsaechlich zu deaktivieren. Default None = kein
+        # Effekt.
+        strategy_allowlist = get_config().paper_test_strategy_allowlist
+        if strategy_allowlist is not None:
+            active = [s for s in active if s.name in strategy_allowlist]
+
         if not active:
             log.debug(
                 "strategy_engine.no_active_strategies",

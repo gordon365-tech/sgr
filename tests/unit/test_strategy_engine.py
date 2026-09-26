@@ -380,7 +380,9 @@ class TestSymbolGateIntegration:
             monkeypatch.setattr(gate, "refresh_if_stale", AsyncMock())
             monkeypatch.setattr(
                 "sgr.strategy.engine.get_config",
-                lambda: SimpleNamespace(paper_test_disable_symbol_gate=True),
+                lambda: SimpleNamespace(
+                    paper_test_disable_symbol_gate=True, paper_test_strategy_allowlist=None
+                ),
             )
 
             signal = await engine.process("binance:BTC/USDT", "1h")
@@ -414,12 +416,102 @@ class TestSymbolGateIntegration:
             monkeypatch.setattr(gate, "refresh_if_stale", AsyncMock())
             monkeypatch.setattr(
                 "sgr.strategy.engine.get_config",
-                lambda: SimpleNamespace(paper_test_disable_symbol_gate=True),
+                lambda: SimpleNamespace(
+                    paper_test_disable_symbol_gate=True, paper_test_strategy_allowlist=None
+                ),
             )
 
             signal = await engine.process("binance:USDC/USDT", "1h")
 
             assert signal is None
+        finally:
+            registry.clear()
+            gate._active_strategy_by_symbol.clear()
+
+
+class TestStrategyAllowlist:
+    """SGRConfig.paper_test_strategy_allowlist (2026-09-26, Profile F
+    "Trend Following" der systematischen PAPER-Profitabilitaets-
+    Untersuchung): isoliert genau eine Strategie, ohne andere global
+    aktive Strategien tatsaechlich zu deaktivieren."""
+
+    async def test_allowlist_restricts_to_named_strategy(self, monkeypatch) -> None:
+        registry = _fresh_registry()
+        gate = SymbolStrategyGate.get()
+        gate._active_strategy_by_symbol.clear()
+        try:
+            allowed = SignalingStrategy(SignalDirection.LONG, confidence=0.6)
+            allowed.name = "allowed_strategy"
+            other = SignalingStrategy(SignalDirection.LONG, confidence=0.99)
+            other.name = "other_strategy"
+            registry.register_instance(allowed)
+            registry.register_instance(other)
+            await registry.activate(allowed.name)
+            await registry.activate(other.name)
+
+            fs = _feature_set(_trending_indicators())
+            store = _fake_feature_store(fs)
+            engine = StrategyEngine(TradingMode.PAPER, store, registry=registry)
+            monkeypatch.setattr("sgr.strategy.engine.record_market_regime", MagicMock())
+            monkeypatch.setattr("sgr.strategy.engine.record_strategy_evaluation", MagicMock())
+            monkeypatch.setattr("sgr.strategy.engine.record_signal_generated", MagicMock())
+            monkeypatch.setattr(gate, "refresh_if_stale", AsyncMock())
+            monkeypatch.setattr(
+                "sgr.strategy.engine.get_config",
+                lambda: SimpleNamespace(
+                    paper_test_disable_symbol_gate=False,
+                    paper_test_strategy_allowlist=frozenset({"allowed_strategy"}),
+                ),
+            )
+
+            signal = await engine.process("binance:BTC/USDT", "1h")
+
+            # "other_strategy" hat die hoehere Konfidenz (0.99 vs 0.6) und
+            # wuerde ohne Allowlist gewinnen - der Test beweist damit
+            # zweifelsfrei, dass die Allowlist tatsaechlich filtert, nicht
+            # nur zufaellig dieselbe Strategie durchlaesst.
+            assert signal is not None
+            assert signal.strategy_name == "allowed_strategy"
+            assert signal.direction == SignalDirection.LONG
+        finally:
+            registry.clear()
+            gate._active_strategy_by_symbol.clear()
+
+    async def test_allowlist_none_has_no_effect(self, monkeypatch) -> None:
+        """Default (None) darf das bestehende Verhalten (bestes Signal
+        gewinnt) nicht veraendern."""
+        registry = _fresh_registry()
+        gate = SymbolStrategyGate.get()
+        gate._active_strategy_by_symbol.clear()
+        try:
+            weak = SignalingStrategy(SignalDirection.LONG, confidence=0.6)
+            weak.name = "weak_strategy"
+            strong = SignalingStrategy(SignalDirection.LONG, confidence=0.99)
+            strong.name = "strong_strategy"
+            registry.register_instance(weak)
+            registry.register_instance(strong)
+            await registry.activate(weak.name)
+            await registry.activate(strong.name)
+
+            fs = _feature_set(_trending_indicators())
+            store = _fake_feature_store(fs)
+            engine = StrategyEngine(TradingMode.PAPER, store, registry=registry)
+            monkeypatch.setattr("sgr.strategy.engine.record_market_regime", MagicMock())
+            monkeypatch.setattr("sgr.strategy.engine.record_strategy_evaluation", MagicMock())
+            monkeypatch.setattr("sgr.strategy.engine.record_signal_generated", MagicMock())
+            monkeypatch.setattr(gate, "refresh_if_stale", AsyncMock())
+            monkeypatch.setattr(
+                "sgr.strategy.engine.get_config",
+                lambda: SimpleNamespace(
+                    paper_test_disable_symbol_gate=False,
+                    paper_test_strategy_allowlist=None,
+                ),
+            )
+
+            signal = await engine.process("binance:BTC/USDT", "1h")
+
+            assert signal is not None
+            assert signal.strategy_name == "strong_strategy"
         finally:
             registry.clear()
             gate._active_strategy_by_symbol.clear()

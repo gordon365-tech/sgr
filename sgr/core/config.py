@@ -426,6 +426,34 @@ class SGRConfig(BaseSettings):
     # (_PAPER_TEST_SYMBOL_GATE_ALLOWLIST), nicht hier in der Config.
     paper_test_disable_symbol_gate: bool = Field(default=False)
 
+    # 2026-09-26, "naechste grosse SGR Testphase" (systematische Profitabilitaets-
+    # Untersuchung ueber PAPER TEST PROFILE A-I): Profile F (Trend Following)
+    # verlangt eine ISOLIERTE Messung genau einer Strategie. Live-Befund aus
+    # dem Capability Scan: praktisch alle bisher beobachteten Signale kamen
+    # ohnehin von trend_following_v1, aber momentum_v1/breakout_v1/
+    # volatility_adjusted_momentum_v1/futures_grid_*/mean_reversion_v1 sind
+    # GLEICHZEITIG aktiv und koennten im Signal-Aggregationsschritt
+    # (StrategyEngine._aggregate) gelegentlich gewinnen - fuer eine sauber
+    # isolierte Einzelstrategie-Messung reicht "meistens trend_following_v1"
+    # nicht. Kein bestehender Mechanismus deaktiviert gezielt andere,
+    # bereits aktive Strategien (STRATEGY_FORCE_ACTIVATE aktiviert nur
+    # zusaetzlich, deaktiviert nichts). Komma-getrennte Namensliste; nur
+    # Strategien in dieser Liste werden in StrategyEngine.process()
+    # ausgewertet, alle anderen (auch wenn global aktiv) werden fuer diesen
+    # Worker-Prozess ignoriert. None (Default) = deaktiviert, identisches
+    # Verhalten zu vorher. Reine Test-Isolation, kein Risk Control.
+    paper_test_strategy_allowlist: frozenset[str] | None = Field(default=None)
+
+    @field_validator("paper_test_strategy_allowlist", mode="before")
+    @classmethod
+    def _parse_strategy_allowlist(cls, v: Any) -> frozenset[str] | None:
+        if v is None or v == "":
+            return None
+        if isinstance(v, str):
+            names = {name.strip() for name in v.split(",") if name.strip()}
+            return frozenset(names) if names else None
+        return v
+
     # Welche Exchange der Lifecycle standardmaessig verwendet (Market Data
     # Subscriptions + Exchange Pool). Default bleibt PIONEX fuer
     # Abwaertskompatibilitaet; per PRIMARY_EXCHANGE=binance env var
