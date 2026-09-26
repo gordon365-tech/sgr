@@ -527,53 +527,23 @@ services:
       RISK_DEFAULT_LEVERAGE: "3"
       RISK_MAX_LEVERAGE: "3"
       RISK_POSITION_SIZE_USD: "50"
-      # 2026-09-26, operative Anweisung ("aggressiver, hochfrequenter
-      # FUTURES PAPER TRADING TEST", live beobachtet): 0.01/0.02 -> 0.005/
-      # 0.01 (Stufe 1) -> 0.0015/0.003 (Stufe 2, explizite Nachfrage "SL/TP
-      # enger stellen fuer mehr echte Treffer"). Live-Befund nach Stufe 1
-      # (10 Min. Beobachtung, beide Worker): tatsaechliche Preisbewegungen
-      # der meisten Symbole lagen bei 0.05-0.4% innerhalb der 10-Minuten-
-      # Haltezeit (z.B. NEAR ~0.4%, BNB ~0.17%, ETH ~0.08%, XAU/XAG nahe 0)
-      # - nur AVAX erreichte das alte 0.5%-SL ueberhaupt (2x beobachtet).
-      # 18 von 19 Exits liefen dadurch ueber max_holding_time statt SL/TP.
-      # 0.15%/0.3% liegt innerhalb der beobachteten Bewegungsspanne, sollte
-      # also deutlich mehr echte stop_loss_hit/take_profit_hit-Exits
-      # erzeugen, ohne bei jedem kleinsten Preis-Tick sofort auszuloesen.
-      # KEINE der 5 explizit geschuetzten Groessen (position_size_usd/
-      # max_open_positions/max_total_exposure_pct/risk_per_trade_pct/
-      # leverage) ist hiervon betroffen.
-      #
-      # Stufe 3 (2026-09-26, "Erhoehe die Gewinnrate, TP/SL-Verhaeltnis
-      # anpassen") wurde live getestet (TP 0.10% enger als SL 0.25%) und
-      # per explizitem Revert wieder rueckgaengig gemacht ("Revert das
-      # TP/SL-Verhaeltnis, das war schlechter"): eine erste kleine
-      # Stichprobe (14 Exits/Worker) zeigte 42.9% Gewinnrate, aber mit mehr
-      # Daten (44 Exits/Worker, ~22 Min.) fiel sie auf 26-33% zurueck, bei
-      # PnL von -1.62/-1.12 USD und einer Serie von 8 aufeinanderfolgenden,
-      # ueberdurchschnittlich grossen stop_loss-Treffern (0.10-0.26 USD
-      # statt der vorher ueblichen 0.05-0.08 USD) - schlechter als Stufe 2.
-      # Zurueck auf Stufe 2 (0.15%/0.3%, TP doppelt so weit wie SL): ~44-45%
-      # SL/TP-Anteil an allen Exits, PnL im aehnlichen Bereich, keine
-      # Serie ungewoehnlich grosser Einzelverluste beobachtet. KEINE der 5
-      # geschuetzten Risk-Limits betroffen.
-      RISK_STOP_LOSS_PCT: "0.0015"
-      RISK_TAKE_PROFIT_PCT: "0.003"
-      # 240 -> 10 Minuten (2026-09-26, gleiche Anweisung wie oben): die
-      # 240-Minuten-Einstellung vom 2026-09-24 war fuer "hoehere Gewinne"
-      # bei normaler Zyklusfrequenz gedacht, nicht fuer diesen expliziten
-      # Hochfrequenz-Test. 10 Minuten + der 60s-Watchdog-Takt (siehe
-      # PositionProtectionWatchdog Default interval_seconds=60.0) liefern
-      # innerhalb von Minuten sichtbare max_holding_time-Exits, falls TP/SL
-      # vorher nicht greifen. Temporaere Test-Einstellung, siehe Bericht.
-      RISK_MAX_HOLDING_MINUTES: "10"
-      # 2026-09-26, gleiche Anweisung: Default 300s (siehe RiskLimitsConfig.
-      # trade_cooldown_seconds) haette nach jedem Trade 5 Minuten Pause
-      # fuer genau dieses (Symbol, Strategie)-Paar erzwungen - widerspricht
-      # explizit "unmittelbar neue Signale nach abgeschlossenen Trades".
-      # 20s reicht, um echtes Signal-Flackern (mehrfacher Re-Entry auf
-      # exakt demselben, noch nicht abgeschlossenen Candle) zu verhindern,
-      # ohne die Zyklen des Tests spuerbar zu verlangsamen.
-      RISK_TRADE_COOLDOWN_SECONDS: "20"
+      RISK_STOP_LOSS_PCT: "0.01"
+      RISK_TAKE_PROFIT_PCT: "0.02"
+      # 30 -> 240 Minuten (2026-09-24, operative Anweisung "hoehere
+      # Gewinne"): mit 30 Minuten erreichte in der Praxis so gut wie
+      # keine Position ueberhaupt den TP-(+2%) oder SL-(-1%)-Schwellenwert
+      # - beobachtet ueber 3h Gordon-Produktionslogs: 24/24 Closes hatten
+      # close_reason=max_holding_time, 0 via take_profit_hit/stop_loss_hit.
+      # Der TP/SL-Mechanismus war dadurch faktisch wirkungslos, jede
+      # Position wurde de facto rein zeitgetrieben (unabhaengig vom
+      # tatsaechlichen PnL) geschlossen - kein gewinnorientiertes
+      # Verhalten. 240 Minuten gibt Positionen realistisch mehr Zeit, die
+      # konfigurierten Gewinn-/Verlust-Schwellen tatsaechlich zu
+      # erreichen, BEVOR die Zeitgrenze eingreift. Kein Backtest-belegter
+      # "optimaler" Wert - eine begruendete Anpassung, keine
+      # Scheingenauigkeit. RISK_STOP_LOSS_PCT/RISK_TAKE_PROFIT_PCT selbst
+      # bewusst unveraendert (kein Beleg fuer bessere Werte vorhanden).
+      RISK_MAX_HOLDING_MINUTES: "240"
       # 0.01 -> 0.02 und 50 -> 200 (2026-09-24, gleiche Anweisung wie oben):
       # max_order_notional muss den erhoehten position_size_usd*leverage
       # (50*3=150) mit Puffer abdecken, sonst wuerde dieser Wert faelschlich
@@ -603,27 +573,6 @@ services:
       # aendern, nur um 25% zu erreichen).
       RISK_MAX_TOTAL_EXPOSURE_PCT: "0.25"
       GRID_RISK_MAX_TOTAL_EXPOSURE_PCT: "0.25"
-      # 2026-09-26, operative Anweisung ("aggressiver, hochfrequenter
-      # FUTURES PAPER TRADING TEST"): zusaetzlicher 1m-Candle-Feed fuer
-      # alle LIVE_MARKET_DATA_SYMBOLS, ADDITIV zu den bestehenden 1h/4h-
-      # Feeds (siehe SGRConfig.paper_test_fast_timeframe Docstring in
-      # sgr/core/config.py fuer die volle Begruendung/Root-Cause). Der
-      # eigentliche Hebel fuer die Zyklusfrequenz - vorher max. 1 Zyklus/
-      # Stunde pro Symbol (nur 1h-Feeds), jetzt bis zu 1 Zyklus/Minute.
-      PAPER_TEST_FAST_TIMEFRAME: "1m"
-      # 2026-09-26, konkreter live identifizierter Blocker (siehe SGRConfig.
-      # paper_test_disable_symbol_gate Docstring): SymbolStrategyGate laesst
-      # pro Symbol nur die EINE als status=active batch-validierte Strategie
-      # zu - live verifiziert: 873 von 943 validierten Symbolen (inkl. ALLER
-      # 24 LIVE_MARKET_DATA_SYMBOLS) haben Status no_valid_strategy, was
-      # dort JEDE Strategie blockiert. Ohne dieses Flag waeren trotz
-      # aktivem 1m-Feed und aktiven Strategien strukturell 0 Signale
-      # moeglich gewesen - live bestaetigt (0 strategy_engine.signal_
-      # published in >15 Min. Beobachtung). Kein Risk Control - reine
-      # Strategie-Eignungs-Filterung, versetzt alle Symbole in den
-      # ohnehin bereits existierenden fail-open "kein Batch-Ergebnis"-
-      # Zustand des Gates.
-      PAPER_TEST_DISABLE_SYMBOL_GATE: "true"
 
       SENTRY_DSN: ${SENTRY_DSN:-}
       
@@ -744,13 +693,23 @@ services:
       RISK_DEFAULT_LEVERAGE: "3"
       RISK_MAX_LEVERAGE: "3"
       RISK_POSITION_SIZE_USD: "50"
-      # 2026-09-26, zurueck auf Stufe 2 nach explizitem Revert ("Revert
-      # das TP/SL-Verhaeltnis, das war schlechter") - identische
-      # Begruendung wie im worker-gordon-Service oben.
-      RISK_STOP_LOSS_PCT: "0.0015"
-      RISK_TAKE_PROFIT_PCT: "0.003"
-      RISK_MAX_HOLDING_MINUTES: "10"
-      RISK_TRADE_COOLDOWN_SECONDS: "20"
+      RISK_STOP_LOSS_PCT: "0.01"
+      RISK_TAKE_PROFIT_PCT: "0.02"
+      # 30 -> 240 Minuten (2026-09-24, operative Anweisung "hoehere
+      # Gewinne"): mit 30 Minuten erreichte in der Praxis so gut wie
+      # keine Position ueberhaupt den TP-(+2%) oder SL-(-1%)-Schwellenwert
+      # - beobachtet ueber 3h Gordon-Produktionslogs: 24/24 Closes hatten
+      # close_reason=max_holding_time, 0 via take_profit_hit/stop_loss_hit.
+      # Der TP/SL-Mechanismus war dadurch faktisch wirkungslos, jede
+      # Position wurde de facto rein zeitgetrieben (unabhaengig vom
+      # tatsaechlichen PnL) geschlossen - kein gewinnorientiertes
+      # Verhalten. 240 Minuten gibt Positionen realistisch mehr Zeit, die
+      # konfigurierten Gewinn-/Verlust-Schwellen tatsaechlich zu
+      # erreichen, BEVOR die Zeitgrenze eingreift. Kein Backtest-belegter
+      # "optimaler" Wert - eine begruendete Anpassung, keine
+      # Scheingenauigkeit. RISK_STOP_LOSS_PCT/RISK_TAKE_PROFIT_PCT selbst
+      # bewusst unveraendert (kein Beleg fuer bessere Werte vorhanden).
+      RISK_MAX_HOLDING_MINUTES: "240"
       # 0.01 -> 0.02 und 50 -> 200 (2026-09-24, gleiche Anweisung wie oben):
       # max_order_notional muss den erhoehten position_size_usd*leverage
       # (50*3=150) mit Puffer abdecken, sonst wuerde dieser Wert faelschlich
@@ -762,15 +721,6 @@ services:
       # Limit") - identische Begruendung wie im worker-gordon-Service oben.
       RISK_MAX_TOTAL_EXPOSURE_PCT: "0.25"
       GRID_RISK_MAX_TOTAL_EXPOSURE_PCT: "0.25"
-      # 2026-09-26, operative Anweisung ("aggressiver, hochfrequenter
-      # FUTURES PAPER TRADING TEST") - identische Begruendung wie im
-      # worker-gordon-Service oben (siehe SGRConfig.paper_test_fast_
-      # timeframe Docstring in sgr/core/config.py).
-      PAPER_TEST_FAST_TIMEFRAME: "1m"
-      # 2026-09-26, konkreter live identifizierter Blocker - identische
-      # Begruendung wie im worker-gordon-Service oben (siehe SGRConfig.
-      # paper_test_disable_symbol_gate Docstring).
-      PAPER_TEST_DISABLE_SYMBOL_GATE: "true"
 
       SENTRY_DSN: ${SENTRY_DSN:-}
       
