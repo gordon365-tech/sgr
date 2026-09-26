@@ -543,21 +543,21 @@ services:
       # max_open_positions/max_total_exposure_pct/risk_per_trade_pct/
       # leverage) ist hiervon betroffen.
       #
-      # Stufe 3 (2026-09-26, explizite Nachfrage "Erhoehe die Gewinnrate,
-      # TP/SL-Verhaeltnis anpassen"): Stufe 2 (0.15%/0.3%, TP doppelt so
-      # weit wie SL) lieferte live nur ~8-9% Gewinnrate (3 von 36 bzw. 35
-      # Exits je Worker in 32 Min.) - der SL wird auf verrauschten 1m-Daten
-      # strukturell viel oefter erreicht als das doppelt so weit entfernte
-      # TP. Verhaeltnis jetzt umgekehrt: TP (0.10%) enger als SL (0.25%) -
-      # das Gewinnziel ist jetzt das naeher liegende, leichter erreichbare
-      # Level. Bewusster Trade-off (klassische Trading-Mechanik, keine
-      # Garantie): hoehere Gewinnrate/mehr sichtbare take_profit-Exits,
-      # aber kleinere Einzelgewinne und potenziell groessere Einzelverluste
-      # bei den verbleibenden stop_loss-Treffern. Weiterhin unveraendert:
-      # RISK_MAX_HOLDING_MINUTES (Zeit-Fallback bleibt bestehen), keine der
-      # 5 geschuetzten Risk-Limits betroffen.
-      RISK_STOP_LOSS_PCT: "0.0025"
-      RISK_TAKE_PROFIT_PCT: "0.001"
+      # Stufe 3 (2026-09-26, "Erhoehe die Gewinnrate, TP/SL-Verhaeltnis
+      # anpassen") wurde live getestet (TP 0.10% enger als SL 0.25%) und
+      # per explizitem Revert wieder rueckgaengig gemacht ("Revert das
+      # TP/SL-Verhaeltnis, das war schlechter"): eine erste kleine
+      # Stichprobe (14 Exits/Worker) zeigte 42.9% Gewinnrate, aber mit mehr
+      # Daten (44 Exits/Worker, ~22 Min.) fiel sie auf 26-33% zurueck, bei
+      # PnL von -1.62/-1.12 USD und einer Serie von 8 aufeinanderfolgenden,
+      # ueberdurchschnittlich grossen stop_loss-Treffern (0.10-0.26 USD
+      # statt der vorher ueblichen 0.05-0.08 USD) - schlechter als Stufe 2.
+      # Zurueck auf Stufe 2 (0.15%/0.3%, TP doppelt so weit wie SL): ~44-45%
+      # SL/TP-Anteil an allen Exits, PnL im aehnlichen Bereich, keine
+      # Serie ungewoehnlich grosser Einzelverluste beobachtet. KEINE der 5
+      # geschuetzten Risk-Limits betroffen.
+      RISK_STOP_LOSS_PCT: "0.0015"
+      RISK_TAKE_PROFIT_PCT: "0.003"
       # 240 -> 10 Minuten (2026-09-26, gleiche Anweisung wie oben): die
       # 240-Minuten-Einstellung vom 2026-09-24 war fuer "hoehere Gewinne"
       # bei normaler Zyklusfrequenz gedacht, nicht fuer diesen expliziten
@@ -744,12 +744,11 @@ services:
       RISK_DEFAULT_LEVERAGE: "3"
       RISK_MAX_LEVERAGE: "3"
       RISK_POSITION_SIZE_USD: "50"
-      # 2026-09-26, operative Anweisung ("aggressiver, hochfrequenter
-      # FUTURES PAPER TRADING TEST", Stufe 3: "Erhoehe die Gewinnrate,
-      # TP/SL-Verhaeltnis anpassen") - identische Begruendung wie im
-      # worker-gordon-Service oben.
-      RISK_STOP_LOSS_PCT: "0.0025"
-      RISK_TAKE_PROFIT_PCT: "0.001"
+      # 2026-09-26, zurueck auf Stufe 2 nach explizitem Revert ("Revert
+      # das TP/SL-Verhaeltnis, das war schlechter") - identische
+      # Begruendung wie im worker-gordon-Service oben.
+      RISK_STOP_LOSS_PCT: "0.0015"
+      RISK_TAKE_PROFIT_PCT: "0.003"
       RISK_MAX_HOLDING_MINUTES: "10"
       RISK_TRADE_COOLDOWN_SECONDS: "20"
       # 0.01 -> 0.02 und 50 -> 200 (2026-09-24, gleiche Anweisung wie oben):
