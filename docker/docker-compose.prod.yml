@@ -709,7 +709,7 @@ services:
       # "optimaler" Wert - eine begruendete Anpassung, keine
       # Scheingenauigkeit. RISK_STOP_LOSS_PCT/RISK_TAKE_PROFIT_PCT selbst
       # bewusst unveraendert (kein Beleg fuer bessere Werte vorhanden).
-      RISK_MAX_HOLDING_MINUTES: "240"
+      RISK_MAX_HOLDING_MINUTES: "10"  # PROFILE B (worker-sumo only): 240 -> 10, siehe Block unten
       # 0.01 -> 0.02 und 50 -> 200 (2026-09-24, gleiche Anweisung wie oben):
       # max_order_notional muss den erhoehten position_size_usd*leverage
       # (50*3=150) mit Puffer abdecken, sonst wuerde dieser Wert faelschlich
@@ -721,6 +721,34 @@ services:
       # Limit") - identische Begruendung wie im worker-gordon-Service oben.
       RISK_MAX_TOTAL_EXPOSURE_PCT: "0.25"
       GRID_RISK_MAX_TOTAL_EXPOSURE_PCT: "0.25"
+      #
+      # ===================================================================
+      # PAPER TEST PROFILE B (2026-09-26, "naechste grosse SGR Testphase":
+      # systematische Profitabilitaets-Untersuchung ueber Profile A-I).
+      # NUR auf worker-sumo - worker-gordon bleibt bewusst unveraendert auf
+      # Profile A (Produktionskonfiguration) als gleichzeitig laufende
+      # Vergleichs-Baseline. Isolierte Variable: Trading-Frequenz/-Turnover.
+      # UNVERAENDERT gegenueber Profile A/Produktion: RISK_POSITION_SIZE_USD
+      # (50), RISK_MAX_OPEN_POSITIONS (15), RISK_STOP_LOSS_PCT (1%),
+      # RISK_TAKE_PROFIT_PCT (2%) - keines der 5 geschuetzten Risk-Limits
+      # oder der Chance-Risiko-Parameter wird hier angefasst, ausschliesslich
+      # Signal-Frequenz und Positions-Turnover.
+      #
+      # PAPER_TEST_FAST_TIMEFRAME/PAPER_TEST_DISABLE_SYMBOL_GATE: bereits
+      # aus der vorherigen Testphase bekannte, funktionierende Mechanismen
+      # (siehe SGRConfig-Docstrings) - ohne den Symbol-Gate-Bypass wuerden
+      # strukturell 0 Signale entstehen (Capability Scan: 873/943 validierte
+      # Symbole aktuell no_valid_strategy), der 1m-Feed allein haette dann
+      # keinen messbaren Effekt. Bypass bleibt auf die 24 kuratierten
+      # Symbole beschraenkt (_PAPER_TEST_SYMBOL_GATE_ALLOWLIST in
+      # sgr/strategy/engine.py), nicht das gesamte Universum.
+      PAPER_TEST_FAST_TIMEFRAME: "1m"
+      PAPER_TEST_DISABLE_SYMBOL_GATE: "true"
+      RISK_TRADE_COOLDOWN_SECONDS: "20"
+      # RISK_MAX_HOLDING_MINUTES fuer Profile B ist weiter oben in diesem
+      # Service direkt an der bestehenden Zeile gesetzt (240 -> 10), um
+      # keinen doppelten YAML-Key zu erzeugen.
+      # ===================================================================
 
       SENTRY_DSN: ${SENTRY_DSN:-}
       
