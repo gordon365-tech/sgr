@@ -109,7 +109,13 @@ class OrderModel(Base):
     id: Mapped[str] = mapped_column(PG_UUID(as_uuid=False), primary_key=True)
     signal_id: Mapped[str] = mapped_column(PG_UUID(as_uuid=False), nullable=False)
     exchange_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    symbol: Mapped[str] = mapped_column(String(20), nullable=False)
+    # 20 -> 40 (2026-09-26, siehe Migration 0011_orders_symbol_width):
+    # anders als positions.symbol/trades.symbol speichert diese Spalte die
+    # volle "{symbol}:{exchange}"-Form (z.B. "1000FLOKI/USDT:binance",
+    # 23 Zeichen) - die Binance-"1000X"-Namenskonvention fuer sehr
+    # niedrigpreisige Coins ueberschritt das alte VARCHAR(20), live
+    # bestaetigt per fehlgeschlagenem Order-Insert.
+    symbol: Mapped[str] = mapped_column(String(40), nullable=False)
     exchange: Mapped[str] = mapped_column(String(20), nullable=False)
     side: Mapped[str] = mapped_column(String(10), nullable=False)
     order_type: Mapped[str] = mapped_column(String(20), nullable=False)
