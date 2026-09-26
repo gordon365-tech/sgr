@@ -56,6 +56,48 @@ log = get_logger(__name__)
 # Minimale Konfidenz für Signal-Output
 _MIN_SIGNAL_CONFIDENCE = 0.50
 
+# Scope-Einschraenkung fuer SGRConfig.paper_test_disable_symbol_gate
+# (2026-09-26, explizite Nutzer-Entscheidung nach Live-Befund): der Bypass
+# darf NICHT auf das gesamte entdeckte Symbol-Universum (~558 Symbole)
+# wirken, wie es urspruenglich der Fall war - live beobachtet u.a.
+# USDC/USDT (Stablecoin-Paar, keine echte Preisbewegung) und diverse sehr
+# illiquide Coins, die dort nur Gebuehren ohne jede Handelschance
+# erzeugten. Muss mit sgr/api/main.py::LIVE_MARKET_DATA_SYMBOLS synchron
+# gehalten werden (settle-freie Form ".../USDT", nicht ".../USDT:USDT" -
+# identisch zu Symbol.ccxt_symbol, dem Format, das SymbolStrategyGate.
+# is_allowed() tatsaechlich erhaelt). Bewusst hier dupliziert statt aus
+# sgr.api.main importiert - kein Cross-Package-Import von sgr.strategy
+# (Business-Logik) nach sgr.api (Application-Entrypoint) fuer eine
+# temporaere, per Default deaktivierte Testfunktion.
+_PAPER_TEST_SYMBOL_GATE_ALLOWLIST = frozenset(
+    {
+        "BTC/USDT",
+        "ETH/USDT",
+        "SOL/USDT",
+        "XRP/USDT",
+        "BNB/USDT",
+        "ADA/USDT",
+        "AVAX/USDT",
+        "DOT/USDT",
+        "NEAR/USDT",
+        "LINK/USDT",
+        "FET/USDT",
+        "RENDER/USDT",
+        "INJ/USDT",
+        "SUI/USDT",
+        "APT/USDT",
+        "TIA/USDT",
+        "1000PEPE/USDT",
+        "DOGE/USDT",
+        "1000SHIB/USDT",
+        "1000FLOKI/USDT",
+        "WIF/USDT",
+        "1000BONK/USDT",
+        "XAU/USDT",
+        "XAG/USDT",
+    }
+)
+
 
 class StrategyEngine:
     """
@@ -204,10 +246,14 @@ class StrategyEngine:
         symbol_str = features.symbol.ccxt_symbol
 
         # Siehe SGRConfig.paper_test_disable_symbol_gate Docstring: setzt
-        # ALLE Symbole explizit in den bereits existierenden, fail-open
-        # "kein Batch-Ergebnis"-Zustand des Gates zurueck (Default False =
-        # unveraendertes Verhalten).
-        symbol_gate_disabled = get_config().paper_test_disable_symbol_gate
+        # NUR Symbole aus _PAPER_TEST_SYMBOL_GATE_ALLOWLIST explizit in den
+        # bereits existierenden, fail-open "kein Batch-Ergebnis"-Zustand des
+        # Gates zurueck (Scope-Einschraenkung 2026-09-26, siehe dortigen
+        # Kommentar) - Default False = unveraendertes Verhalten.
+        symbol_gate_disabled = (
+            get_config().paper_test_disable_symbol_gate
+            and symbol_str in _PAPER_TEST_SYMBOL_GATE_ALLOWLIST
+        )
 
         # 4. Alle Strategien synchron auswerten (pure functions, kein I/O)
         signals: list[Signal] = []

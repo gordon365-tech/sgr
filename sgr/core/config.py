@@ -413,6 +413,17 @@ class SGRConfig(BaseSettings):
     # existierenden, fail-open Zustand - kein neuer Bypass-Mechanismus,
     # sondern derselbe, der fuer jedes frisch entdeckte Symbol ohnehin
     # gilt. Default False = deaktiviert, identisches Verhalten zu vorher.
+    #
+    # Scope-Einschraenkung (2026-09-26, explizite Nutzer-Entscheidung nach
+    # Live-Befund): dieses Flag wirkt bewusst NICHT auf das gesamte
+    # entdeckte Symbol-Universum, obwohl das technisch der Fall waere (die
+    # Pruefung unten in StrategyEngine.process() kennt keine Symbol-
+    # Auswahl) - live beobachtet wurden dabei u.a. Trades auf USDC/USDT
+    # (Stablecoin-Paar, keine echte Preisbewegung) und diverse sehr
+    # illiquide Coins, die nur Gebuehren ohne jede Handelschance erzeugten.
+    # Die eigentliche Scope-Begrenzung auf die 24 LIVE_MARKET_DATA_SYMBOLS
+    # sitzt daher in sgr/strategy/engine.py
+    # (_PAPER_TEST_SYMBOL_GATE_ALLOWLIST), nicht hier in der Config.
     paper_test_disable_symbol_gate: bool = Field(default=False)
 
     # Welche Exchange der Lifecycle standardmaessig verwendet (Market Data

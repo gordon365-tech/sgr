@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 from sgr.core.types import ExchangeID, MarketRegime, SignalDirection, TradingMode
@@ -55,10 +56,12 @@ def _trending_indicators(**overrides) -> IndicatorValues:
 
 
 def _feature_set(
-    indicators: IndicatorValues, regime: MarketRegime = MarketRegime.UNKNOWN
+    indicators: IndicatorValues,
+    regime: MarketRegime = MarketRegime.UNKNOWN,
+    symbol: Symbol | None = None,
 ) -> FeatureSet:
     return FeatureSet(
-        symbol=_symbol(),
+        symbol=symbol or _symbol(),
         timestamp=datetime.now(tz=UTC),
         timeframe="1h",
         close=Decimal("50000"),
@@ -349,6 +352,74 @@ class TestSymbolGateIntegration:
             signal = await engine.process("binance:BTC/USDT", "1h")
 
             assert signal is not None
+        finally:
+            registry.clear()
+            gate._active_strategy_by_symbol.clear()
+
+    async def test_paper_test_disable_symbol_gate_bypasses_for_allowlisted_symbol(
+        self, monkeypatch
+    ) -> None:
+        """SGRConfig.paper_test_disable_symbol_gate=True muss das Gate fuer
+        ein Symbol aus _PAPER_TEST_SYMBOL_GATE_ALLOWLIST (z.B. BTC/USDT)
+        umgehen, obwohl eine andere Strategie als "best" markiert ist."""
+        registry = _fresh_registry()
+        gate = SymbolStrategyGate.get()
+        gate._active_strategy_by_symbol.clear()
+        try:
+            strategy = SignalingStrategy(SignalDirection.LONG)
+            registry.register_instance(strategy)
+            await registry.activate(strategy.name)
+            gate._active_strategy_by_symbol["BTC/USDT"] = "some_other_strategy"
+
+            fs = _feature_set(_trending_indicators())
+            store = _fake_feature_store(fs)
+            engine = StrategyEngine(TradingMode.PAPER, store, registry=registry)
+            monkeypatch.setattr("sgr.strategy.engine.record_market_regime", MagicMock())
+            monkeypatch.setattr("sgr.strategy.engine.record_strategy_evaluation", MagicMock())
+            monkeypatch.setattr("sgr.strategy.engine.record_signal_generated", MagicMock())
+            monkeypatch.setattr(gate, "refresh_if_stale", AsyncMock())
+            monkeypatch.setattr(
+                "sgr.strategy.engine.get_config",
+                lambda: SimpleNamespace(paper_test_disable_symbol_gate=True),
+            )
+
+            signal = await engine.process("binance:BTC/USDT", "1h")
+
+            assert signal is not None
+        finally:
+            registry.clear()
+            gate._active_strategy_by_symbol.clear()
+
+    async def test_paper_test_disable_symbol_gate_does_not_bypass_other_symbols(
+        self, monkeypatch
+    ) -> None:
+        """Die Scope-Einschraenkung (2026-09-26, Nutzer-Entscheidung) muss
+        greifen: ein Symbol ausserhalb von _PAPER_TEST_SYMBOL_GATE_ALLOWLIST
+        (z.B. USDC/USDT) bleibt blockiert, selbst mit dem Flag aktiv."""
+        registry = _fresh_registry()
+        gate = SymbolStrategyGate.get()
+        gate._active_strategy_by_symbol.clear()
+        try:
+            strategy = SignalingStrategy(SignalDirection.LONG)
+            registry.register_instance(strategy)
+            await registry.activate(strategy.name)
+            gate._active_strategy_by_symbol["USDC/USDT"] = "some_other_strategy"
+
+            usdc_symbol = Symbol(base="USDC", quote="USDT", exchange=ExchangeID.BINANCE)
+            fs = _feature_set(_trending_indicators(), symbol=usdc_symbol)
+            store = _fake_feature_store(fs)
+            engine = StrategyEngine(TradingMode.PAPER, store, registry=registry)
+            monkeypatch.setattr("sgr.strategy.engine.record_market_regime", MagicMock())
+            monkeypatch.setattr("sgr.strategy.engine.record_strategy_evaluation", MagicMock())
+            monkeypatch.setattr(gate, "refresh_if_stale", AsyncMock())
+            monkeypatch.setattr(
+                "sgr.strategy.engine.get_config",
+                lambda: SimpleNamespace(paper_test_disable_symbol_gate=True),
+            )
+
+            signal = await engine.process("binance:USDC/USDT", "1h")
+
+            assert signal is None
         finally:
             registry.clear()
             gate._active_strategy_by_symbol.clear()
