@@ -542,8 +542,22 @@ services:
       # KEINE der 5 explizit geschuetzten Groessen (position_size_usd/
       # max_open_positions/max_total_exposure_pct/risk_per_trade_pct/
       # leverage) ist hiervon betroffen.
-      RISK_STOP_LOSS_PCT: "0.0015"
-      RISK_TAKE_PROFIT_PCT: "0.003"
+      #
+      # Stufe 3 (2026-09-26, explizite Nachfrage "Erhoehe die Gewinnrate,
+      # TP/SL-Verhaeltnis anpassen"): Stufe 2 (0.15%/0.3%, TP doppelt so
+      # weit wie SL) lieferte live nur ~8-9% Gewinnrate (3 von 36 bzw. 35
+      # Exits je Worker in 32 Min.) - der SL wird auf verrauschten 1m-Daten
+      # strukturell viel oefter erreicht als das doppelt so weit entfernte
+      # TP. Verhaeltnis jetzt umgekehrt: TP (0.10%) enger als SL (0.25%) -
+      # das Gewinnziel ist jetzt das naeher liegende, leichter erreichbare
+      # Level. Bewusster Trade-off (klassische Trading-Mechanik, keine
+      # Garantie): hoehere Gewinnrate/mehr sichtbare take_profit-Exits,
+      # aber kleinere Einzelgewinne und potenziell groessere Einzelverluste
+      # bei den verbleibenden stop_loss-Treffern. Weiterhin unveraendert:
+      # RISK_MAX_HOLDING_MINUTES (Zeit-Fallback bleibt bestehen), keine der
+      # 5 geschuetzten Risk-Limits betroffen.
+      RISK_STOP_LOSS_PCT: "0.0025"
+      RISK_TAKE_PROFIT_PCT: "0.001"
       # 240 -> 10 Minuten (2026-09-26, gleiche Anweisung wie oben): die
       # 240-Minuten-Einstellung vom 2026-09-24 war fuer "hoehere Gewinne"
       # bei normaler Zyklusfrequenz gedacht, nicht fuer diesen expliziten
@@ -731,11 +745,11 @@ services:
       RISK_MAX_LEVERAGE: "3"
       RISK_POSITION_SIZE_USD: "50"
       # 2026-09-26, operative Anweisung ("aggressiver, hochfrequenter
-      # FUTURES PAPER TRADING TEST", Stufe 2: "SL/TP enger stellen fuer
-      # mehr echte Treffer") - identische Begruendung wie im worker-gordon-
-      # Service oben.
-      RISK_STOP_LOSS_PCT: "0.0015"
-      RISK_TAKE_PROFIT_PCT: "0.003"
+      # FUTURES PAPER TRADING TEST", Stufe 3: "Erhoehe die Gewinnrate,
+      # TP/SL-Verhaeltnis anpassen") - identische Begruendung wie im
+      # worker-gordon-Service oben.
+      RISK_STOP_LOSS_PCT: "0.0025"
+      RISK_TAKE_PROFIT_PCT: "0.001"
       RISK_MAX_HOLDING_MINUTES: "10"
       RISK_TRADE_COOLDOWN_SECONDS: "20"
       # 0.01 -> 0.02 und 50 -> 200 (2026-09-24, gleiche Anweisung wie oben):
