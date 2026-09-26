@@ -372,6 +372,49 @@ class SGRConfig(BaseSettings):
     # PAPER_INITIAL_CAPITAL env var konfigurierbar.
     paper_initial_capital: Decimal = Field(default=Decimal("10000"), gt=0)
 
+    # 2026-09-26, operative Anweisung ("aggressiver, hochfrequenter FUTURES
+    # PAPER TRADING TEST"): zusaetzliche, kuerzere Candle-Timeframe-
+    # Subscription fuer ALLE LIVE_MARKET_DATA_SYMBOLS, ADDITIV zu den
+    # bestehenden 1h(/4h fuer BTC)-Feeds (siehe sgr/api/main.py Schritt 9) -
+    # die 1h/4h-Feeds bleiben unveraendert bestehen. Root Cause fuer die
+    # zuvor beobachteten 30-60-Minuten-Zyklen: CandleEvent (und damit jeder
+    # Orchestrator-/GridScheduler-Zyklus) feuert nur bei Bar-Close des
+    # jeweiligen Timeframes - bei ausschliesslich 1h-Feeds ist das
+    # strukturell hoechstens 1x/Stunde pro Symbol. MarketDataEngine/
+    # SymbolFeed unterstuetzen kuerzere Timeframes technisch bereits
+    # vollstaendig (siehe _POLL_INTERVALS in sgr/market_data/engine.py,
+    # inkl. "1m") - es fehlte nur eine Subscription dafuer. None (Default)
+    # = deaktiviert, identisches Verhalten zu vorher fuer jedes bestehende
+    # Deployment, das diese Variable nicht setzt. Betrifft AUSSCHLIESSLICH
+    # die Signal-/Cycle-Frequenz, NICHT die 5 explizit geschuetzten Risk-
+    # Limits (position_size_usd/max_open_positions/max_total_exposure_pct/
+    # risk_per_trade_pct/leverage) - die bleiben durch RiskEngine/
+    # GridRiskEngine unveraendert durchgesetzt, unabhaengig davon, wie oft
+    # ein Zyklus laeuft.
+    paper_test_fast_timeframe: str | None = Field(default=None)
+
+    # 2026-09-26, gleiche operative Anweisung, konkreter identifizierter
+    # Blocker: SymbolStrategyGate (sgr/strategy/symbol_gate.py) laesst pro
+    # Symbol NUR die eine, per Batch-Validierung als "aktiv" markierte
+    # Strategie zu - jeder andere Status (no_valid_strategy/
+    # insufficient_data/technical_failure) wird intern zu None gemappt,
+    # was JEDE Strategie fuer dieses Symbol blockiert (siehe dortigen
+    # Docstring "Fallback-Prinzip"). Live-Befund: von 943 batch-
+    # validierten Symbolen haben 873 den Status no_valid_strategy - alle
+    # 24 LIVE_MARKET_DATA_SYMBOLS sind darunter. Das Gate blockierte damit
+    # strukturell 100% der direktionalen Signal-Generierung fuer den
+    # aggressiven Paper-Test, komplett unabhaengig von min_confidence,
+    # Cooldown oder Timeframe. Kein Risk Control (keine Positionsgroesse/
+    # Exposure/Leverage/Kill-Switch betroffen) - reine Strategie-
+    # Eignungs-Filterung, die auf demselben Fail-Safe-Fallback-Prinzip
+    # beruht wie ein noch nie batch-validiertes Symbol ("kein Ergebnis ->
+    # Gate erlaubt alles", siehe SymbolStrategyGate-Docstring). Dieses
+    # Flag versetzt EXPLIZIT ALLE Symbole in genau diesen bereits
+    # existierenden, fail-open Zustand - kein neuer Bypass-Mechanismus,
+    # sondern derselbe, der fuer jedes frisch entdeckte Symbol ohnehin
+    # gilt. Default False = deaktiviert, identisches Verhalten zu vorher.
+    paper_test_disable_symbol_gate: bool = Field(default=False)
+
     # Welche Exchange der Lifecycle standardmaessig verwendet (Market Data
     # Subscriptions + Exchange Pool). Default bleibt PIONEX fuer
     # Abwaertskompatibilitaet; per PRIMARY_EXCHANGE=binance env var

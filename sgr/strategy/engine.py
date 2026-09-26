@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 
+from sgr.core.config import get_config
 from sgr.core.event_bus import get_event_bus
 from sgr.core.logging import get_logger
 from sgr.core.types import (
@@ -202,10 +203,16 @@ class StrategyEngine:
             log.debug("strategy_engine.symbol_gate_refresh_failed", error=str(e))
         symbol_str = features.symbol.ccxt_symbol
 
+        # Siehe SGRConfig.paper_test_disable_symbol_gate Docstring: setzt
+        # ALLE Symbole explizit in den bereits existierenden, fail-open
+        # "kein Batch-Ergebnis"-Zustand des Gates zurueck (Default False =
+        # unveraendertes Verhalten).
+        symbol_gate_disabled = get_config().paper_test_disable_symbol_gate
+
         # 4. Alle Strategien synchron auswerten (pure functions, kein I/O)
         signals: list[Signal] = []
         for strategy in active:
-            if not gate.is_allowed(symbol_str, strategy.name):
+            if not symbol_gate_disabled and not gate.is_allowed(symbol_str, strategy.name):
                 continue
             try:
                 signal = strategy.generate_signal(context)

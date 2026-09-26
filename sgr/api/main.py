@@ -843,8 +843,15 @@ async def lifespan(app: FastAPI, role: LifespanRole = "worker") -> AsyncIterator
         # MarketDataEngine.start()), der Poll-Loop des betroffenen Feeds
         # laeuft trotzdem weiter und versucht es bei jedem Intervall erneut.
         if pool._adapters:
+            # Optionaler, zusaetzlicher Fast-Timeframe fuer den aggressiven
+            # Paper-Trading-Test (siehe SGRConfig.paper_test_fast_timeframe
+            # Docstring) - additiv zu den bestehenden 1h/4h-Feeds, nicht an
+            # deren Stelle.
+            fast_timeframe = config.paper_test_fast_timeframe
             for symbol in LIVE_MARKET_DATA_SYMBOLS:
                 timeframes = ["1h", "4h"] if symbol == "BTC/USDT:USDT" else ["1h"]
+                if fast_timeframe is not None and fast_timeframe not in timeframes:
+                    timeframes = [fast_timeframe, *timeframes]
                 md_engine.subscribe(symbol, primary_exchange, timeframes)
             await md_engine.start()
 
@@ -999,6 +1006,23 @@ async def lifespan(app: FastAPI, role: LifespanRole = "worker") -> AsyncIterator
             # Schleife weiter oben in dieser Funktion.
             if "BTC/USDT" in binance_symbols:
                 target.add(("BTC/USDT:USDT", "4h"))
+            # Root-Cause-Fund (2026-09-26, aggressiver Paper-Trading-Test):
+            # dieser reconcile-Task laeuft periodisch (on_discovery-Callback)
+            # und ersetzt den Feed-Bestand komplett durch "target" - ohne
+            # diesen Block wurde der weiter oben additiv abonnierte
+            # paper_test_fast_timeframe-Feed (z.B. "1m") beim naechsten
+            # Reconcile-Lauf sofort wieder entfernt (live beobachtet:
+            # "market_data.reconcile.applied" mit removed=24, exakt die
+            # Anzahl der LIVE_MARKET_DATA_SYMBOLS), da "target" ihn nicht
+            # kannte. Identische additive Logik wie in der urspruenglichen
+            # Subscription-Schleife oben - nur fuer Symbole, die im
+            # aktuellen binance_symbols-Snapshot noch aktiv sind.
+            fast_timeframe = config.paper_test_fast_timeframe
+            if fast_timeframe is not None:
+                full_form_symbols = {f"{symbol}:USDT" for symbol in binance_symbols}
+                for symbol in LIVE_MARKET_DATA_SYMBOLS:
+                    if symbol in full_form_symbols:
+                        target.add((symbol, fast_timeframe))
             await md_engine.reconcile_subscriptions(target, ExchangeID.BINANCE)
 
         asset_universe_engine = AssetUniverseEngine(
